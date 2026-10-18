@@ -1,0 +1,14 @@
+# Private collections and secrets: never commit.
+.local/
+http-client.private.env.json
+
+# Build output
+/dist/
+/bin/
+/vegtam
+*.test
+coverage.out
+
+# macOS
+.DS_Store
+._*
