@@ -32,3 +32,28 @@ and why; a later entry may supersede an earlier one.
 Flags are GNU style: `--json`, `-e dev`. The single-dash long form the
 skeleton accepted (`-json`) is gone. `--json` is a global flag. Commands
 live in `internal/cli`; `cmd/vegtam` only wires up the process.
+
+## 2026-10-18: strict parsing, secrets by reference, redirects
+
+- **Strict .http parsing.** A line or directive outside the supported
+  subset is an error with file and line, not skipped. A skipped
+  `# @no-redirect`, or a response handler sent as body text, changes what
+  goes on the wire without telling anyone; a script or an agent can act on
+  an error. Lifting a restriction later stays compatible, adding one would
+  not.
+- **Secrets by reference.** Resolving a request yields `core.Text`: literal
+  segments and `Secret{Name}` segments. Values stay in the environment
+  loader and are inserted only when `exec` builds the request for the wire.
+  Requests are shown with `Text.Masked()` (`Bearer {{token}}`); text that may
+  carry a value back, such as errors from the network stack and response
+  headers and bodies, goes through `core.Masker` (`***`, URL- and
+  JSON-escaped forms included). The first layer cannot leak what it never
+  held; the second catches values that come back.
+- **Redirects.** Credentials and secret-bearing headers are dropped when a
+  redirect leaves the first origin (scheme, host and port) and stay dropped
+  for the rest of the chain. net/http alone keeps them for subdomains and
+  for another port on the same host, and it sends the previous URL, query
+  secrets included, as `Referer`.
+- **Requests by position.** `file.http#2` addresses the second request, so
+  requests without `# @name` can be run alone. Names may not be numbers,
+  which keeps the two forms apart.

@@ -5,6 +5,12 @@ vegtam is a local-first CLI/TUI API client that runs requests from plain
 
 **Status:** early development. Nothing is stable yet.
 
+## Documentation
+
+- [docs/FORMAT.md](docs/FORMAT.md): the supported `.http` subset,
+  environment files and secrets.
+- [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and why.
+
 ## Build
 
 Requires Go 1.27 or newer.
