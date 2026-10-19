@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -40,8 +41,8 @@ type CommandFile struct {
 
 // Command is how {{$cmd NAME}} gets its value: a program run with its
 // arguments, without a shell, in the directory of the command file, with
-// the environment of vegtam and no input. Its output, less one final line
-// break, is the value; it is a secret.
+// the environment of vegtam, no input and, on Unix, no terminal. Its
+// output, less one final line break, is the value; it is a secret.
 type Command struct {
 	Argv    []string
 	Timeout time.Duration
@@ -282,11 +283,23 @@ func (l *Loader) run(ctx context.Context, cf *commands, name string) (string, er
 	return v, err
 }
 
+// noTerminal ends the error of a command that may have waited for input
+// that never came.
+const noTerminal = " (commands run with no input and no terminal: a command that asks for a password " +
+	"must get it from an agent, a cache or a window of its own)"
+
 func runCommand(ctx context.Context, dir string, c Command) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Argv[0], c.Argv[1:]...) //nolint:gosec // G204: the argv of a trusted command file, without a shell
 	cmd.Dir = dir
+	// No input: Stdin stays nil, the null device. And no terminal: a
+	// session of its own has none, so a command that opens /dev/tty to
+	// ask for a password fails at once, rather than wait for an answer
+	// that the terminal interface, which reads every key, would take.
+	cmd.SysProcAttr = detached()
+	// Run out of time or canceled, it goes with what it started.
+	cmd.Cancel = func() error { return kill(cmd.Process) }
 	stdout, stderr := &capped{max: maxStdout}, &capped{max: maxStderr}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	// A child left behind with the output open does not hold the run.
@@ -300,17 +313,19 @@ func runCommand(ctx context.Context, dir string, c Command) (string, error) {
 	prog := c.Argv[0]
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return "", fmt.Errorf("%s did not finish within %s", prog, c.Timeout)
+		return "", fmt.Errorf("%s did not finish within %s%s", prog, c.Timeout, noTerminal)
 	case ctx.Err() != nil:
 		return "", fmt.Errorf("%s: %w", prog, ctx.Err())
+	case errors.Is(err, exec.ErrNotFound), errors.Is(err, fs.ErrNotExist):
+		return "", fmt.Errorf("%s: %w", prog, err)
 	case err != nil:
 		if msg := strings.TrimSpace(strings.ToValidUTF8(stderr.String(), "")); msg != "" {
 			if stderr.over {
 				msg += "..."
 			}
-			return "", fmt.Errorf("%s: %w: %s", prog, err, msg)
+			return "", fmt.Errorf("%s: %w: %s%s", prog, err, msg, noTerminal)
 		}
-		return "", fmt.Errorf("%s: %w", prog, err)
+		return "", fmt.Errorf("%s: %w%s", prog, err, noTerminal)
 	case stdout.over:
 		return "", fmt.Errorf("%s printed more than %d bytes", prog, maxStdout)
 	}
@@ -319,7 +334,7 @@ func runCommand(ctx context.Context, dir string, c Command) (string, error) {
 		out = strings.TrimSuffix(s, "\r")
 	}
 	if out == "" {
-		return "", fmt.Errorf("%s printed nothing", prog)
+		return "", fmt.Errorf("%s printed nothing%s", prog, noTerminal)
 	}
 	return out, nil
 }

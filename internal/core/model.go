@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 )
 
@@ -53,12 +54,21 @@ type Header struct {
 	Value string
 }
 
-// Directive is an "# @assert", "# @capture" or "# @tag" comment, kept as
-// written for the stages that act on it.
+// Directive is an "# @assert", "# @capture", "# @tag" or "# @no-log"
+// comment, kept as written for the stages that act on it.
 type Directive struct {
-	Kind  string // "assert", "capture" or "tag"
-	Value string
+	Kind  string // "assert", "capture", "tag" or NoLog
+	Value string // "" for NoLog
 	Line  int
+}
+
+// NoLog is the kind of the "# @no-log" directive, which JetBrains, kulala
+// and httpyac know too: the history of runs does not keep the request.
+const NoLog = "no-log"
+
+// NoLog reports whether r has an "# @no-log" directive.
+func (r *Request) NoLog() bool {
+	return slices.ContainsFunc(r.Directives, func(d Directive) bool { return d.Kind == NoLog })
 }
 
 // Source locates a line in a .http file.

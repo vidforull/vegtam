@@ -102,7 +102,7 @@ func (fx *fixture) handler() http.Handler {
 	})
 	mux.HandleFunc("/plain", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprint(w, "plain\x1b]0;title\x07 text")
+		fmt.Fprint(w, "plain\x1b]0;title\x07 \u202etext\u200b")
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fx.mu.Lock()

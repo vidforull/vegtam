@@ -60,11 +60,13 @@ keeps the test passing and extends it to what it adds.
 |---|---|
 | No secret value reaches stdout or stderr, in any form, error, panic or `--verbose` output included | `TestNoSecretInOutput`, `TestPanicIsMasked` (`internal/cli`), `TestErrorsHideSecrets` (`internal/core/exec`) |
 | No view of the terminal interface holds a secret value, in any layout or state | `TestNoSecretInTUI`, `TestTUIPanicIsMasked` |
-| A redirect to another origin drops secret headers and does not resend a secret body; a redirect from https to http is refused | `TestRedirectDropsSecrets`, `TestRedirectSecretBody`, `TestRedirectDowngrade` |
-| A path in a `.http` file does not lead outside its directory | `TestPrepareBodyFileStaysInside` |
+| The history of runs holds no secret value, in any form, and nothing of a dry run or a request with `@no-log` | `TestHistoryNoSecrets`, `TestRunNoHistory` (`internal/cli`), `TestHistory` (`internal/core/session`) |
+| A redirect to another origin drops secret headers and does not resend a secret body; no redirect sends the URL it came from as the Referer; a redirect from https to http is refused | `TestRedirectDropsSecrets`, `TestRedirectSecretBody`, `TestRedirectDowngrade` |
+| A path in a `.http` file does not lead outside its directory, and a body file is a regular file of 16 MiB at most, checked before it is opened | `TestPrepareBodyFileStaysInside`, `TestPrepareBodyFileKind`, `TestPrepareBodyFileFIFO`, `TestPreviewFIFO` |
 | A response body is read up to a limit, a request up to a timeout | `TestMaxBody`, `TestErrors` |
-| Text for a terminal holds no escape sequence | `FuzzPrintable`, `TestPrintErrorEscapes`, `TestTUIEscapes` |
-| Files are written whole, secrets readable by their owner only | `TestImportPostmanExisting`, `TestStore` |
+| Text for a terminal holds no escape sequence and no invisible character, and is masked before it is escaped | `FuzzPrintable`, `TestPrintable`, `TestPrintErrorEscapes`, `TestTUIEscapes`, `TestInvisibleSecretIsMasked` |
+| Files are written whole, secrets readable by their owner only; the history is added to a line at a time, readable by its owner only | `TestImportPostmanExisting`, `TestStore`, `TestAdd`, `TestRotate`, `TestStaysInside` (`internal/core/history`) |
+| A `{{$cmd NAME}}` gets no input and no terminal, and one that asks for either fails at once | `TestCommandNoInput` |
 | Every goroutine has an owner that stops it and waits for it | `goleak.VerifyTestMain` in `internal/tui`, the one package that starts one; `TestCancel`, `TestRun` |
 
 Secrets are not taken from command-line flags: they come from the

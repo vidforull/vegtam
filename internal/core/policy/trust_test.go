@@ -79,6 +79,43 @@ func TestStoreRefuses(t *testing.T) {
 	if err := (&Store{err: os.ErrNotExist}).Trust("/a", ""); err == nil {
 		t.Error("a store without a path: want an error")
 	}
+
+	// A store that is a link to a file elsewhere trusts nothing: the
+	// directory checked would not be the one the file is in.
+	elsewhere := filepath.Join(t.TempDir(), "trust.json")
+	if err := os.WriteFile(elsewhere, []byte(`{"trusted": {"/a/http-client.cmd.json": ""}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, path); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := NewStore(path).Check("/a/http-client.cmd.json", ""); got != Untrusted || err == nil {
+		t.Errorf("a link to a store elsewhere: %s, %v", got, err)
+	}
+}
+
+func TestHistoryDir(t *testing.T) {
+	t.Setenv("VEGTAM_NO_HISTORY", "")
+	t.Setenv("XDG_DATA_HOME", "/xdg")
+	if got, err := HistoryDir(); got != "/xdg/vegtam" || err != nil {
+		t.Errorf("with XDG_DATA_HOME: %s, %v", got, err)
+	}
+	t.Setenv("XDG_DATA_HOME", "rel")
+	t.Setenv("HOME", "/home/ada")
+	if got, err := HistoryDir(); got != "/home/ada/.local/share/vegtam" || err != nil {
+		t.Errorf("without XDG_DATA_HOME: %s, %v", got, err)
+	}
+	t.Setenv("HOME", "")
+	if got, err := HistoryDir(); err == nil || !strings.Contains(err.Error(), "set XDG_DATA_HOME or HOME") {
+		t.Errorf("without HOME: %q, %v", got, err)
+	}
+	t.Setenv("VEGTAM_NO_HISTORY", "1")
+	if got, err := HistoryDir(); got != "" || err != nil {
+		t.Errorf("with VEGTAM_NO_HISTORY: %q, %v", got, err)
+	}
 }
 
 func TestDefaultStore(t *testing.T) {

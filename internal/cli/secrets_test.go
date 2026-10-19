@@ -10,6 +10,7 @@ import (
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/env"
+	"github.com/vidforull/vegtam/internal/core/output"
 	"github.com/vidforull/vegtam/internal/tui"
 )
 
@@ -195,5 +196,22 @@ func TestTUIPanicIsMasked(t *testing.T) {
 	want := "vegtam: internal error: cannot show ***\ngoroutine 7 [running]:\ntui.(*Model).View\n"
 	if stderr.String() != want {
 		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+// TestInvisibleSecretIsMasked checks a secret value that holds invisible
+// characters, such as a token read from a file saved with a byte order
+// mark: it is masked before the terminal escapes are shown, which would
+// hide it from the masker.
+func TestInvisibleSecretIsMasked(t *testing.T) {
+	secret := "\ufeffB0m-s3cr\u00adet"
+	var stderr strings.Builder
+	cfg := &Config{Stderr: &stderr, secrets: func() *core.Masker { return core.NewMasker([]string{secret}) }}
+	cfg.errOut = masked{&stderr, cfg}
+	cfg.internalError("cannot show "+secret, []byte("goroutine 1 [running]:\n"))
+	cfg.printError(&output.Error{Kind: core.KindVariable, Message: "bad " + secret})
+	want := "vegtam: internal error: cannot show ***\ngoroutine 1 [running]:\nvegtam: bad ***\n"
+	if got := stderr.String(); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
 	}
 }

@@ -132,8 +132,12 @@ func (p *parser) comment(n int, t string) error {
 	switch {
 	case kind == "name":
 		return p.setName(n, value)
+	case kind == core.NoLog:
+		if value != "" {
+			return p.errorf(n, "@%s takes no value", kind)
+		}
 	case !directives[kind]:
-		return p.errorf(n, "unknown directive @%s (supported: @name, @assert, @capture, @tag)", kind)
+		return p.errorf(n, "unknown directive @%s (supported: @name, @assert, @capture, @tag, @no-log)", kind)
 	case value == "":
 		return p.errorf(n, "@%s needs a value", kind)
 	}

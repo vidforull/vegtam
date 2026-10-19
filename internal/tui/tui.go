@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/history"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
 	"github.com/vidforull/vegtam/internal/core/output"
 	"github.com/vidforull/vegtam/internal/core/policy"
@@ -27,8 +28,9 @@ type Options struct {
 	Timeout   time.Duration
 	MaxBody   int64
 	UserAgent string
-	Input     io.Reader // a terminal
-	Output    io.Writer // a terminal
+	History   *history.Log // what the requests sent go into, and h lists; nil for none
+	Input     io.Reader    // a terminal
+	Output    io.Writer    // a terminal
 }
 
 // Panic is a panic inside the interface. Bubble Tea would print its value
@@ -46,6 +48,7 @@ func caught(v any) *Panic { return &Panic{Value: v, Stack: debug.Stack()} }
 // row is a line of the tree: a .http file, or one of its requests.
 type row struct {
 	path  string
+	abs   string // path made absolute, as the history names it
 	label string
 	in    string     // the label of the file, for a request
 	file  *core.File // nil if the file does not parse
@@ -60,14 +63,24 @@ func New(opts Options) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Model{opts: opts, env: opts.Env, keys: newKeys(), cursor: -1}
+	m := &Model{opts: opts, env: opts.Env, keys: newKeys(), cursor: -1, now: time.Now}
+	if m.base, err = filepath.Abs(opts.Path); err != nil {
+		return nil, core.Errorf(core.KindUsage, core.Source{}, "%v", err)
+	}
+	if len(paths) == 1 && paths[0] == opts.Path { // a file
+		m.base = filepath.Dir(m.base)
+	}
 	for _, path := range paths {
 		label := path
 		if rel, err := filepath.Rel(opts.Path, path); err == nil && rel != "." {
 			label = rel
 		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return nil, core.Errorf(core.KindUsage, core.Source{}, "%v", err)
+		}
 		f, err := httpfile.ParseFile(path)
-		m.rows = append(m.rows, row{path: path, label: label, file: f, index: -1, err: err})
+		m.rows = append(m.rows, row{path: path, abs: abs, label: label, file: f, index: -1, err: err})
 		if err != nil {
 			continue
 		}
@@ -79,13 +92,13 @@ func New(opts Options) (*Model, error) {
 			if m.cursor < 0 {
 				m.cursor = len(m.rows)
 			}
-			m.rows = append(m.rows, row{path: path, label: r.Method + " " + name, in: label, file: f, index: i})
+			m.rows = append(m.rows, row{path: path, abs: abs, label: r.Method + " " + name, in: label, file: f, index: i})
 		}
 	}
 	m.cursor = max(m.cursor, 0)
 	m.shown = m.match()
-	m.request, m.response = viewport.New(), viewport.New()
-	m.request.SoftWrap, m.response.SoftWrap = true, true
+	m.request, m.response, m.help = viewport.New(), viewport.New(), viewport.New()
+	m.request.SoftWrap, m.response.SoftWrap = true, true // the help is wrapped at words
 	return m, nil
 }
 
@@ -128,7 +141,10 @@ func (m *Model) start(ctx context.Context, stop context.CancelFunc) {
 
 func (m *Model) sessionOptions(dryRun bool) session.Options {
 	o := m.opts
-	return session.Options{Env: m.env, DryRun: dryRun, Trust: o.Trust, Timeout: o.Timeout, MaxBody: o.MaxBody, UserAgent: o.UserAgent}
+	return session.Options{
+		Env: m.env, DryRun: dryRun, Trust: o.Trust, Timeout: o.Timeout, MaxBody: o.MaxBody, UserAgent: o.UserAgent, History: o.History,
+		EnvHint: "e chooses one",
+	}
 }
 
 // Masker returns a Masker for every secret the interface has read. Call
@@ -194,6 +210,9 @@ func (m *Model) answered(msg sentMsg) {
 	msg.flight.cancel()
 	m.flight, m.result, m.note = nil, msg.flight.result, ""
 	m.declared, m.lost, m.sent = m.send.Declared(), m.send.Lost(), m.send.Masker()
+	if err := m.send.HistoryError(); err != nil {
+		m.note = "history: " + err.Error()
+	}
 	m.refresh()
 	m.showResponse()
 	m.response.GotoTop()

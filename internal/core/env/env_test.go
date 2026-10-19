@@ -161,6 +161,44 @@ func TestPrepareBodyFileStaysInside(t *testing.T) {
 	}
 }
 
+// TestPrepareBodyFileKind checks that a body file is a regular file of
+// at most MaxBodyFile bytes.
+func TestPrepareBodyFileKind(t *testing.T) {
+	path := tree(t, "")
+	dir := filepath.Dir(path)
+	if err := os.Mkdir(filepath.Join(dir, "folder"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, size := range map[string]int64{"max.bin": MaxBodyFile, "over.bin": MaxBodyFile + 1} {
+		f, err := os.Create(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = f.Truncate(size); err != nil {
+			t.Fatal(err)
+		}
+		if err = f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for file, want := range map[string]string{
+		"folder":   "body file: folder is a directory: a body file must be a regular file",
+		"over.bin": "body file: over.bin is 16777217 bytes, more than the 16 MiB a body file may be",
+		"max.bin":  "",
+	} {
+		if err := os.WriteFile(path, []byte("POST https://example.com\n\n< "+file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p, err := prepare(t, NewLoader(Options{}), path)
+		switch {
+		case want == "" && (err != nil || len(p.Body.Masked()) != MaxBodyFile):
+			t.Errorf("< %s: %v", file, err)
+		case want != "" && (!isKind(err, core.KindRequest) || !strings.HasSuffix(err.Error(), want)):
+			t.Errorf("< %s: error %v, want kind request ending %q", file, err, want)
+		}
+	}
+}
+
 func isKind(err error, k core.Kind) bool {
 	e, ok := errors.AsType[*core.Error](err)
 	return ok && e.Kind == k
@@ -193,7 +231,7 @@ func TestPrepareErrors(t *testing.T) {
 			"{{$uuid}}: unknown dynamic variable $uuid (supported: $env, $cmd)", nil,
 		},
 		{"$env without a name", "", "GET https://example.com/{{$env}}", core.KindVariable, "want {{$env NAME}}", nil},
-		{"missing body file", "", "POST https://example.com\n\n< ./nope.json", core.KindRequest, "body file: open", nil},
+		{"missing body file", "", "POST https://example.com\n\n< ./nope.json", core.KindRequest, "body file: ./nope.json: no such file or directory", nil},
 		{
 			"unknown environment", "staging", "GET https://example.com", core.KindUsage,
 			`environment "staging" is not defined in`, nil,

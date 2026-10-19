@@ -93,6 +93,10 @@ Accept: application/json`,
 			"placeholders with spaces", "GET {{ $env BASE_URL }}/items?q={{query}} HTTP/2\nAuthorization: Bearer {{$env TOKEN}}",
 			"1 GET {{ $env BASE_URL }}/items?q={{query}} HTTP/2 [Authorization: Bearer {{$env TOKEN}}]\n",
 		},
+		{
+			"no-log", "# @no-log\nGET https://example.com/a\n###\nGET https://example.com/b\n// @no-log",
+			"2 GET https://example.com/a @no-log():1\n4 GET https://example.com/b @no-log():5\n",
+		},
 		{"empty file", "\n# only a comment\n", ""},
 	}
 	for _, tt := range tests {
@@ -133,6 +137,7 @@ func TestParseErrors(t *testing.T) {
 		{"file variable", "@host = example.com", 1, "file variables"},
 		{"unknown directive", "# @no-redirect\nGET https://example.com", 1, "unknown directive @no-redirect"},
 		{"directive without value", "# @assert\nGET https://example.com", 1, "@assert needs a value"},
+		{"no-log with a value", "# @no-log yes\nGET https://example.com", 1, "@no-log takes no value"},
 		{"orphan directive", "GET https://example.com\n###\n# @name lost\n", 3, "not followed by a request line"},
 		{"numeric name", "# @name 2\nGET https://example.com", 1, "is a number"},
 		{"negative numeric name", "# @name -1\nGET https://example.com", 1, "is a number"},

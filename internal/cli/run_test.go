@@ -62,11 +62,11 @@ func TestRunText(t *testing.T) {
 Accept: text/plain
 
 HTTP/1.1 200 OK (TIME)
-Content-Length: 20
+Content-Length: 26
 Content-Type: text/plain
 Date: Mon, 19 Oct 2026 00:00:00 GMT
 
-plain\x1b]0;title\x07 text
+plain\x1b]0;title\x07 \u202etext\u200b
 `, ""},
 		{"dry run", []string{"run", "api.http#echo", "--dry-run"}, exitOK, `POST HOST/echo?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
 Authorization: Bearer {{token}}
@@ -202,12 +202,12 @@ GET {{host}}/fail
 	code, stdout, stderr := runCLI(t, true, "run", "checks.http#text", "-e", "test")
 	want := `HTTP/1.1 200 OK (TIME)
 
-plain\x1b]0;title\x07 text
+plain\x1b]0;title\x07 \u202etext\u200b
 
 ✓ status == 200
 ✗ status in 500..599 (actual: 200)
 ✓ header Content-Type == "text/plain"
-✗ body contains "nope" (actual: plain\x1b]0;title\x07 text)
+✗ body contains "nope" (actual: plain\x1b]0;title\x07 \u202etext\u200b)
 ✓ duration < 1h
 `
 	wantErr := `vegtam: checks.http:3: 2 of 5 assertions failed: status in 500..599; body contains "nope"` + "\n"
@@ -319,5 +319,19 @@ func TestPrintErrorEscapes(t *testing.T) {
 	cfg.printError(&output.Error{Message: "certificate is valid for evil\x1b]0;title\x07.example.test"})
 	if want := `vegtam: certificate is valid for evil\x1b]0;title\x07.example.test` + "\n"; out.String() != want {
 		t.Errorf("printError = %q, want %q", out.String(), want)
+	}
+}
+
+func TestDirectivesSummary(t *testing.T) {
+	got := directives([]output.Directive{
+		{Kind: "assert", Value: "status == 200"},
+		{Kind: "tag", Value: "a"},
+		{Kind: "no-log"},
+		{Kind: "capture", Value: "t = $.t"},
+		{Kind: "assert", Value: "duration < 1s"},
+		{Kind: "tag", Value: "b"},
+	})
+	if want := "2 @assert, 1 @capture, @tag a b, @no-log"; got != want {
+		t.Errorf("directives = %q, want %q", got, want)
 	}
 }

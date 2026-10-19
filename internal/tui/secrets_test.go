@@ -19,7 +19,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/env"
+	"github.com/vidforull/vegtam/internal/core/history"
 )
 
 // sgr matches the styles Lip Gloss writes: the only escape sequences a
@@ -59,7 +61,10 @@ func TestNoSecretInTUI(t *testing.T) {
 	fx := newFixture(t)
 	for _, sz := range []size{{60, 24}, {100, 30}, {150, 40}} {
 		for _, maxBody := range []int64{1 << 20, 106} {
-			m := newModel(t, fx.dir, "", maxBody, sz.w, sz.h)
+			m := open(t, Options{
+				Path: fx.dir, Timeout: 5 * time.Second, MaxBody: maxBody, UserAgent: "vegtam/test",
+				History: history.New(filepath.Join(t.TempDir(), "vegtam")),
+			}, sz.w, sz.h)
 			views, styled := 0, 0
 			snap := func(state string) {
 				t.Helper()
@@ -87,7 +92,7 @@ func TestNoSecretInTUI(t *testing.T) {
 				case "create", "login", "everywhere":
 					press(m, "enter")
 					snap(name + " to confirm")
-					press(m, "y")
+					press(m, "enter")
 				default:
 					press(m, "enter")
 				}
@@ -109,6 +114,14 @@ func TestNoSecretInTUI(t *testing.T) {
 			if !strings.Contains(m.responseText(), `"session": "***"`) {
 				t.Errorf("the captured session is not masked in:\n%s", m.responseText())
 			}
+			press(m, "h")
+			for range m.runs {
+				snap("run in the history")
+				press(m, "j")
+			}
+			press(m, "/", "e", "c")
+			snap("history searched")
+			press(m, "esc", "esc")
 			press(m, "?")
 			snap("help")
 			press(m, "esc", "/", "e", "c")
@@ -117,12 +130,12 @@ func TestNoSecretInTUI(t *testing.T) {
 			snap("searched")
 			press(m, "/", "esc", "e", "k", "enter")
 			snap("another environment")
-			if views != 70 || styled < 10 {
+			if views != 81 || styled < 10 {
 				t.Errorf("%d views, %d with a secret's placeholder coloured", views, styled)
 			}
 		}
 	}
-	m := newModel(t, fx.dir, "test", 1<<20, 100, 30)
+	m := newModel(t, fx.dir, "test", 100, 30)
 	press(m, "enter")
 	if text := m.responseText(); !strings.Contains(text, `"key": "***"`) || !strings.Contains(text, "X-Echo: key=***&env=***") {
 		t.Errorf("the echo of the secrets is not masked, so the test proves nothing:\n%s", text)
@@ -149,7 +162,7 @@ func TestTUIEscapes(t *testing.T) {
 		}
 	}
 	for _, sz := range []size{{60, 24}, {100, 30}, {150, 40}} {
-		m := newModel(t, fx.dir, "test", 1<<20, sz.w, sz.h)
+		m := newModel(t, fx.dir, "test", sz.w, sz.h)
 		goTo(t, m, "escapes")
 		press(m, "enter")
 		for _, keys := range [][]string{nil, {"tab", "tab", "j", "j"}, {"G", "f"}, {"z"}, {"z"}} {
@@ -158,12 +171,14 @@ func TestTUIEscapes(t *testing.T) {
 			if !utf8.ValidString(v) {
 				t.Errorf("%dx%d: the view is not UTF-8:\n%q", sz.w, sz.h, v)
 			}
-			if i := strings.IndexFunc(v, func(r rune) bool { return r != '\n' && (r < ' ' || r >= 0x7f && r < 0xa0) }); i >= 0 {
+			if i := strings.IndexFunc(v, func(r rune) bool { return r != '\n' && (r < ' ' || r >= 0x7f && r < 0xa0 || core.Invisible(r)) }); i >= 0 {
 				t.Errorf("%dx%d: %U at %d in the view:\n%q", sz.w, sz.h, []rune(v[i:])[0], i, v)
 			}
 		}
 		text := m.clean(m.responseText())
-		for _, want := range []string{`\x1b]0;title\x07 \x9b31m \x1b[31mred\x1b[0m \x7f\x0d\x08 ***`, `X-Escape: \x9b31m \x9b31m`} {
+		for _, want := range []string{
+			`\u202eevil\u200b\U000e0041 `, `\x1b]0;title\x07 \x9b31m \x1b[31mred\x1b[0m \x7f\x0d\x08 ***`, `X-Escape: \x9b31m \x9b31m`,
+		} {
 			if !strings.Contains(text, want) {
 				t.Errorf("%dx%d: the response does not show %q:\n%s", sz.w, sz.h, want, text)
 			}

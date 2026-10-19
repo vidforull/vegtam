@@ -64,16 +64,25 @@ func (m *Model) resize() {
 	m.request.SetHeight(max(m.sizes[requestPane].h-3, 1))
 	m.response.SetWidth(max(m.sizes[responsePane].w-2, 1))
 	m.response.SetHeight(max(m.sizes[responsePane].h-3, 1))
+	m.help.SetWidth(max(w-2, 1))
+	m.help.SetHeight(max(body-3, 1))
+	if m.mode == helping { // laid out anew for the width
+		m.help.SetContent(m.helpText(m.help.Width()))
+	}
 }
 
 func (m *Model) render() string {
 	if m.width == 0 {
 		return ""
 	}
-	tree := m.box(treePane, "Requests", m.treeText())
-	if m.mode == choosingEnv {
-		tree = m.box(treePane, "Environment", m.treeText())
+	treeTitle := "Requests"
+	switch {
+	case m.mode == choosingEnv:
+		treeTitle = "Environment"
+	case m.runsOpen:
+		treeTitle = "History"
 	}
+	tree := m.box(treePane, treeTitle, m.treeText())
 	request := m.box(requestPane, "Request "+m.ref(), m.request.View())
 	title := "Response "
 	if m.fold > 0 { // before the reference, which may be cut off
@@ -81,20 +90,27 @@ func (m *Model) render() string {
 	}
 	title += m.resultRef()
 	response := m.box(responsePane, title, m.response.View())
-	if m.curl != "" {
+	switch {
+	case m.runsOpen:
+		response = m.box(responsePane, "Run", m.response.View())
+	case m.curl != "":
 		response = m.box(responsePane, "curl "+m.ref(), m.response.View())
 	}
 	switch m.mode {
 	case browsing, searching, choosingEnv, helping:
 	case confirming:
 		r := m.rows[m.cursor]
-		response = m.box(responsePane, "Send?", m.clean(fmt.Sprintf("Send %s %s?\n\ny sends it, any other key does not.",
+		response = m.box(responsePane, "Send?", m.clean(fmt.Sprintf("Send %s %s?\n\nenter sends it, any other key does not.",
 			r.file.Requests[r.index].Method, output.Ref(r.file, r.index))))
 	}
 	var panes string
 	switch {
-	case m.mode == helping: // over all three panes, so that it fits 80x24
-		panes = m.frame(m.width, max(m.height-1, 3), true, "Keys", m.helpText(m.width-2))
+	case m.mode == helping: // over all three panes, so that it fits 80x24; scrolled if it does not
+		title := "Keys"
+		if m.help.TotalLineCount() > m.help.Height() {
+			title += fmt.Sprintf(" (%d%%; j/k, f/b scroll)", int(m.help.ScrollPercent()*100))
+		}
+		panes = m.frame(m.width, max(m.height-1, 3), true, title, m.help.View())
 	case m.width >= wideWidth:
 		panes = lipgloss.JoinHorizontal(lipgloss.Top, tree, request, response)
 	case m.width >= minWidth:
@@ -147,9 +163,15 @@ func (m *Model) resultRef() string {
 func (m *Model) treeText() string {
 	sz := m.sizes[treePane]
 	w, h := max(sz.w-2, 1), max(sz.h-3, 1)
+	// Without styles, as with TERM=dumb, a mark shows the selected line.
 	item := func(s string, selected bool) string {
 		st := lipgloss.NewStyle().MaxWidth(w)
-		if selected {
+		switch {
+		case m.plain && selected:
+			s = "> " + s
+		case m.plain:
+			s = "  " + s
+		case selected:
 			st = st.Reverse(true)
 		}
 		return st.Render(m.line(s))
@@ -157,20 +179,34 @@ func (m *Model) treeText() string {
 	var head string
 	var lines []string
 	at := 0
-	if m.mode == choosingEnv {
+	if q, _, _ := m.searched(); m.mode != choosingEnv && (m.mode == searching || *q != "") {
+		text := "/" + *q
+		if m.mode == searching {
+			text += "_"
+		}
+		head = lipgloss.NewStyle().Foreground(accent).MaxWidth(w).Render(m.line(text)) + "\n"
+		h = max(h-1, 1)
+	}
+	switch {
+	case m.mode == choosingEnv:
 		for i, name := range m.envs {
 			lines = append(lines, item(cmp.Or(name, "(none)"), i == m.choice))
 		}
 		at = m.choice
-	} else {
-		if m.mode == searching || m.query != "" {
-			text := "/" + m.query
-			if m.mode == searching {
-				text += "_"
+	case m.runsOpen:
+		for _, i := range m.runShown {
+			if i == m.run {
+				at = len(lines)
 			}
-			head = lipgloss.NewStyle().Foreground(accent).MaxWidth(w).Render(m.line(text)) + "\n"
-			h = max(h-1, 1)
+			lines = append(lines, item(m.runLabel(m.runs[i]), i == m.run))
 		}
+		switch {
+		case len(m.runs) == 0:
+			lines = append(lines, item("no runs yet", false))
+		case len(lines) == 0:
+			lines = append(lines, item("no run matches", false))
+		}
+	default:
 		for _, i := range m.shown {
 			r := m.rows[i]
 			label := r.label
@@ -206,7 +242,7 @@ func (m *Model) requestText() string {
 	if r.index >= 0 {
 		req := r.file.Requests[r.index]
 		for _, d := range req.Directives {
-			fmt.Fprintf(&b, "# @%s %s\n", d.Kind, d.Value)
+			b.WriteString(strings.TrimSpace("# @"+d.Kind+" "+d.Value) + "\n")
 		}
 		if m.preview.Request != nil {
 			output.WriteRequest(&b, m.preview.Request)
@@ -265,10 +301,12 @@ func (m *Model) class(r core.Ref) env.Class {
 // responseText is the latest response as vegtam run --verbose prints it:
 // the status and the time, the headers, the body, the outcomes of the
 // directives, and the error, if there is one. A curl command just copied
-// is shown over it.
+// is shown over it, and the run selected in the history over both.
 func (m *Model) responseText() string {
 	var b strings.Builder
 	switch {
+	case m.runsOpen:
+		b.WriteString(m.runText())
 	case m.curl != "":
 		b.WriteString("Copied, if the terminal takes OSC 52; esc hides it.\n\n" + m.curl)
 	case m.flight != nil:
@@ -316,7 +354,8 @@ const helpColumn = 40
 
 // helpText lists the keys, one a line, in two columns if width allows
 // (help's own columns would cut off what does not fit a narrow pane), and
-// says what the colours of the request pane mean, in those colours.
+// says what the colours of the request pane mean, in those colours; it
+// is wrapped at words to width. On 80x24 it fits whole.
 func (m *Model) helpText(width int) string {
 	var keys []string
 	for _, group := range m.keys.FullHelp() {
@@ -336,13 +375,15 @@ func (m *Model) helpText(width int) string {
 	} else {
 		b.WriteString(strings.Join(keys, "\n") + "\n")
 	}
-	b.WriteString("\nIn the request and response panes j/k scroll, f/b by a page and d/u by half of one.\n\n" +
-		"/ narrows the list to the requests whose label, file or URL hold what you type: enter keeps it, esc clears it.\n\n" +
-		"enter asks before it sends a method other than GET, HEAD or OPTIONS. y copies the request as curl, " +
-		"its secrets as shell variables; esc hides the command.\n\n")
+	b.WriteString("\nIn the request and response panes j/k scroll, f/b by a page, d/u by half.\n\n" +
+		"/ narrows the list by label, file or URL: enter keeps it, esc clears it.\n\n" +
+		"enter asks first for a method other than GET, HEAD or OPTIONS: enter again sends. " +
+		"y copies the request as curl, its secrets as shell variables; esc hides it.\n\n" +
+		"h lists the latest runs: enter goes to the request of one; esc closes it.\n\n")
 	st := func(c env.Class, s string) string { return placeholderStyles[c].Render(s) }
-	return m.clean(b.String()) + "In the request, " + st(env.Plain, "green") + " is a value, " + st(env.Secret, "magenta") +
+	text := m.clean(b.String()) + "In the request, " + st(env.Plain, "green") + " is a value, " + st(env.Secret, "magenta") +
 		" a secret, " + st(env.Captured, "yellow") + " a capture and " + st(env.Unresolved, "red") + " what does not resolve."
+	return ansi.Wrap(text, width, "")
 }
 
 // minLeft is how many columns of the status line the environment and the
@@ -354,15 +395,24 @@ const minLeft = 16
 // only the keys besides the main ones give way to it.
 func (m *Model) statusLine() string {
 	state := m.note
-	if m.flight != nil && state == "" {
+	switch {
+	case m.flight == nil, state != "":
+	case m.runsOpen: // where esc closes the list
+		state = "sending"
+	default:
 		state = "sending; esc cancels"
 	}
 	left := m.line(" env: " + cmp.Or(m.env, "none") + "  " + state)
+	keys, main := m.keys.ShortHelp(), m.keys.mainHelp()
+	if m.runsOpen {
+		keys = m.keys.runsHelp()
+		main = keys
+	}
 	h := help.New()
-	right := h.ShortHelpView(m.keys.ShortHelp()) + " "
+	right := h.ShortHelpView(keys) + " "
 	if lipgloss.Width(right)+minLeft > m.width {
 		h.SetWidth(max(m.width-1, 1))
-		right = h.ShortHelpView(m.keys.mainHelp()) + " "
+		right = h.ShortHelpView(main) + " "
 	}
 	if room := m.width - lipgloss.Width(right); lipgloss.Width(left) > room {
 		left = ansi.Truncate(left, max(room-1, 0), "…")

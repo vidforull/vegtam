@@ -166,7 +166,7 @@
             "type": "object",
             "required": ["kind", "value"],
             "properties": {
-              "kind": {"type": "string", "description": "assert, capture or tag."},
+              "kind": {"type": "string", "description": "assert, capture, tag or no-log."},
               "value": {"type": "string"}
             }
           }

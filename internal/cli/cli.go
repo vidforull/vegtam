@@ -13,7 +13,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/history"
 	"github.com/vidforull/vegtam/internal/core/output"
+	"github.com/vidforull/vegtam/internal/core/policy"
 	"github.com/vidforull/vegtam/internal/tui"
 )
 
@@ -110,6 +112,24 @@ func (c *Config) writeJSON(v any) {
 	_, _ = c.Stdout.Write(c.masker.MaskJSON(b.Bytes()))
 }
 
+// history returns the history of runs that the requests a command sends
+// go into, or nil for none: with off, with VEGTAM_NO_HISTORY set, and
+// with no place for it, which a warning says.
+func (c *Config) history(off bool) *history.Log {
+	if off {
+		return nil
+	}
+	dir, err := policy.HistoryDir()
+	if err != nil {
+		fmt.Fprintf(c.errOut, "vegtam: no history: %s\n", c.text(err.Error()))
+		return nil
+	}
+	if dir == "" {
+		return nil
+	}
+	return history.New(dir)
+}
+
 // printError prints e on stderr.
 func (c *Config) printError(e *output.Error) {
 	loc := e.File
@@ -120,7 +140,7 @@ func (c *Config) printError(e *output.Error) {
 		loc += ": "
 	}
 	// A message may quote the server: a certificate name, a status line.
-	fmt.Fprintf(c.errOut, "vegtam: %s%s\n", printable(loc), printable(e.Message))
+	fmt.Fprintf(c.errOut, "vegtam: %s%s\n", c.text(loc), c.text(e.Message))
 }
 
 // internalError prints v, the value of a panic, and stack on stderr. A
@@ -136,7 +156,7 @@ func (c *Config) internalError(v any, stack []byte) {
 	if c.secrets != nil {
 		c.masker = c.secrets()
 	}
-	fmt.Fprint(c.errOut, printable(fmt.Sprintf("vegtam: internal error: %v\n%s", v, stack)))
+	fmt.Fprint(c.errOut, c.text(fmt.Sprintf("vegtam: internal error: %v\n%s", v, stack)))
 }
 
 // masked is stdout or stderr with secret values masked. A value split

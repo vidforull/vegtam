@@ -203,7 +203,8 @@ func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets, ch
 // redirectPolicy follows a redirect unless it goes from https to http, or
 // to another origin with a body that holds a secret: a 307 or 308 sends
 // the body again, and no header can be dropped from it. On the way to
-// another origin the sensitive headers are dropped.
+// another origin the sensitive headers are dropped, and the Referer that
+// net/http adds on every hop is dropped on all of them.
 func redirectPolicy(sensitive []string, secretBody bool) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
 		if len(via) > MaxRedirects {
@@ -211,6 +212,12 @@ func redirectPolicy(sensitive []string, secretBody bool) func(*http.Request, []*
 		}
 		if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme == "http" {
 			return errors.New("refused a redirect from https to http")
+		}
+		// net/http sends the URL it was redirected from as the Referer,
+		// query and all, and a query may hold a token (RFC 9110, 10.1.3).
+		// A Referer the request itself has is kept, as far as its origin.
+		if via[0].Header.Get("Referer") == "" {
+			req.Header.Del("Referer")
 		}
 		// net/http copies the headers of the first request on every hop,
 		// so once the chain has left the first origin they are dropped on

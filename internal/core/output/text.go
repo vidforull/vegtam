@@ -9,6 +9,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/vidforull/vegtam/internal/core"
 )
 
 // The text form of results, for terminals: the CLI prints it and the
@@ -205,13 +207,17 @@ func summary(open byte, n int) string {
 }
 
 // Printable returns s with control characters other than tab and line
-// feed, and bytes that are not UTF-8, shown as \xNN: a response must not
-// be able to drive the terminal, and a lone byte such as 0x9b starts an
-// escape sequence on a terminal that does not read UTF-8.
+// feed, and bytes that are not UTF-8, shown as \xNN, and invisible
+// characters (core.Invisible) shown as \uNNNN: a response must not
+// be able to drive the terminal, a lone byte such as 0x9b starts an
+// escape sequence on a terminal that does not read UTF-8, and a right-to-
+// left override or a zero-width space makes text read as other than it
+// is.
 func Printable(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	isControl := func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }
-	if utf8.ValidString(s) && !strings.ContainsFunc(s, isControl) {
+	escaped := func(r rune) bool { return isControl(r) || core.Invisible(r) }
+	if utf8.ValidString(s) && !strings.ContainsFunc(s, escaped) {
 		return s
 	}
 	var b strings.Builder
@@ -222,6 +228,10 @@ func Printable(s string) string {
 			fmt.Fprintf(&b, `\x%02x`, s[0])
 		case isControl(r):
 			fmt.Fprintf(&b, `\x%02x`, r)
+		case core.Invisible(r) && r > 0xffff:
+			fmt.Fprintf(&b, `\U%08x`, r)
+		case core.Invisible(r):
+			fmt.Fprintf(&b, `\u%04x`, r)
 		default:
 			b.WriteString(s[:size])
 		}

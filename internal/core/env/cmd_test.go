@@ -1,6 +1,7 @@
 package env
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +52,35 @@ func TestHelperProcess(t *testing.T) {
 	case "stdin":
 		b, _ := io.ReadAll(os.Stdin)
 		fmt.Fprintf(os.Stdout, "read %d bytes", len(b))
+	case "ask": // asks for a line on stdin, as a prompt for a password does
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "no answer:", err)
+			os.Exit(1)
+		}
+		fmt.Fprint(os.Stdout, line)
+	case "tty": // asks at the terminal, as pinentry-curses does
+		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "no terminal:", err)
+			os.Exit(1)
+		}
+		fmt.Fprint(tty, "Password: ")
+		line, _ := bufio.NewReader(tty).ReadString('\n')
+		fmt.Fprint(os.Stdout, line)
+	case "session":
+		fmt.Fprintln(os.Stdout, leadsGroup())
+	case "family": // starts a child that stays, writes down its PID, and waits
+		child := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestHelperProcess$", "--", "sleep")
+		err := child.Start()
+		if err == nil {
+			err = os.WriteFile(args[2], []byte(strconv.Itoa(child.Process.Pid)), 0o600)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		time.Sleep(time.Minute)
 	case "env":
 		fmt.Fprintln(os.Stdout, os.Getenv(args[2]))
 	case "fail":
@@ -383,5 +414,34 @@ func TestCommandCanceled(t *testing.T) {
 	}
 	if d := time.Since(start); d > 30*time.Second {
 		t.Errorf("Prepare returned after %s", d)
+	}
+}
+
+// TestCommandNoInput runs commands that ask for a password, on stdin and
+// at the terminal: each gets nothing and fails at once, with an error
+// that says why, rather than wait for an answer. A command runs in a
+// session of its own, so that it has no terminal to ask at.
+func TestCommandNoInput(t *testing.T) {
+	cmds := map[string]any{
+		"ASK":     map[string]any{"argv": helper("ask"), "timeout": "5s"},
+		"TTY":     map[string]any{"argv": helper("tty"), "timeout": "5s"},
+		"SESSION": map[string]any{"argv": helper("session")},
+	}
+	for _, name := range []string{"ASK", "TTY"} {
+		path, store := cmdTree(t, cmds, true, "GET https://example.com/{{$cmd "+name+"}}")
+		start := time.Now()
+		_, err := prepare(t, NewLoader(Options{Trust: store}), path)
+		if !isKind(err, core.KindVariable) || !strings.Contains(err.Error(), ": exit status 1: no ") ||
+			!strings.HasSuffix(err.Error(), noTerminal) || time.Since(start) > 4*time.Second {
+			t.Errorf("{{$cmd %s}}: %v, after %s", name, err, time.Since(start))
+		}
+	}
+	path, store := cmdTree(t, cmds, true, "GET https://example.com/{{$cmd SESSION}}")
+	l := NewLoader(Options{Trust: store})
+	if _, err := prepare(t, l, path); err != nil {
+		t.Fatal(err)
+	}
+	if got := l.Masker().Mask("true"); got != "***" {
+		t.Error("the command does not run in a session of its own")
 	}
 }

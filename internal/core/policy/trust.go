@@ -45,15 +45,39 @@ func NewStore(path string) *Store { return &Store{path: path} }
 // or in ~/.config/vegtam/trust.json if XDG_CONFIG_HOME is not set. If
 // neither can be found, the store trusts nothing and cannot be changed.
 func DefaultStore() *Store {
-	dir := os.Getenv("XDG_CONFIG_HOME")
+	dir, err := xdgDir("XDG_CONFIG_HOME", ".config")
+	if err != nil {
+		return &Store{err: fmt.Errorf("no trust store: %w", err)}
+	}
+	return NewStore(filepath.Join(dir, "trust.json"))
+}
+
+// HistoryDir returns the directory of the history of runs,
+// $XDG_DATA_HOME/vegtam, or ~/.local/share/vegtam if XDG_DATA_HOME is not
+// set; or "" if the operator keeps no history: VEGTAM_NO_HISTORY is set
+// to anything but "". The process environment is read here, and for
+// {{$env NAME}}, and nowhere else.
+func HistoryDir() (string, error) {
+	if os.Getenv("VEGTAM_NO_HISTORY") != "" {
+		return "", nil
+	}
+	return xdgDir("XDG_DATA_HOME", filepath.Join(".local", "share"))
+}
+
+// xdgDir returns vegtam's directory in the base directory that the
+// environment variable name gives, as the XDG Base Directory
+// Specification has it, or in fallback in the home directory if name is
+// not set to an absolute path.
+func xdgDir(name, fallback string) (string, error) {
+	dir := os.Getenv(name)
 	if !filepath.IsAbs(dir) {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return &Store{err: fmt.Errorf("no trust store: %w; set XDG_CONFIG_HOME or HOME", err)}
+			return "", fmt.Errorf("%w; set %s or HOME", err, name)
 		}
-		dir = filepath.Join(home, ".config")
+		dir = filepath.Join(home, fallback)
 	}
-	return NewStore(filepath.Join(dir, "vegtam", "trust.json"))
+	return filepath.Join(dir, "vegtam"), nil
 }
 
 // Path returns the file the store is kept in.
@@ -138,7 +162,18 @@ func (s *Store) load() (map[string]string, error) {
 	fail := func(format string, args ...any) error {
 		return core.Errorf(core.KindPolicy, core.Source{File: s.path}, format, args...)
 	}
-	f, err := os.Open(s.path) //nolint:forbidigo // the trust store, in the user's config directory
+	// Opened through an os.Root of its directory, which refuses a
+	// symbolic link that leads out of it: the directory checked below
+	// must be the one the store is in.
+	dir, name := filepath.Split(s.path)
+	root, err := os.OpenRoot(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return map[string]string{}, nil
+	} else if err != nil {
+		return nil, fail("%v", err)
+	}
+	defer root.Close()
+	f, err := root.Open(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]string{}, nil
 	} else if err != nil {
@@ -151,7 +186,7 @@ func (s *Store) load() (map[string]string, error) {
 	if err != nil {
 		return nil, fail("%v", err)
 	}
-	di, err := os.Stat(filepath.Dir(s.path))
+	di, err := root.Stat(".")
 	switch {
 	case err != nil:
 		return nil, fail("%v", err)

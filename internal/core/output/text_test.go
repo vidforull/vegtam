@@ -193,3 +193,27 @@ func block(s string) (end, n int, err error) {
 		}
 	}
 }
+
+func TestPrintable(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain\ttext\n":                "plain\ttext\n",
+		"a\r\nb":                       "a\nb",
+		"\x1b]0;title\x07":             `\x1b]0;title\x07`,
+		"\u009b2J \x9b2J":              `\x9b2J \x9b2J`,
+		"\u202egnp.exe":                `\u202egnp.exe`,
+		"\u2066a\u2069 \u200eb\u200f":  `\u2066a\u2069 \u200eb\u200f`,
+		"zero\u200bwidth\ufeff":        `zero\u200bwidth\ufeff`,
+		"soft\u00adhyphen\u2060":       `soft\u00adhyphen\u2060`,
+		"tag \U000e0041\U000e007f":     `tag \U000e0041\U000e007f`,
+		"caf\xe9 caf\u00e9 \U0001f600": `caf\xe9 café 😀`,
+		`\u202e`:                       `\u202e`, // already shown escaped: as it is
+		"a\u2028b\u2029c":              `a\u2028b\u2029c`,
+		"\u3164 \u034f":                `\u3164 \u034f`,
+		"x\U000e0100\U000e01ef":        `x\U000e0100\U000e01ef`,
+		"\u2764\ufe0f \u00e9":          "\u2764\ufe0f \u00e9", // an emoji's selector, a letter: as they are
+	} {
+		if got := Printable(in); got != want {
+			t.Errorf("Printable(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

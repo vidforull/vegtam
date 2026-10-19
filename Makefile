@@ -97,6 +97,7 @@ fuzz:
 	go test -run '^$$' -fuzz '^FuzzMasker$$' -fuzztime $(FUZZTIME) ./internal/core
 	go test -run '^$$' -fuzz '^FuzzMaskJSON$$' -fuzztime $(FUZZTIME) ./internal/core
 	go test -run '^$$' -fuzz '^FuzzPrintable$$' -fuzztime $(FUZZTIME) ./internal/cli
+	go test -run '^$$' -fuzz '^FuzzFormatJSON$$' -fuzztime $(FUZZTIME) ./internal/core/output
 
 tools:
 	@v=$$(golangci-lint version --short 2>/dev/null) || { \

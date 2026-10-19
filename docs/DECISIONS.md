@@ -487,3 +487,157 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   checks that any input formats without a panic, that what is not JSON
   stays as it is, and that each fold stands for a whole object or array
   with the right count.
+
+## 2026-10-19: history of runs, and the core made harder
+
+- **A second `enter` sends, not `y`.** The question before a method
+  other than GET, HEAD or OPTIONS is answered by `enter` again; any other
+  key leaves the request unsent. Since `y` copies a request as curl, a
+  `y` typed from habit must not send a POST. Two presses of the same key
+  are still a deliberate act: the question is in the response pane,
+  with the method and the request it would send. An enter that the
+  terminal reports as a repeat of a key held down, or that comes within
+  half a second of the question, is not an answer, and the question
+  stays: a key that bounces sends twice within milliseconds, and a key
+  held down repeats only after a delay, half a second or more on most
+  systems. A terminal that does not report repeats, with a shorter delay
+  than that, can still send with a key held down.
+- **What the history keeps.** One entry for each request sent: the
+  time (UTC), the ref with the file as an absolute path (a ref that
+  `vegtam run` takes from any directory), the environment, the method,
+  the URL as written, the status, the time it took, the result (`ok` or
+  the error kind) and whether the body was cut short. That is what the
+  file says and how the run ended; neither is a secret. Nothing that a
+  secret can be in is kept, in any form: no header, body or response, no
+  value of a variable, no captured value, no URL as resolved. Masking
+  would not make them safe, since it only finds the values it knows,
+  and a history outlives the run whose secrets it knew. The URL as
+  written goes through the masker all the same, for a secret value
+  written into a `.http` file by hand, and a password written in it
+  (`https://ada:...@host`) is kept as `***`, whether a value or a
+  placeholder. A value written in the query by hand is kept as it is:
+  it is in the file already, and the history is the user's own; a
+  placeholder is the way to keep it out. Each text is cut after 2 KiB,
+  so that a long name or URL cannot crowd the other runs out of the
+  file. A request that failed before it
+  went out is kept too, with its error kind: it is a run. A dry run is
+  not, nor is a file that does not parse, which has no request to go
+  back to, nor a request with `# @no-log`, the directive JetBrains,
+  kulala and httpyac use for this.
+- **JSON Lines.** A run adds one line to the end of the file, with one
+  write, then syncs it: on a local disk, lines from runs at the same
+  time do not mix, and a run killed while writing leaves at most one
+  line without its end,
+  which reading skips, as it skips any line that is not an entry.
+  Reading takes lines from the end of the file, so that it costs the
+  same however long the history is. Nothing has to be rewritten, which a
+  single JSON document would need on every run, and `tail` and `jq` read
+  it as it is. At 1 MiB the file becomes `history.jsonl.1`, replacing the
+  one before: the history stays bounded with no settings. A directory
+  vegtam makes is 0700, and one that others can write is refused, as
+  the trust store refuses one: whoever can write it can swap the file.
+  The file is 0600, made so if it was not, and opened through an
+  `os.Root` of the directory, which refuses a link that leads out of
+  it; a named pipe in its place is an error before it is opened. Only a
+  pipe put there between that check and the open would block: that
+  takes a process writing in the user's own data directory as vegtam
+  runs.
+- **Kept by the core.** `session.Run` adds the entry, so `run` and the
+  terminal interface keep the same history the same way, and a new way
+  to send would keep it too. `--no-history` keeps one run out, and
+  `VEGTAM_NO_HISTORY=1` (anything but empty, as with `NO_COLOR`) every
+  run: the operator's setting for agents and CI. It is a variable for
+  now; the policy file of the operator, when it comes, will have it too.
+  A history that cannot be written is a warning on stderr and changes
+  neither the output nor the exit code: a read-only home must not make
+  requests fail.
+- **Where.** `$XDG_DATA_HOME/vegtam/history.jsonl`, or
+  `~/.local/share/vegtam/` without it: data that vegtam makes, as the XDG
+  Base Directory Specification has it, beside the trust store in the
+  config directory. The process environment is still read in two files
+  only, as the gate wants: `{{$env NAME}}` in `env.go`, and the operator's
+  settings, the XDG directories and `VEGTAM_NO_HISTORY`, in
+  `policy/trust.go`.
+- **`h` lists the runs.** The interface reads the latest 200 entries
+  of the history, from its end, each time `h` is pressed, so that runs
+  of `vegtam run` in another terminal are there too; it reads them in a
+  Bubble Tea command, not in `Update`, so that a slow disk holds up no
+  key. The list takes the
+  place of the tree, as the environments do, and the response pane
+  shows the selected run as the history has it; `/` searches the runs as
+  it searches the requests. `enter` goes to the request in the tree by
+  its file and name or position, clearing a search that hides it; a run
+  of a file elsewhere, or of a request since renamed, stays in the list
+  and says so. Times are shown in local time; the file keeps UTC.
+- **No Referer of its own on a redirect.** net/http sends the URL it
+  was redirected from as the `Referer` of the next hop, query and all,
+  and dropped it only on the way to another origin. A token in the
+  query (`?key={{token}}`) then went to the same server again, into its
+  logs as a header, and RFC 9110 (10.1.3) asks clients not to send what
+  the user would not expect. vegtam drops it on every hop; a `Referer`
+  written in the request is sent on as far as its origin.
+- **Body files: regular, 16 MiB at most.** `< ./file` is checked with
+  `Stat` through the `os.Root` of the `.http` file's directory before it
+  is opened, and again once open (`os.SameFile`). Opening a named pipe
+  waits for a writer, so a `.http` file from elsewhere with `< ./fifo`
+  would hang the interface's preview, which reads body files as it
+  resolves a request; a device such as a link to `/dev/zero`, were one
+  inside the directory, would be read without end. 16 MiB is far more
+  than an API request body needs, and is read whole into memory; the
+  error gives the size. A file replaced by a pipe between the check and
+  the open would still block: that takes a process writing in the
+  directory as vegtam runs, not a file someone sent.
+- **Invisible characters shown escaped.** On a terminal, the CLI and
+  the interface show every character that a terminal does not show yet
+  that changes how text reads, as `\uNNNN` (`\UNNNNNNNN` above U+FFFF),
+  as control characters are shown as `\xNN`: the format characters,
+  Unicode category Cf (the marks, embeddings, overrides and isolates of
+  text direction, U+202A–U+202E, U+2066–U+2069, U+200E, U+200F;
+  zero-width characters, U+200B–U+200D, U+2060; the byte order mark; the
+  soft hyphen; the tag characters, U+E0000–U+E007F), the line and
+  paragraph separators, the other default-ignorable characters, such as
+  the Hangul fillers, and the variation selectors 17 to 256. An override
+  makes `exe.txt` of `txt.exe`, and tags and selectors carry text no one
+  sees. Taking whole categories and properties, rather than a list, also
+  covers the ones a list would miss. The variation selectors 1 to 16 are
+  left as they are: emoji use them in ordinary text. The price is an
+  emoji joined with U+200D, such as a family, shown as its parts with
+  `\u200d` between them. JSON output is unchanged: the escapes are for
+  terminals. The CLI masks text before it escapes it, everywhere it
+  prints, panics included: an escape would hide a secret value that
+  holds such a character from the masker. Copy as curl writes such
+  characters as `$'\xNN'` bytes, as it writes control characters, and
+  names a placeholder that holds one with Go's escapes in its comment,
+  so the command holds none, and cleaning it for the terminal still
+  changes nothing. `FuzzPrintable` checks that no such character is left
+  and that text without any is left alone.
+- **Commands get no terminal.** A `{{$cmd NAME}}` that asks for a
+  password at the terminal, as a password manager without its agent or
+  desktop app may, cannot work under the interface: Bubble Tea reads every
+  key, and the prompt would draw over the screen and wait for an answer
+  it never gets. Taking the terminal from the interface for the command,
+  as `tea.ExecProcess` does for an editor, would also hand the command
+  a terminal under `run`, where an agent may be the one at it. So it is
+  not supported, and says so: a command runs with no input, as before,
+  and now, on Unix, in a session of its own (`Setsid`), which has no
+  controlling terminal, so that opening `/dev/tty` fails at once. Its
+  error then says that commands run with no input and no terminal, and
+  must get a secret from an agent, a cache or a window of their own. The
+  same holds under `run`: a command behaves the same whoever runs it. A
+  program that opens the terminal by its name, as gpg-agent does through
+  `GPG_TTY` for `pinentry-curses`, is beyond this: only the command's
+  timeout ends its wait. In a session of its own, a command no longer
+  gets the terminal's Ctrl-C, and neither would what it starts; so a
+  command that is canceled or runs out of time is killed with its whole
+  process group, not alone. One that ends by itself leaves behind what
+  it started, such as an agent, as before.
+- **The interface on small and plain terminals.** The help is a
+  viewport over all panes: on a terminal smaller than 80x24 it keeps its
+  frame and scrolls with the keys of the panes, and its title says so;
+  on 80x24 it still fits whole, its sentences shortened to make room for
+  `h`. Without styles, as Bubble Tea has it for `TERM=dumb`, reverse
+  video does not show, so a `>` marks the selected line of the list, of
+  the environments and of the runs. The colours of placeholders need no
+  such mark: the text says as much (see above). Without an environment,
+  the error of an unresolved variable says that `e` chooses one, where
+  the CLI says `use -e <name>`: the session takes the hint as an option.

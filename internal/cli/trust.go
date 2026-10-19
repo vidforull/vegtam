@@ -118,7 +118,7 @@ func trust(cfg *Config, store *policy.Store, arg string) error {
 		fmt.Fprintf(tw, "  %s\t%s\n", name, strings.Join(argv, " "))
 	}
 	tw.Flush()
-	fmt.Fprint(cfg.out, printable(b.String()))
+	fmt.Fprint(cfg.out, cfg.text(b.String()))
 	return nil
 }
 
@@ -142,9 +142,9 @@ func revokeTrust(cfg *Config, store *policy.Store, arg string) error {
 		}
 		cfg.writeJSON(output.Document{SchemaVersion: output.SchemaVersion, Trust: []*output.Trusted{t}})
 	case was:
-		fmt.Fprintf(cfg.out, "Revoked the trust in %s: its commands no longer run.\n", printable(path))
+		fmt.Fprintf(cfg.out, "Revoked the trust in %s: its commands no longer run.\n", cfg.text(path))
 	default:
-		fmt.Fprintf(cfg.out, "%s was not trusted.\n", printable(path))
+		fmt.Fprintf(cfg.out, "%s was not trusted.\n", cfg.text(path))
 	}
 	return nil
 }
@@ -181,6 +181,6 @@ func listTrusted(cfg *Config, store *policy.Store) error {
 		fmt.Fprintf(tw, "%s\t%s\n", t.Status, t.File)
 	}
 	tw.Flush()
-	fmt.Fprint(cfg.out, printable(b.String()))
+	fmt.Fprint(cfg.out, cfg.text(b.String()))
 	return nil
 }

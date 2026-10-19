@@ -48,7 +48,7 @@ its command file is not trusted, but its command does not run.`,
 			}
 			var b strings.Builder
 			output.WriteRequest(&b, res.Request)
-			fmt.Fprint(cfg.out, printable(b.String()))
+			fmt.Fprint(cfg.out, cfg.text(b.String()))
 			return nil
 		},
 	}
@@ -92,7 +92,7 @@ its directives. Files that do not parse are reported, the rest listed.`,
 					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", l.Ref, l.Method, l.URL, directives(l.Directives))
 				}
 				tw.Flush()
-				fmt.Fprint(cfg.out, printable(trailingSpace.ReplaceAllString(b.String(), "")))
+				fmt.Fprint(cfg.out, cfg.text(trailingSpace.ReplaceAllString(b.String(), "")))
 			}
 			if doc.Result != nil {
 				return &exitError{exitCode(core.KindParse)}
@@ -106,7 +106,8 @@ its directives. Files that do not parse are reported, the rest listed.`,
 // column.
 var trailingSpace = regexp.MustCompile(`(?m) +$`)
 
-// directives summarises ds: how many asserts and captures, and the tags.
+// directives summarises ds: how many asserts and captures, the tags, and
+// whether the history keeps the request.
 func directives(ds []output.Directive) string {
 	count := map[string]int{}
 	var tags []string
@@ -124,6 +125,9 @@ func directives(ds []output.Directive) string {
 	}
 	if len(tags) > 0 {
 		parts = append(parts, "@tag "+strings.Join(tags, " "))
+	}
+	if count[core.NoLog] > 0 {
+		parts = append(parts, "@"+core.NoLog)
 	}
 	return strings.Join(parts, ", ")
 }

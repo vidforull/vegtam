@@ -18,10 +18,12 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 	"go.uber.org/goleak"
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/env"
+	"github.com/vidforull/vegtam/internal/core/history"
 )
 
 func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
@@ -83,7 +85,7 @@ func (fx *fixture) handler() http.Handler {
 	mux.HandleFunc("/escapes", func(w http.ResponseWriter, r *http.Request) {
 		// net/http refuses a header with ESC or BEL, but not 8-bit CSI.
 		w.Header().Set("X-Escape", "\x9b31m \u009b31m")
-		fmt.Fprint(w, "\x1b[2J\x1b[H\x1b]0;title\x07 \u009b31m \x1b[31mred\x1b[0m \x7f\r\x08 "+r.URL.Query().Get("key"))
+		fmt.Fprint(w, "\u202eevil\u200b\U000e0041 \x1b[2J\x1b[H\x1b]0;title\x07 \u009b31m \x1b[31mred\x1b[0m \x7f\r\x08 "+r.URL.Query().Get("key"))
 	})
 	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "\xff\xfe"+r.URL.RawQuery+"\x00")
@@ -126,15 +128,33 @@ func (fx *fixture) asked() []string {
 
 // newModel returns the interface on path, ready as Run would make it, on
 // a terminal of the given size.
-func newModel(t *testing.T, path, envName string, maxBody int64, width, height int) *Model {
+func newModel(t *testing.T, path, envName string, width, height int) *Model {
 	t.Helper()
-	m, err := New(Options{Path: path, Env: envName, Timeout: 5 * time.Second, MaxBody: maxBody, UserAgent: "vegtam/test"})
+	return open(t, Options{Path: path, Env: envName, Timeout: 5 * time.Second, MaxBody: 1 << 20, UserAgent: "vegtam/test"}, width, height)
+}
+
+// open returns the interface with opts, ready as Run would make it, on
+// a terminal of the given size.
+func open(t *testing.T, opts Options, width, height int) *Model {
+	t.Helper()
+	m, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.start(t.Context(), func() {})
 	m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	tick(m)
 	return m
+}
+
+// tick gives m a clock that moves a second each time it is read, so
+// that every key comes long enough after the one before it.
+func tick(m *Model) {
+	clock := time.Now()
+	m.now = func() time.Time {
+		clock = clock.Add(time.Second)
+		return clock
+	}
 }
 
 // keyMsg returns the message Bubble Tea makes of a key press.
@@ -188,7 +208,7 @@ func view(m *Model) string { return m.View().Content }
 
 func TestNavigation(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 1<<20, 100, 30)
+	m := newModel(t, fx.dir, "", 100, 30)
 	if r := m.rows[m.cursor]; r.index != 0 || !strings.Contains(m.requestText(), "GET {{host}}/echo?key={{token}}") {
 		t.Fatalf("the first request is not selected and shown as written:\n%s", view(m))
 	}
@@ -234,7 +254,7 @@ func TestNavigation(t *testing.T) {
 
 func TestEnvironment(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 1<<20, 100, 30)
+	m := newModel(t, fx.dir, "", 100, 30)
 	press(m, "e")
 	if m.mode != choosingEnv || strings.Join(m.envs, ",") != ",other,test" || !strings.Contains(view(m), "(none)") {
 		t.Fatalf("e: mode %d, environments %q\n%s", m.mode, m.envs, view(m))
@@ -252,7 +272,7 @@ func TestEnvironment(t *testing.T) {
 
 func TestSend(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 1<<20, 150, 40)
+	m := newModel(t, fx.dir, "test", 150, 40)
 	press(m, "enter")
 	if m.result == nil || m.result.Response == nil || !strings.Contains(view(m), "HTTP/1.1 200 OK") ||
 		!strings.Contains(m.responseText(), "✓ status == 200") {
@@ -264,14 +284,40 @@ func TestSend(t *testing.T) {
 	if m.mode != confirming || !strings.Contains(view(m), "Send POST") || !strings.Contains(view(m), "#create?") {
 		t.Fatalf("enter on a POST does not ask first:\n%s", view(m))
 	}
-	press(m, "n")
-	if got := fx.asked(); len(got) != 1 || m.mode != browsing || !strings.Contains(view(m), "not sent") {
-		t.Errorf("n: the server had %q\n%s", got, view(m))
+	if !strings.Contains(view(m), "enter sends it, any other key does not") {
+		t.Errorf("the question does not say which key sends:\n%s", view(m))
 	}
-	press(m, "enter", "y")
-	if got := fx.asked(); len(got) != 2 || got[1] != "POST /echo" {
-		t.Errorf("y: the server had %q", got)
+	// y, which copies as curl, does not send, nor does any other key.
+	for _, k := range []string{"n", "y", " ", "esc"} {
+		press(m, k)
+		if got := fx.asked(); len(got) != 1 || m.mode != browsing || !strings.Contains(view(m), "not sent") {
+			t.Errorf("%s: the server had %q\n%s", k, got, view(m))
+		}
+		press(m, "enter")
 	}
+	press(m, "enter")
+	if got := fx.asked(); len(got) != 2 || got[1] != "POST /echo" || m.mode != browsing {
+		t.Errorf("enter again: the server had %q", got)
+	}
+
+	// An enter that repeats a key held down, or that comes too soon after
+	// the question, as a key that bounces does, sends nothing: the
+	// question stays.
+	at := time.Now()
+	m.now = func() time.Time { return at }
+	press(m, "enter")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, IsRepeat: true})
+	at = at.Add(100 * time.Millisecond)
+	press(m, "enter")
+	if got := fx.asked(); len(got) != 2 || m.mode != confirming || !strings.Contains(view(m), "too soon: enter again") {
+		t.Errorf("a held or bouncing enter: the server had %q, mode %d\n%s", got, m.mode, view(m))
+	}
+	at = at.Add(time.Second)
+	press(m, "enter")
+	if got := fx.asked(); len(got) != 3 || m.mode != browsing {
+		t.Errorf("enter a second after the question: the server had %q", got)
+	}
+	tick(m)
 
 	// The session the sign-in captures is sent by the next request, and
 	// shown as its placeholder until then.
@@ -280,7 +326,7 @@ func TestSend(t *testing.T) {
 		t.Errorf("before the sign-in, session is not unresolved:\n%s", view(m))
 	}
 	goTo(t, m, "login")
-	press(m, "enter", "y")
+	press(m, "enter", "enter")
 	goTo(t, m, "me")
 	if !strings.Contains(m.requestText(), "X-Session: {{session}}") {
 		t.Errorf("after the sign-in, session is not a placeholder:\n%s", view(m))
@@ -314,7 +360,7 @@ func TestSend(t *testing.T) {
 
 func TestCancel(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 1<<20, 100, 30)
+	m := newModel(t, fx.dir, "test", 100, 30)
 	goTo(t, m, "slow")
 	_, cmd := m.Update(keyMsg("enter"))
 	if cmd == nil || m.flight == nil || !strings.Contains(view(m), "sending; esc cancels") {
@@ -347,7 +393,7 @@ func TestCancel(t *testing.T) {
 func TestLayouts(t *testing.T) {
 	fx := newFixture(t)
 	for _, sz := range []size{{40, 16}, {60, 24}, {80, 24}, {100, 30}, {139, 40}, {140, 40}, {200, 60}} {
-		m := newModel(t, fx.dir, "test", 1<<20, sz.w, sz.h)
+		m := newModel(t, fx.dir, "test", sz.w, sz.h)
 		press(m, "enter")
 		lines := strings.Split(view(m), "\n")
 		if len(lines) != sz.h {
@@ -365,7 +411,7 @@ func TestLayouts(t *testing.T) {
 // of a request ends the program with the panic kept for Run.
 func TestPanic(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 1<<20, 100, 30)
+	m := newModel(t, fx.dir, "", 100, 30)
 	m.rows = nil
 	if _, cmd := m.Update(keyMsg("j")); m.panicked == nil || cmd == nil {
 		t.Fatal("a panic in Update: nothing kept, or no quit")
@@ -373,7 +419,7 @@ func TestPanic(t *testing.T) {
 		t.Error("a panic in Update does not quit")
 	}
 
-	m = newModel(t, fx.dir, "", 1<<20, 100, 30)
+	m = newModel(t, fx.dir, "", 100, 30)
 	stopped := false
 	m.stop = func() { stopped = true }
 	m.rows, m.mode = nil, confirming
@@ -383,7 +429,7 @@ func TestPanic(t *testing.T) {
 
 	// Before the request's goroutine starts, the panic leaves no request
 	// in flight for Run to wait for.
-	m = newModel(t, fx.dir, "test", 1<<20, 100, 30)
+	m = newModel(t, fx.dir, "test", 100, 30)
 	m.send = nil
 	if _, cmd := m.Update(keyMsg("enter")); m.panicked == nil || cmd == nil || m.flight != nil {
 		t.Errorf("a panic before sending: kept %v, flight %v", m.panicked, m.flight)
@@ -393,7 +439,7 @@ func TestPanic(t *testing.T) {
 	fl := &flight{done: make(chan struct{})}
 	fl.send(t.Context(), nil, m.rows[1])
 	<-fl.done
-	m = newModel(t, fx.dir, "test", 1<<20, 100, 30)
+	m = newModel(t, fx.dir, "test", 100, 30)
 	if _, quit := m.Update(panicMsg{fl.panic}); fl.panic == nil || m.panicked != fl.panic || quit == nil {
 		t.Error("a panic in the request's goroutine: nothing kept, or no quit")
 	}
@@ -417,7 +463,7 @@ func shownLabels(m *Model) []string {
 
 func TestSearch(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 1<<20, 100, 30)
+	m := newModel(t, fx.dir, "test", 100, 30)
 	press(m, "tab", "/")
 	if m.mode != searching || m.focus != treePane {
 		t.Fatalf("/: mode %d, focus %d", m.mode, m.focus)
@@ -477,7 +523,7 @@ func styled(c env.Class, p string) string { return placeholderStyles[c].Render(p
 // value, which the preview shows as the error that sending would give.
 func TestHighlight(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 1<<20, 150, 40)
+	m := newModel(t, fx.dir, "", 150, 40)
 	text := m.request.GetContent()
 	for _, want := range []string{
 		"GET " + styled(env.Unresolved, "{{host}}") + "/echo?key=" + styled(env.Unresolved, "{{token}}") +
@@ -506,7 +552,7 @@ func TestHighlight(t *testing.T) {
 	fx.noSession = true
 	fx.mu.Unlock()
 	goTo(t, m, "login")
-	press(m, "enter", "y")
+	press(m, "enter", "enter")
 	goTo(t, m, "me")
 	if text = m.request.GetContent(); !strings.Contains(text, "X-Session: "+styled(env.Unresolved, "{{session}}")) ||
 		!strings.Contains(text, "✗ variable: ") || !strings.Contains(text, "not captured: session (") ||
@@ -521,7 +567,7 @@ func TestHighlight(t *testing.T) {
 	fx.noSession = false
 	fx.mu.Unlock()
 	goTo(t, m, "login")
-	press(m, "enter", "y")
+	press(m, "enter", "enter")
 	goTo(t, m, "me")
 	if text = m.request.GetContent(); !strings.Contains(text, "X-Session: "+styled(env.Captured, "{{session}}")) {
 		t.Errorf("after a sign-in that took the session:\n%q", text)
@@ -547,7 +593,7 @@ func clipboard(cmd tea.Cmd) (string, bool) {
 // as the comment says, it gives curl the request that vegtam sends.
 func TestCopyCurl(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 1<<20, 150, 40)
+	m := newModel(t, fx.dir, "test", 150, 40)
 	goTo(t, m, "everywhere")
 	_, cmd := m.Update(keyMsg("y"))
 	got, ok := clipboard(cmd)
@@ -593,7 +639,7 @@ func TestCopyCurl(t *testing.T) {
 
 	// A captured value is a shell variable too.
 	goTo(t, m, "login")
-	press(m, "enter", "y")
+	press(m, "enter", "enter")
 	goTo(t, m, "me")
 	if got, _ = yank(m); !strings.HasPrefix(got, "# Set first: session for {{session}} from an @capture\n") ||
 		!strings.HasSuffix(got, `  -H 'X-Session: '"$session"`+"\n") {
@@ -606,14 +652,14 @@ func TestCopyCurl(t *testing.T) {
 	if _, ok = yank(m); ok || !strings.Contains(view(m), "select a request to copy it") {
 		t.Errorf("y on a file:\n%s", view(m))
 	}
-	m = newModel(t, fx.dir, "", 1<<20, 150, 40)
+	m = newModel(t, fx.dir, "", 150, 40)
 	if _, ok = yank(m); ok || !strings.Contains(view(m), "not copied: unresolved variables: host, token") {
 		t.Errorf("y without an environment:\n%s", view(m))
 	}
 
 	// Nor while a request is in flight: esc would cancel it, not hide
 	// the command.
-	m = newModel(t, fx.dir, "test", 1<<20, 150, 40)
+	m = newModel(t, fx.dir, "test", 150, 40)
 	goTo(t, m, "slow")
 	_, sent := m.Update(keyMsg("enter"))
 	if _, ok = yank(m); ok || m.curl != "" || !strings.Contains(view(m), "Sending ") {
@@ -629,7 +675,7 @@ func TestCopyCurl(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(fx.dir, "literal.http"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m = newModel(t, fx.dir, "test", 1<<20, 150, 40)
+	m = newModel(t, fx.dir, "test", 150, 40)
 	goTo(t, m, "literal")
 	if got, ok = yank(m); ok || m.curl != "" || m.note != "not copied: a secret value is in the request outside a placeholder, in header X-Copy" {
 		t.Errorf("y with a secret in the text: %q\n%s", got, view(m))
@@ -653,7 +699,7 @@ func TestPastSecrets(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fx.dir, "literal.http"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m := newModel(t, fx.dir, "test", 1<<20, 150, 40) // the preview of echo reads the private file
+	m := newModel(t, fx.dir, "test", 150, 40) // the preview of echo reads the private file
 	press(m, "e", "k", "enter")
 	if m.env != "other" {
 		t.Fatalf("env %q", m.env)
@@ -678,7 +724,7 @@ func yank(m *Model) (string, bool) {
 // depth 1, from depth 2, then all of it again, for the next response too.
 func TestFold(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 1<<20, 150, 40)
+	m := newModel(t, fx.dir, "test", 150, 40)
 	press(m, "enter")
 	full := m.response.GetContent()
 	if !strings.Contains(full, "\"echo\": {\n    \"authorization\": \"Bearer ***\",") {
@@ -736,7 +782,7 @@ func TestFold(t *testing.T) {
 func TestStatusLine(t *testing.T) {
 	fx := newFixture(t)
 	for _, w := range []int{12, 20, 30, 40, 60, 72, 73, 80, 100, 160} {
-		m := newModel(t, fx.dir, "test", 1<<20, w, 24)
+		m := newModel(t, fx.dir, "test", w, 24)
 		m.note = "a note long enough not to fit beside the keys of any terminal this test tries"
 		line := sgr.ReplaceAllString(m.statusLine(), "")
 		if got := lipgloss.Width(line); got != w {
@@ -764,12 +810,205 @@ func TestStatusLine(t *testing.T) {
 // screen and draw it again, over what something else wrote on it.
 func TestRedraw(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 1<<20, 100, 30)
+	m := newModel(t, fx.dir, "", 100, 30)
 	for _, mode := range []mode{browsing, searching, helping} {
 		m.mode = mode
 		_, cmd := m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 		if cmd == nil || reflect.TypeOf(cmd()).Name() != "clearScreenMsg" {
 			t.Errorf("ctrl+l in mode %d: no clear screen", mode)
 		}
+	}
+}
+
+// TestHistory checks h: the latest runs, the latest first, searched with
+// /, each shown in the response pane, and enter that goes to its request
+// in the tree.
+func TestHistory(t *testing.T) {
+	fx := newFixture(t)
+	m := newModel(t, fx.dir, "test", 150, 40)
+	if press(m, "h"); m.runsOpen || !strings.Contains(view(m), "no history: it is turned off") {
+		t.Errorf("h without a history:\n%s", view(m))
+	}
+
+	log := history.New(filepath.Join(t.TempDir(), "vegtam"))
+	m = open(t, Options{Path: fx.dir, Env: "test", Timeout: 5 * time.Second, MaxBody: 1 << 20, History: log}, 150, 40)
+	if press(m, "h"); !m.runsOpen || !strings.Contains(view(m), "History") || !strings.Contains(view(m), "no runs yet") ||
+		!strings.Contains(m.responseText(), "No runs yet") {
+		t.Errorf("h before any run:\n%s", view(m))
+	}
+	if press(m, "enter"); !m.runsOpen || !strings.Contains(m.statusLine(), "no runs yet") {
+		t.Errorf("enter before any run:\n%s", view(m))
+	}
+	press(m, "esc")
+	goTo(t, m, "echo")
+	press(m, "enter")
+	goTo(t, m, "create")
+	press(m, "enter", "enter")
+	goTo(t, m, "refused")
+	press(m, "enter")
+
+	press(m, "h")
+	if len(m.runs) != 3 {
+		t.Fatalf("%d runs", len(m.runs))
+	}
+	today := m.runs[0].Time
+	m.now = func() time.Time { return today }
+	var labels, want []string
+	for i, outcome := range []string{"network api.http#refused", "200 api.http#create", "200 api.http#echo"} {
+		labels = append(labels, m.runLabel(m.runs[m.runShown[i]]))
+		want = append(want, m.runs[i].Time.Local().Format("15:04 ")+outcome)
+	}
+	if !slices.Equal(labels, want) {
+		t.Errorf("the runs: %q, want %q", labels, want)
+	}
+	if line := sgr.ReplaceAllString(m.statusLine(), ""); !strings.Contains(line, "enter go to") || !strings.Contains(line, "esc close") {
+		t.Errorf("the status line while the runs are listed: %q", line)
+	}
+	if v := view(m); !strings.Contains(v, "Run") || !strings.Contains(m.responseText(), "GET {{closed}}/?key={{token}}") ||
+		!strings.Contains(m.responseText(), "result    network") || len(leaks(v)) > 0 {
+		t.Errorf("the selected run:\n%s", v)
+	}
+	press(m, "j")
+	if text := m.responseText(); !strings.Contains(text, "POST {{host}}/echo?key={{token}}") || !strings.Contains(text, "status    200") {
+		t.Errorf("the second run:\n%s", text)
+	}
+
+	// The search narrows the runs; enter goes to the request of the run.
+	press(m, "/")
+	typeText(m, "get")
+	if len(m.runShown) != 2 || !strings.Contains(view(m), "/get_") {
+		t.Errorf("searching the runs for get: %d shown\n%s", len(m.runShown), view(m))
+	}
+	press(m, "enter", "j", "enter")
+	if m.runsOpen || m.rows[m.cursor].file.Requests[m.rows[m.cursor].index].Name != "echo" || m.focus != treePane {
+		t.Errorf("enter on the run of echo: open %v, cursor on %q", m.runsOpen, m.rows[m.cursor].label)
+	}
+	if !strings.Contains(m.responseText(), "✗ network: ") { // of the latest run, refused
+		t.Errorf("after the history, the response is not back:\n%s", m.responseText())
+	}
+
+	// A request that the search of the tree hides is shown again.
+	press(m, "/")
+	typeText(m, "refused")
+	press(m, "enter", "h", "j", "enter")
+	if m.query != "" || m.rows[m.cursor].label != "POST create" {
+		t.Errorf("going to a request the search hides: query %q, cursor on %q", m.query, m.rows[m.cursor].label)
+	}
+
+	// A run of a request that is not in the tree stays in the history.
+	elsewhere := history.Entry{Time: today.AddDate(0, 0, -1), Ref: "/elsewhere/x.http#gone", Method: "GET", URL: "{{host}}", Result: "ok"}
+	if err := log.Add(elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	press(m, "h")
+	if text := m.responseText(); !strings.Contains(text, "/elsewhere/x.http#gone") || !strings.Contains(text, "not in the list") {
+		t.Errorf("a run from elsewhere:\n%s", text)
+	}
+	if got, want := m.runLabel(m.runs[0]), today.AddDate(0, 0, -1).Local().Format("01-02")+" ok /elsewhere/x.http#gone"; got != want {
+		t.Errorf("a run of yesterday: %q, want %q", got, want)
+	}
+	press(m, "enter")
+	if !m.runsOpen || !strings.Contains(view(m), "not in the list of requests: /elsewhere/x.http#gone") {
+		t.Errorf("enter on a run from elsewhere:\n%s", view(m))
+	}
+	press(m, "h")
+	if m.runsOpen {
+		t.Error("h does not close the history")
+	}
+	if got, err := log.Last(10); err != nil || len(got) != 4 {
+		t.Errorf("the history has %d runs, %v", len(got), err)
+	}
+
+	// While a request is in flight, esc closes the list first, and the
+	// status line does not say that it cancels.
+	goTo(t, m, "slow")
+	_, sent := m.Update(keyMsg("enter"))
+	press(m, "h")
+	if line := sgr.ReplaceAllString(m.statusLine(), ""); !m.runsOpen || !strings.Contains(line, " sending ") || strings.Contains(line, "esc cancels") {
+		t.Errorf("the status line with the runs open, sending: %q", line)
+	}
+	press(m, "esc")
+	if m.runsOpen || m.flight == nil || !strings.Contains(m.statusLine(), "esc cancels") {
+		t.Errorf("esc with the runs open: open %v, flight %v", m.runsOpen, m.flight)
+	}
+	press(m, "esc")
+	m.Update(sent())
+	if m.flight != nil || m.result.Error == nil || m.result.Error.Kind != core.KindCanceled {
+		t.Errorf("the request was not canceled: %+v", m.result)
+	}
+
+	// A history that cannot be written is a note, after the response.
+	blocked := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m = open(t, Options{Path: fx.dir, Env: "test", Timeout: 5 * time.Second, MaxBody: 1 << 20, History: history.New(blocked)}, 150, 40)
+	press(m, "enter")
+	if m.result.Error != nil || !strings.Contains(m.statusLine(), "history: ") {
+		t.Errorf("with no place for the history: %+v\n%s", m.result.Error, m.statusLine())
+	}
+}
+
+// TestHelpScrolls checks that the help, on a terminal too small for it,
+// keeps its frame and scrolls, and that it fits 80x24 as a whole.
+func TestHelpScrolls(t *testing.T) {
+	fx := newFixture(t)
+	for _, sz := range []size{{40, 16}, {60, 24}, {80, 24}, {150, 40}} {
+		m := newModel(t, fx.dir, "test", sz.w, sz.h)
+		press(m, "?")
+		lines := strings.Split(sgr.ReplaceAllString(view(m), ""), "\n")
+		if len(lines) != sz.h || !strings.HasPrefix(lines[sz.h-2], "╰") {
+			t.Errorf("%dx%d: %d lines, the frame ends with %q", sz.w, sz.h, len(lines), lines[sz.h-2])
+		}
+		scrolls := strings.Contains(lines[1], "scroll")
+		if want := sz.w < 80; scrolls != want {
+			t.Errorf("%dx%d: the title says it scrolls: %v\n%s", sz.w, sz.h, scrolls, strings.Join(lines, "\n"))
+		}
+		for range 20 {
+			press(m, "f")
+		}
+		if v := sgr.ReplaceAllString(view(m), ""); !strings.Contains(v, "what does not resolve.") || !strings.Contains(v, "╰") {
+			t.Errorf("%dx%d: the end of the help is not reached:\n%s", sz.w, sz.h, v)
+		}
+		press(m, "esc")
+		if m.mode != browsing {
+			t.Errorf("%dx%d: esc leaves mode %d", sz.w, sz.h, m.mode)
+		}
+	}
+}
+
+// TestPlainTerminal checks that, on a terminal that shows no styles, a
+// mark shows the selected line of the list.
+func TestPlainTerminal(t *testing.T) {
+	fx := newFixture(t)
+	m := newModel(t, fx.dir, "", 100, 30)
+	goTo(t, m, "create")
+	m.Update(tea.ColorProfileMsg{Profile: colorprofile.NoTTY})
+	v := sgr.ReplaceAllString(view(m), "")
+	if !strings.Contains(v, ">   POST create") || !strings.Contains(v, "    GET echo") || strings.Count(v, "> ") != 1 {
+		t.Errorf("no mark on the selected line:\n%s", v)
+	}
+	press(m, "e")
+	if v = sgr.ReplaceAllString(view(m), ""); !strings.Contains(v, "> (none)") {
+		t.Errorf("no mark on the selected environment:\n%s", v)
+	}
+	m.Update(tea.ColorProfileMsg{Profile: colorprofile.ANSI})
+	if v = view(m); strings.Contains(v, "> (none)") {
+		t.Errorf("a mark on a terminal with styles:\n%s", v)
+	}
+}
+
+// TestNoEnvironmentHint checks that, without an environment, the error
+// of an unresolved variable points to e, not to -e.
+func TestNoEnvironmentHint(t *testing.T) {
+	fx := newFixture(t)
+	m := newModel(t, fx.dir, "", 100, 30)
+	goTo(t, m, "echo")
+	if text := m.requestText(); !strings.Contains(text, "(no environment selected; e chooses one)") || strings.Contains(text, "-e") {
+		t.Errorf("preview:\n%s", text)
+	}
+	press(m, "enter")
+	if m.result.Error == nil || !strings.HasSuffix(m.result.Error.Message, "(no environment selected; e chooses one)") {
+		t.Errorf("sent: %+v", m.result.Error)
 	}
 }

@@ -28,7 +28,7 @@ func (c *Config) printResult(res *output.Result, i int, several, verbose bool) {
 	if res.Response != nil {
 		output.WriteResponse(&b, res, verbose, 0)
 	}
-	fmt.Fprint(c.out, printable(b.String()))
+	fmt.Fprint(c.out, c.text(b.String()))
 	if res.Error != nil {
 		c.printError(res.Error)
 	}
@@ -37,3 +37,9 @@ func (c *Config) printResult(res *output.Result, i int, several, verbose bool) {
 // printable is output.Printable, kept under this name for FuzzPrintable,
 // which make fuzz runs in this package.
 func printable(s string) string { return output.Printable(s) }
+
+// text makes s fit for a terminal, as printable does, once every secret
+// value in it is masked: printable shows an invisible character as an
+// escape, which would hide a value that holds one from the masker of
+// the writer, which comes last.
+func (c *Config) text(s string) string { return printable(c.masker.Mask(s)) }

@@ -9,9 +9,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/env"
+	"github.com/vidforull/vegtam/internal/core/history"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
 	"github.com/vidforull/vegtam/internal/core/output"
 )
@@ -168,5 +170,71 @@ func TestCurl(t *testing.T) {
 	s.Forget("token", "api.http#login")
 	if _, err = s.Curl(t.Context(), s.Prepare(t.Context(), f, 1), nil); err == nil || !strings.Contains(err.Error(), "not captured: token") {
 		t.Errorf("Curl after the capture lost token: %v", err)
+	}
+}
+
+// TestHistory checks what the history keeps of the runs of a session: a
+// request sent, as written, and how it ended; nothing of a dry run, and
+// nothing of a request with @no-log.
+func TestHistory(t *testing.T) {
+	f := newFile(t)
+	dir := filepath.Dir(f.Path)
+	src := "# @name quiet\n# @no-log\nGET {{host}}/me?t={{token}}\n\n###\nGET {{host}}/x/{{nothing}}\n"
+	if err := os.WriteFile(filepath.Join(dir, "more.http"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	more, err := httpfile.ParseFile(filepath.Join(dir, "more.http"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := history.New(filepath.Join(t.TempDir(), "vegtam"))
+	t.Chdir(dir)
+	s := New(Options{Env: "test", MaxBody: 1 << 20, History: log})
+	for _, r := range []struct {
+		f *core.File
+		i int
+	}{{f, 0}, {more, 0}, {more, 1}, {f, 1}} {
+		s.Run(t.Context(), s.Prepare(t.Context(), r.f, r.i))
+	}
+	dry := New(Options{Env: "test", DryRun: true, History: log})
+	dry.Run(t.Context(), dry.Prepare(t.Context(), f, 0))
+	if err = s.HistoryError(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := log.Last(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type kept struct{ ref, env, method, url, result string }
+	var have []kept
+	for _, e := range got {
+		have = append(have, kept{e.Ref, e.Env, e.Method, e.URL, e.Result})
+		if e.Time.Location() != time.UTC || time.Since(e.Time) > time.Minute || e.DurationMS < 0 || e.Status != 0 && e.DurationMS == 0 || e.Truncated {
+			t.Errorf("%s: time %v, duration %v, truncated %v", e.Ref, e.Time, e.DurationMS, e.Truncated)
+		}
+	}
+	abs, _ := filepath.Abs(f.Path)
+	want := []kept{
+		{abs + "#me", "test", "GET", "{{host}}/me", "ok"},
+		{filepath.Join(dir, "more.http") + "#2", "test", "GET", "{{host}}/x/{{nothing}}", "variable"},
+		{abs + "#login", "test", "POST", "{{host}}/login", "ok"},
+	}
+	if !reflect.DeepEqual(have, want) {
+		t.Errorf("history:\n%+v\nwant\n%+v", have, want)
+	}
+	// One that could not be resolved was never sent: no status.
+	if got[0].Status != http.StatusOK || got[1].Status != 0 {
+		t.Errorf("statuses %d, %d", got[0].Status, got[1].Status)
+	}
+
+	// A history that cannot be written does not stop the run, and says why.
+	blocked := filepath.Join(t.TempDir(), "file")
+	if err = os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s = New(Options{Env: "test", MaxBody: 1 << 20, History: history.New(filepath.Join(blocked, "vegtam"))})
+	if res := s.Run(t.Context(), s.Prepare(t.Context(), f, 0)); res.Error != nil || s.HistoryError() == nil {
+		t.Errorf("with no place for the history: %+v, %v", res.Error, s.HistoryError())
 	}
 }

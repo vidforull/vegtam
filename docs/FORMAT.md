@@ -59,7 +59,9 @@ the contents of that file, sent as is: placeholders in the file are not
 resolved. The path is relative to the directory of the `.http` file and
 must stay inside it: an absolute path, a path that leads out with `..`
 and a symbolic link to a file elsewhere are errors, so that a `.http`
-file cannot send a file from elsewhere on the machine.
+file cannot send a file from elsewhere on the machine. It must be a
+regular file of at most 16 MiB: a directory, a named pipe, a socket or a
+device is an error, before anything is read from it.
 
 **Names.** `# @name <id>` or `// @name <id>` names the request that
 follows. An id consists of letters, digits, `.`, `_` and `-`, is not a
@@ -79,11 +81,13 @@ vegtam's own extensions are comments, so other tools ignore them:
 | `# @assert <check>` | a check on the response, such as `status == 200` |
 | `# @capture [plain] <name> = <source>` | takes a value from the response for the requests after it, such as `token = $.token` |
 | `# @tag <tags>` | labels for selecting requests |
+| `# @no-log` | keeps the request out of the history of runs, as in JetBrains, kulala and httpyac |
 
 Directives go before the request line or among the headers, and each
-needs a value. Their values are taken as written: placeholders in them
-are not resolved, so `header Authorization == "Bearer {{token}}"`
-compares with that very text. `@tag` is kept with the request but not
+but `@no-log`, which takes none, needs a value. Their values are taken
+as written: placeholders in them are not resolved, so
+`header Authorization == "Bearer {{token}}"` compares with that very
+text. `@tag` is kept with the request but not
 used yet. Any other `# @word`, and an `@assert` or `@capture` outside the
 grammar below, is an error with the file and line, also for
 `--dry-run`, which parses directives but evaluates none.
@@ -246,9 +250,18 @@ from the `.http` file's directory upwards, as for environment files:
   globbing, no variables, no pipes. A program without a `/` is looked up
   in `PATH`; a relative path such as `./bin/token` is relative to the
   directory where `http-client.cmd.json` is.
-- The command runs in that directory, with vegtam's environment and no
-  input, for at most `timeout`, a Go duration (`30s` by default). It may
-  leave processes behind; its own exit status is what counts.
+- The command runs in that directory, with vegtam's environment, no
+  input and, on Unix, no terminal (in a session of its own), for at most
+  `timeout`, a Go duration (`30s` by default). It may leave processes
+  behind; its own exit status is what counts.
+- So a command must get the secret without asking at the terminal: from
+  an agent or a cache it has unlocked before, or with a window of its
+  own. One that asks anyway finds nothing on its input and cannot open
+  `/dev/tty`; it fails at once, and the error says why, rather than wait
+  for an answer under the terminal interface, which reads every key. A
+  program that finds the terminal by its name is beyond this: gpg-agent
+  does so through `GPG_TTY` for `pinentry-curses`. Give it a graphical
+  pinentry, or unlock the agent before.
 - Its standard output, less one final line break (`\n` or `\r\n`), is
   the value. A command that exits with an error is an error of kind
   `variable` with the first KiB of what it wrote to standard error, in
@@ -290,7 +303,9 @@ secret value, including its URL- and JSON-escaped forms, is replaced with
 When a redirect leads to another origin (scheme, host or port),
 `Authorization`, `Cookie`, `Proxy-Authorization`, `Referer` and every
 header whose value holds a secret are dropped for the rest of the redirect
-chain. A 307 or 308 redirect sends the body again, so one to another
+chain. No redirect sends the URL it came from as the `Referer`, as other
+clients do: its query may hold a token. A `Referer` the request has itself
+is sent on as far as its origin. A 307 or 308 redirect sends the body again, so one to another
 origin is refused if the body holds a secret. A redirect from `https` to
 `http` is always refused. A refused redirect is a `network` error.
 

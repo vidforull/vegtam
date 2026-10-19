@@ -99,6 +99,10 @@ func TestCommand(t *testing.T) {
 `,
 		},
 		{
+			"invisible characters", request("POST", core.Text{lit("http://x.test/a\u200bb")}, nil, core.Text{lit("ab\u202edc")}),
+			"curl --path-as-is $'http://x.test/a\\xe2\\x80\\x8bb' \\\n  -H 'Content-Type:' \\\n  --data-raw $'ab\\xe2\\x80\\xaedc'\n",
+		},
+		{
 			"multi-line body", request("POST", core.Text{lit("http://x.test/")}, nil, core.Text{lit("a\nb\n")}),
 			"curl --path-as-is 'http://x.test/' \\\n  -H 'Content-Type:' \\\n  --data-raw 'a\nb\n'\n",
 		},
@@ -156,7 +160,7 @@ func TestCommandInShell(t *testing.T) {
 		"API_KEY": "k+y/=",
 		"session": "s\nid",
 	}
-	body := "{\n\t\"it's\": \"\x01\u009b\xff\", \"t\": \""
+	body := "{\n\t\"it's\": \"\x01\u009b\xff\u202e\u200b\", \"t\": \""
 	p := request("PATCH",
 		core.Text{lit("https://x.test/u/"), secret("token"), lit("?k="), secret("$env API_KEY"), lit("&a[]=1")},
 		[]core.PreparedHeader{
@@ -195,5 +199,17 @@ func TestCommandInShell(t *testing.T) {
 		if strings.Contains(cmd, v) {
 			t.Errorf("the command holds the value %q:\n%s", v, cmd)
 		}
+	}
+}
+
+// TestCommandOddNames checks that a placeholder whose name holds an
+// invisible or control character is named in the comment with escapes:
+// the command holds no such character anywhere.
+func TestCommandOddNames(t *testing.T) {
+	p := request("GET", core.Text{lit("http://x.test/?k="), secret("$env A\u200bB"), lit("&e="), secret("x\x1b]0;t\x07")}, nil, nil)
+	cmd, err := Command(p, nil)
+	if err != nil || strings.ContainsFunc(cmd, func(r rune) bool { return r < ' ' && r != '\n' || core.Invisible(r) }) ||
+		!strings.Contains(cmd, `A_B for {{"$env A\u200bB"}}`) || !strings.Contains(cmd, `x__0_t_ for {{"x\x1b]0;t\a"}}`) {
+		t.Errorf("Command = %q, %v", cmd, err)
 	}
 }

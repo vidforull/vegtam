@@ -22,12 +22,13 @@ import (
 )
 
 type runFlags struct {
-	env     string
-	dryRun  bool
-	fail    bool
-	timeout time.Duration
-	maxBody byteSize
-	verbose bool
+	env       string
+	dryRun    bool
+	fail      bool
+	timeout   time.Duration
+	maxBody   byteSize
+	verbose   bool
+	noHistory bool
 }
 
 func newRunCmd(cfg *Config) *cobra.Command {
@@ -52,7 +53,13 @@ A captured value is a variable for the requests after it in the same
 run, over the environment; it is a secret unless the directive says
 plain. {{$cmd NAME}} runs a command of http-client.cmd.json once per run,
 if the file is trusted (see vegtam trust --help); --dry-run checks the
-trust but runs nothing.`,
+trust but runs nothing.
+
+Each request sent goes into the history of runs, which keeps where it is
+written, its method and URL as written, and how it ended, and never a
+secret: $XDG_DATA_HOME/vegtam/history.jsonl, or
+~/.local/share/vegtam/history.jsonl. --no-history keeps this run out of
+it, VEGTAM_NO_HISTORY=1 every run, and "# @no-log" one request.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return run(cmd.Context(), cfg, f, args[0])
@@ -65,6 +72,7 @@ trust but runs nothing.`,
 	fl.DurationVar(&f.timeout, "timeout", 30*time.Second, "time limit for each request, body included; 0 for none")
 	fl.Var(&f.maxBody, "max-body", "response body bytes to keep, such as 64KiB or 10MB; the rest is not read")
 	fl.BoolVarP(&f.verbose, "verbose", "v", false, "print the request and the response headers too")
+	fl.BoolVar(&f.noHistory, "no-history", false, "keep this run out of the history of runs")
 	return cmd
 }
 
@@ -76,6 +84,7 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 	s := session.New(session.Options{
 		Env: f.env, DryRun: f.dryRun, Trust: policy.DefaultStore(),
 		Timeout: f.timeout, MaxBody: int64(f.maxBody), UserAgent: "vegtam/" + cfg.Version, Fail: f.fail,
+		History: cfg.history(f.noHistory || f.dryRun),
 	})
 	cfg.secrets = s.Masker
 	jobs, err := t.jobs(ctx, s)
@@ -88,9 +97,14 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 	}
 	code := exitOK
 	results := []*output.Result{}
+	warned := false
 	for i, j := range jobs {
 		res := s.Run(ctx, j)
 		cfg.masker = s.Masker()
+		if err := s.HistoryError(); err != nil && !warned {
+			fmt.Fprintf(cfg.errOut, "vegtam: history: %s; --no-history or VEGTAM_NO_HISTORY=1 turns it off\n", cfg.text(err.Error()))
+			warned = true
+		}
 		if res.Error != nil {
 			code = max(code, exitCode(res.Error.Kind))
 		}

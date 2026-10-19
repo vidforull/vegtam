@@ -120,9 +120,13 @@ func TestRedirectDropsSecrets(t *testing.T) {
 	if r, err := do(t, Options{}, p); err != nil || r.Status != 200 {
 		t.Fatalf("Do = %v, %v", r, err)
 	}
-	if h := seen["/same"]; h.Get("Authorization") != "t0ken" || h.Get("Cookie") != "session=abc" ||
-		h.Get("X-Api-Key") != "k3y" || !strings.Contains(h.Get("Referer"), "key=t0ken") {
+	if h := seen["/same"]; h.Get("Authorization") != "t0ken" || h.Get("Cookie") != "session=abc" || h.Get("X-Api-Key") != "k3y" {
 		t.Errorf("same origin lost headers: %v", h)
+	}
+	// net/http would send the URL redirected from, with the token in its
+	// query, as the Referer, on the same origin too.
+	if _, ok := seen["/same"]["Referer"]; ok {
+		t.Errorf("same origin: Referer %q", seen["/same"].Get("Referer"))
 	}
 	for _, path := range []string{"/end", "/back"} {
 		h := seen[path]
@@ -134,6 +138,19 @@ func TestRedirectDropsSecrets(t *testing.T) {
 				t.Errorf("%s: %s = %q followed a redirect to another origin", path, name, v)
 			}
 		}
+	}
+
+	// A Referer of the request's own goes as far as its origin.
+	clear(seen)
+	p.Headers = append(p.Headers, header("Referer", lit("https://app.example.test/page")))
+	if r, err := do(t, Options{}, p); err != nil || r.Status != 200 {
+		t.Fatalf("Do = %v, %v", r, err)
+	}
+	if got := seen["/same"].Get("Referer"); got != "https://app.example.test/page" {
+		t.Errorf("same origin: the request's Referer became %q", got)
+	}
+	if got := seen["/end"].Get("Referer"); got != "" {
+		t.Errorf("another origin: Referer %q", got)
 	}
 }
 

@@ -5,7 +5,9 @@ package session
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/vidforull/vegtam/internal/core"
@@ -13,6 +15,7 @@ import (
 	"github.com/vidforull/vegtam/internal/core/curl"
 	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/exec"
+	"github.com/vidforull/vegtam/internal/core/history"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
 	"github.com/vidforull/vegtam/internal/core/output"
 	"github.com/vidforull/vegtam/internal/core/policy"
@@ -28,7 +31,11 @@ type Options struct {
 	Timeout   time.Duration // for each request, body included; 0 means none
 	MaxBody   int64         // response body bytes kept
 	UserAgent string
-	Fail      bool // a response status of 400 or above is an error of kind status
+	Fail      bool   // a response status of 400 or above is an error of kind status
+	EnvHint   string // see env.Options
+	// History keeps each request sent, outside a dry run, unless it has
+	// an @no-log directive; nil keeps none.
+	History *history.Log
 }
 
 // Session is one run: the environment loader that hands out variables and
@@ -36,17 +43,18 @@ type Options struct {
 // variable for the requests prepared after the one it came from. A
 // Session is not safe for concurrent use.
 type Session struct {
-	opts     Options
-	loader   *env.Loader
-	client   *exec.Client
-	declared []string // the variables @capture directives take, in order
+	opts       Options
+	loader     *env.Loader
+	client     *exec.Client
+	declared   []string // the variables @capture directives take, in order
+	historyErr error    // why the entry of the latest run was not kept
 }
 
 // New returns a Session.
 func New(opts Options) *Session {
 	return &Session{
 		opts:   opts,
-		loader: env.NewLoader(env.Options{Env: opts.Env, DryRun: opts.DryRun, Trust: opts.Trust}),
+		loader: env.NewLoader(env.Options{Env: opts.Env, DryRun: opts.DryRun, Trust: opts.Trust, EnvHint: opts.EnvHint}),
 		client: exec.New(exec.Options{Timeout: opts.Timeout, MaxBody: opts.MaxBody, UserAgent: opts.UserAgent}),
 	}
 }
@@ -155,6 +163,7 @@ func (s *Session) Jobs(ctx context.Context, root string) ([]*Job, error) {
 // value of a variable that one of them did not take. In a dry run they
 // took nothing, and lost nothing either.
 func (s *Session) Run(ctx context.Context, j *Job) *output.Result {
+	start := time.Now()
 	res := &output.Result{Ref: j.Ref}
 	err := j.Err
 	switch {
@@ -176,7 +185,42 @@ func (s *Session) Run(ctx context.Context, j *Job) *output.Result {
 	if err != nil {
 		res.Error = output.NewError(err, s.Masker())
 	}
+	s.record(j, res, start)
 	return res
+}
+
+// HistoryError returns why the history could not keep the latest run,
+// or nil.
+func (s *Session) HistoryError() error { return s.historyErr }
+
+// record adds the run of j that started at start and gave res to the
+// history: what its file says of it, and how it ended. Its URL is kept
+// as written, with any secret value in it masked all the same; nothing
+// it resolved to is kept. A dry run is no run, a file that does not parse
+// has no request, and a request with @no-log is not kept.
+func (s *Session) record(j *Job, res *output.Result, start time.Time) {
+	s.historyErr = nil
+	if s.opts.History == nil || s.opts.DryRun || j.Request == nil || j.Request.NoLog() {
+		return
+	}
+	e := history.Entry{
+		Time: start, Ref: j.Ref, Env: s.opts.Env, Method: j.Request.Method, URL: s.Masker().Mask(j.Request.URL),
+		DurationMS: float64(time.Since(start).Microseconds()) / 1000, Result: "ok",
+	}
+	// The ref names the file as given; the history names it wherever the
+	// next run starts from.
+	file := j.Request.Source.File
+	if abs, err := filepath.Abs(file); err == nil && strings.HasPrefix(j.Ref, file+"#") {
+		e.Ref = abs + strings.TrimPrefix(j.Ref, file)
+	}
+	if r := res.Response; r != nil {
+		e.Status, e.Truncated = r.Status, r.Truncated
+		e.DurationMS = res.Timing.TotalMS
+	}
+	if res.Error != nil {
+		e.Result = string(res.Error.Kind)
+	}
+	s.historyErr = s.opts.History.Add(e)
 }
 
 // Curl returns the request of j as a curl command line, as Run would send

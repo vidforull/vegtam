@@ -63,7 +63,7 @@ written.`,
 				cfg.writeJSON(output.Document{SchemaVersion: output.SchemaVersion, Import: res.Report})
 				return nil
 			}
-			fmt.Fprint(cfg.out, printable(importText(res.Report)))
+			fmt.Fprint(cfg.out, cfg.text(importText(res.Report)))
 			return nil
 		},
 	}

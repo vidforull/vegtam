@@ -122,9 +122,20 @@ vegtam schema                         # the JSON Schema of the JSON output
 
 Secrets can also come from a command, such as a password manager's CLI:
 `{{$cmd TOKEN}}` runs the command `TOKEN` of `http-client.cmd.json`, but
-only once you have read the file and trusted it with `vegtam trust`.
+only once you have read the file and trusted it with `vegtam trust`. The
+command gets no input and, on Unix, no terminal, so it must not ask for
+a password there: unlock the manager's agent first, or let it ask in a
+window of its own.
 
 `vegtam --help` lists the exit codes.
+
+Each request sent goes into a history of runs,
+`~/.local/share/vegtam/history.jsonl` (or under `$XDG_DATA_HOME`): when,
+which request, the environment, the method and URL as written, the
+status, the time and the outcome. It holds no secret: no headers, bodies
+or values, and no URL with its placeholders resolved. `--no-history`
+keeps a run out of it, `VEGTAM_NO_HISTORY=1` every run, and
+`# @no-log` one request.
 
 ## TUI
 
@@ -149,13 +160,14 @@ and in a narrower terminal they stack.
 | `j`/`k`, `↓`/`↑` | move in the list; scroll the request or the response |
 | `Tab`, `Shift-Tab` | next, previous pane |
 | `/` | search the list by label, file name or URL; `Enter` keeps the search, `Esc` clears it |
-| `Enter` | send the selected request; for a method other than GET, HEAD or OPTIONS, after a `y` (any other key leaves it unsent) |
+| `Enter` | send the selected request; for a method other than GET, HEAD or OPTIONS, after a second `Enter` (any other key leaves it unsent) |
 | `Esc` | cancel the request in flight; hide a copied command |
 | `y` | copy the selected request as a `curl` command |
 | `z` | fold the JSON body of the response from depth 1, then 2, then not at all |
 | `e` | choose the environment |
+| `h` | list the latest runs; `Enter` goes to the request of one, `/` searches them, `Esc` closes the list |
 | `Ctrl-L` | redraw the screen |
-| `?` | list the keys |
+| `?` | list the keys; on a small terminal, `j`/`k` and `f`/`b` scroll them |
 | `q`, `Ctrl-C` | quit |
 
 In the request and response panes `f`/`b` scroll by a page and `d`/`u`
@@ -163,7 +175,7 @@ by half of one. A value that an `@capture` takes is a variable for the
 requests sent after it, until another environment is chosen. Each send
 reads the environment files again and runs `{{$cmd NAME}}` again, so an
 edited file counts at once. Secrets are masked as in the CLI's output,
-and the interface writes no files.
+and the interface writes no file but the history of runs.
 
 `y` puts the command on the clipboard through the terminal (OSC 52) and
 shows it in the response pane, for a terminal that does not pass OSC 52

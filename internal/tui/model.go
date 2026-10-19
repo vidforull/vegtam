@@ -5,14 +5,17 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/env"
+	"github.com/vidforull/vegtam/internal/core/history"
 	"github.com/vidforull/vegtam/internal/core/output"
 	"github.com/vidforull/vegtam/internal/core/session"
 )
@@ -68,6 +71,18 @@ type Model struct {
 	past, sent *core.Masker
 	masker     *core.Masker
 
+	// The history of runs, while the tree pane lists it in place of the
+	// requests: the runs h read, the latest first, those that match the
+	// search of the history, and the selected one.
+	runsOpen bool
+	runs     []history.Entry
+	runShown []int
+	run      int
+	runQuery string
+	base     string // the absolute directory of opts.Path, which the history's refs are shown from
+	now      func() time.Time
+	asked    time.Time // when the question before sending was asked
+
 	preview *output.Result // the selected request as it would be sent, or what stops it
 	result  *output.Result // the latest response
 	curl    string         // the selected request as a curl command, cleaned; shown over the response
@@ -76,6 +91,8 @@ type Model struct {
 	note    string // a message for the status line
 
 	request, response viewport.Model
+	help              viewport.Model // the keys and what they do, over all panes
+	plain             bool           // the terminal shows no styles, as with TERM=dumb
 	keys              keyMap
 	panicked          *Panic
 }
@@ -83,7 +100,7 @@ type Model struct {
 type size struct{ w, h int }
 
 type keyMap struct {
-	Up, Down, Next, Prev, Search, Send, Cancel, Copy, Fold, Env, Redraw, Help, Quit key.Binding
+	Up, Down, Next, Prev, Search, Send, Cancel, Copy, Fold, Env, History, Redraw, Help, Quit key.Binding
 }
 
 func newKeys() keyMap {
@@ -91,19 +108,20 @@ func newKeys() keyMap {
 		return key.NewBinding(key.WithKeys(keys...), key.WithHelp(help, desc))
 	}
 	return keyMap{
-		Up:     b([]string{"k", "up"}, "k/↑", "up"),
-		Down:   b([]string{"j", "down"}, "j/↓", "down"),
-		Next:   b([]string{"tab"}, "tab", "next pane"),
-		Prev:   b([]string{"shift+tab"}, "shift+tab", "previous pane"),
-		Search: b([]string{"/"}, "/", "search the list"),
-		Send:   b([]string{"enter"}, "enter", "send the request"),
-		Cancel: b([]string{"esc"}, "esc", "cancel the request in flight"),
-		Copy:   b([]string{"y"}, "y", "copy as curl"),
-		Fold:   b([]string{"z"}, "z", "fold the JSON body"),
-		Env:    b([]string{"e"}, "e", "environment"),
-		Redraw: b([]string{"ctrl+l"}, "ctrl+l", "redraw the screen"),
-		Help:   b([]string{"?"}, "?", "help"),
-		Quit:   b([]string{"q", "ctrl+c"}, "q", "quit"),
+		Up:      b([]string{"k", "up"}, "k/↑", "up"),
+		Down:    b([]string{"j", "down"}, "j/↓", "down"),
+		Next:    b([]string{"tab"}, "tab", "next pane"),
+		Prev:    b([]string{"shift+tab"}, "shift+tab", "previous pane"),
+		Search:  b([]string{"/"}, "/", "search the list"),
+		Send:    b([]string{"enter"}, "enter", "send the request"),
+		Cancel:  b([]string{"esc"}, "esc", "cancel the request in flight"),
+		Copy:    b([]string{"y"}, "y", "copy as curl"),
+		Fold:    b([]string{"z"}, "z", "fold the JSON body"),
+		Env:     b([]string{"e"}, "e", "environment"),
+		History: b([]string{"h"}, "h", "history of runs"),
+		Redraw:  b([]string{"ctrl+l"}, "ctrl+l", "redraw the screen"),
+		Help:    b([]string{"?"}, "?", "help"),
+		Quit:    b([]string{"q", "ctrl+c"}, "q", "quit"),
 	}
 }
 
@@ -116,6 +134,16 @@ func (k keyMap) ShortHelp() []key.Binding {
 	return []key.Binding{short(k.Send, "send"), short(k.Search, "search"), short(k.Copy, "curl"), short(k.Env, "env"), k.Help, k.Quit}
 }
 
+// runsHelp returns the keys for the status line while the tree pane
+// lists the runs.
+func (k keyMap) runsHelp() []key.Binding {
+	short := func(b key.Binding, desc string) key.Binding {
+		b.SetHelp(b.Help().Key, desc)
+		return b
+	}
+	return []key.Binding{short(k.Send, "go to"), short(k.Search, "search"), short(k.Cancel, "close"), k.Help, k.Quit}
+}
+
 // mainHelp returns the keys the status line keeps when there is no room
 // for the others.
 func (k keyMap) mainHelp() []key.Binding {
@@ -123,7 +151,7 @@ func (k keyMap) mainHelp() []key.Binding {
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Next, k.Prev, k.Search}, {k.Send, k.Cancel, k.Copy, k.Fold, k.Env}, {k.Redraw, k.Help, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Next, k.Prev, k.Search}, {k.Send, k.Cancel, k.Copy, k.Fold, k.Env}, {k.History, k.Redraw, k.Help, k.Quit}}
 }
 
 // Init does nothing: New and start have read everything.
@@ -141,8 +169,12 @@ func (m *Model) Update(msg tea.Msg) (next tea.Model, cmd tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.resize()
+	case tea.ColorProfileMsg:
+		m.plain = msg.Profile == colorprofile.NoTTY
 	case sentMsg:
 		m.answered(msg)
+	case runsMsg:
+		m.showRuns(msg)
 	case panicMsg:
 		m.panicked, cmd = msg.p, tea.Quit
 	case tea.PasteMsg:
@@ -168,8 +200,16 @@ func (m *Model) key(k tea.KeyPressMsg) tea.Cmd {
 		m.search(k)
 		return nil
 	case confirming:
+		// Only enter again: y copies as curl, and a habit must not send.
+		// Nor does an enter that repeats a key held down, or that comes
+		// too soon to have read the question, as a key that bounces does:
+		// the question stays.
+		if key.Matches(k, m.keys.Send) && (k.IsRepeat || m.now().Sub(m.asked) < confirmAfter) {
+			m.note = "too soon: enter again to send it"
+			return nil
+		}
 		m.mode = browsing
-		if k.String() == "y" {
+		if key.Matches(k, m.keys.Send) {
 			return m.sendSelected()
 		}
 		m.note = "not sent"
@@ -180,6 +220,8 @@ func (m *Model) key(k tea.KeyPressMsg) tea.Cmd {
 			return m.quit()
 		case key.Matches(k, m.keys.Help, m.keys.Cancel):
 			m.mode = browsing
+		default: // a terminal too small for it all scrolls it
+			m.help, _ = m.help.Update(k)
 		}
 		return nil
 	case choosingEnv:
@@ -198,11 +240,16 @@ func (m *Model) key(k tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	}
+	if m.runsOpen {
+		return m.runKey(k)
+	}
 	switch {
 	case key.Matches(k, m.keys.Quit):
 		return m.quit()
 	case key.Matches(k, m.keys.Help):
-		m.mode = helping
+		m.openHelp()
+	case key.Matches(k, m.keys.History):
+		return m.openRuns()
 	case key.Matches(k, m.keys.Search):
 		m.mode, m.focus = searching, treePane
 	case key.Matches(k, m.keys.Env):
@@ -247,6 +294,13 @@ func (m *Model) key(k tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
+// openHelp shows the keys over all panes, from the top.
+func (m *Model) openHelp() {
+	m.mode = helping
+	m.help.SetContent(m.helpText(m.help.Width()))
+	m.help.GotoTop()
+}
+
 func (m *Model) quit() tea.Cmd {
 	if m.flight != nil {
 		m.flight.cancel()
@@ -269,6 +323,12 @@ func (m *Model) choose(i int) {
 	m.request.GotoTop()
 }
 
+// confirmAfter is how long after the question before sending the enter
+// that answers it may come: an enter before that is a key held down, past
+// the delay before a terminal repeats it on most systems, or one that
+// bounced.
+const confirmAfter = 500 * time.Millisecond
+
 // maxFold is the deepest fold z gives before it unfolds again.
 const maxFold = 2
 
@@ -276,35 +336,47 @@ const maxFold = 2
 const maxQuery = 100
 
 // search handles a key while the search is typed: enter keeps it, esc
-// clears it, and the arrows move among the rows it shows.
+// clears it, and the arrows move among the rows it shows. It searches the
+// list the tree pane shows: the requests, or the runs.
 func (m *Model) search(k tea.KeyPressMsg) {
+	q, filter, move := m.searched()
 	switch k.String() {
 	case "esc":
-		m.mode, m.query = browsing, ""
-		m.filter()
+		m.mode, *q = browsing, ""
+		filter()
 	case "enter":
 		m.mode = browsing
 	case "backspace":
-		if q := []rune(m.query); len(q) > 0 {
-			m.query = string(q[:len(q)-1])
-			m.filter()
+		if r := []rune(*q); len(r) > 0 {
+			*q = string(r[:len(r)-1])
+			filter()
 		}
 	case "up":
-		m.move(-1)
+		move(-1)
 	case "down":
-		m.move(1)
+		move(1)
 	default:
 		m.typed(k.Text)
 	}
 }
 
+// searched returns the search of the list the tree pane shows, and how
+// to filter that list and move in it.
+func (m *Model) searched() (q *string, filter func(), move func(int)) {
+	if m.runsOpen {
+		return &m.runQuery, m.filterRuns, m.moveRun
+	}
+	return &m.query, m.filter, m.move
+}
+
 // typed adds s to the search.
 func (m *Model) typed(s string) {
-	if s == "" || utf8.RuneCountInString(m.query+s) > maxQuery {
+	q, filter, _ := m.searched()
+	if s == "" || utf8.RuneCountInString(*q+s) > maxQuery {
 		return
 	}
-	m.query += s
-	m.filter()
+	*q += s
+	filter()
 }
 
 // filter shows the rows that match the search, and moves the cursor to
@@ -359,7 +431,7 @@ func (m *Model) confirmSend() tea.Cmd {
 	case slices.Contains([]string{"GET", "HEAD", "OPTIONS"}, strings.ToUpper(r.file.Requests[r.index].Method)):
 		return m.sendSelected()
 	default:
-		m.mode = confirming
+		m.mode, m.asked = confirming, m.now()
 	}
 	return nil
 }

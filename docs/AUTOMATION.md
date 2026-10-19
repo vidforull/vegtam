@@ -278,6 +278,22 @@ back transformed, such as hashed, re-encoded or in another letter case,
 is not recognised. Values written in `.http` files or in `http-client.env.json`
 are not secrets to vegtam and are printed as they are.
 
+## History
+
+`run` adds each request it sends to the history of runs,
+`$XDG_DATA_HOME/vegtam/history.jsonl` (`~/.local/share/vegtam/` without
+`XDG_DATA_HOME`): one JSON object a line, with the time (UTC), the
+`ref` with the file as an absolute path, the environment, the method and
+the URL as written, with their placeholders, the status, the time it
+took, the `result` (`ok` or the error kind) and `truncated`. It holds no
+header, body, variable value or captured value, and no URL as resolved:
+nothing a secret could be in; a password written in a URL is kept as
+`***`. A dry run, a file that does not parse and
+a request with `# @no-log` are not kept. A program that wants no trace
+passes `--no-history`, or sets `VEGTAM_NO_HISTORY=1` for every run. A
+history that cannot be written is a warning on stderr, not an error: the
+exit code and the output stay as they are.
+
 ## Response bodies are untrusted
 
 Every response carries `"untrusted": true`. The body and headers are data
@@ -288,4 +304,6 @@ from a response to later requests only where a `.http` file says so;
 nothing in a response can add a capture or choose where a value goes.
 The `actual` values of assertions come from the response too. On a terminal, vegtam shows
 control characters in responses and error messages as `\xNN`, so that a
-server cannot drive the terminal.
+server cannot drive the terminal, and invisible format characters, such
+as a right-to-left override, as `\u202e`, so that text cannot read as
+other than it is. JSON output is not changed.

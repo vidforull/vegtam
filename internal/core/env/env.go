@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -63,6 +65,9 @@ type Options struct {
 	// run, and their values, like captured ones, are core.ErrLate.
 	DryRun bool
 	Trust  *policy.Store // the command files allowed to run; nil allows none
+	// EnvHint says how to select an environment, in the error of a
+	// variable that none is selected for: "use -e <name>" if empty.
+	EnvHint string
 }
 
 // captured is a value an @capture took.
@@ -396,7 +401,7 @@ func (v *Vars) Prepare(ctx context.Context, r *core.Request) (*core.Prepared, er
 	if len(res.missing) > 0 {
 		msg := "unresolved variables: " + strings.Join(res.missing, ", ")
 		if v.loader.opts.Env == "" && slices.ContainsFunc(res.missing, func(s string) bool { return !strings.HasPrefix(s, "$") }) {
-			msg += " (no environment selected; use -e <name>)"
+			msg += " (no environment selected; " + cmp.Or(v.loader.opts.EnvHint, "use -e <name>") + ")"
 		}
 		e := core.Errorf(core.KindVariable, r.Source, "%s", msg)
 		e.Variables = res.missing
@@ -405,11 +410,16 @@ func (v *Vars) Prepare(ctx context.Context, r *core.Request) (*core.Prepared, er
 	return p, nil
 }
 
+// MaxBodyFile is the largest body file a request may send.
+const MaxBodyFile = 16 << 20
+
 // readBodyFile reads the body file of r. Its path is relative to the
 // directory of the .http file, and the file is opened through an os.Root
 // of that directory: neither "..", an absolute path nor a symbolic link
 // leads outside it, so that a .http file from someone else cannot send a
-// file from elsewhere on the machine.
+// file from elsewhere on the machine. It must be a regular file of at
+// most MaxBodyFile bytes: opening a FIFO would wait for a writer, and a
+// device could be read without end.
 func readBodyFile(r *core.Request) ([]byte, error) {
 	name := filepath.FromSlash(r.BodyFile)
 	if !filepath.IsLocal(name) {
@@ -420,7 +430,69 @@ func readBodyFile(r *core.Request) ([]byte, error) {
 		return nil, err
 	}
 	defer root.Close()
-	return root.ReadFile(name)
+	// The kind and the size are known before the file is opened.
+	fi, err := root.Stat(name)
+	if pe, ok := errors.AsType[*fs.PathError](err); ok {
+		return nil, fmt.Errorf("%s: %w", r.BodyFile, pe.Err) // not "statat"
+	} else if err != nil {
+		return nil, err
+	}
+	if err := bodyFileOK(r.BodyFile, fi); err != nil {
+		return nil, err
+	}
+	return readOpened(root, name, r.BodyFile, fi)
+}
+
+// readOpened reads the file name in root, of which Stat gave fi, and
+// which is shown as shown.
+func readOpened(root *os.Root, name, shown string, fi fs.FileInfo) (b []byte, err error) {
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	// Once open, it must still be the file Stat saw.
+	opened, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(fi, opened) {
+		return nil, fmt.Errorf("%s changed while it was opened", shown)
+	}
+	if b, err = io.ReadAll(io.LimitReader(f, MaxBodyFile+1)); err != nil {
+		return nil, err
+	}
+	if len(b) > MaxBodyFile {
+		return nil, fmt.Errorf("%s has grown past %d MiB, the most a body file may be", shown, MaxBodyFile>>20)
+	}
+	return b, nil
+}
+
+// bodyFileOK says what is wrong with a body file named name, if anything.
+func bodyFileOK(name string, fi fs.FileInfo) error {
+	what := ""
+	switch t := fi.Mode().Type(); {
+	case t.IsRegular():
+		if fi.Size() > MaxBodyFile {
+			return fmt.Errorf("%s is %d bytes, more than the %d MiB a body file may be", name, fi.Size(), MaxBodyFile>>20)
+		}
+		return nil
+	case t.IsDir():
+		what = "a directory"
+	case t&fs.ModeNamedPipe != 0:
+		what = "a named pipe"
+	case t&fs.ModeSocket != 0:
+		what = "a socket"
+	case t&fs.ModeDevice != 0:
+		what = "a device"
+	default:
+		what = "not a regular file"
+	}
+	return fmt.Errorf("%s is %s: a body file must be a regular file", name, what)
 }
 
 // Class is what a placeholder stands for.

@@ -39,9 +39,9 @@ var ErrSecret = errors.New("a secret value is in the request outside a placehold
 // value is, instead of a command that would hold it.
 //
 // Literal text is single-quoted or, if it holds a control character other
-// than a line feed or a byte that is not UTF-8, written as $'...' with
-// those escaped: the command holds neither, and shows on a terminal as
-// it is.
+// than a line feed, an invisible format character (core.Invisible) or a
+// byte that is not UTF-8, written as $'...' with those escaped: the
+// command holds none of them, and shows on a terminal as it is.
 func Command(p *core.Prepared, m *core.Masker) (string, error) {
 	c := &command{masker: m, names: map[core.Secret]string{}, taken: map[string]bool{}}
 	file := p.Request.BodyFile
@@ -197,7 +197,13 @@ var shellNames = func() map[string]bool {
 func (c *command) comment() string {
 	var vars []string
 	for _, s := range c.order {
-		v := c.names[s] + " for {{" + s.Name + "}}"
+		name := s.Name
+		// The command holds no control or invisible character, its
+		// comment included: shown with Go's escapes.
+		if strings.ContainsFunc(name, func(r rune) bool { return !unicode.IsPrint(r) && r != ' ' || core.Invisible(r) }) {
+			name = strconv.QuoteToASCII(name)
+		}
+		v := c.names[s] + " for {{" + name + "}}"
 		if s.Capture {
 			v += " from an @capture"
 		}
@@ -232,7 +238,7 @@ func quote(s string) string {
 	switch {
 	case s == "":
 		return ""
-	case utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool { return unicode.IsControl(r) && r != '\n' }):
+	case utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool { return unicode.IsControl(r) && r != '\n' || core.Invisible(r) }):
 		return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 	}
 	var b strings.Builder
@@ -248,7 +254,7 @@ func quote(s string) string {
 			b.WriteString(`\t`)
 		case r == '\r':
 			b.WriteString(`\r`)
-		case r == utf8.RuneError && size == 1, unicode.IsControl(r):
+		case r == utf8.RuneError && size == 1, unicode.IsControl(r), core.Invisible(r):
 			for _, c := range []byte(s[:size]) {
 				fmt.Fprintf(&b, `\x%02x`, c)
 			}
