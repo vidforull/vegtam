@@ -146,7 +146,9 @@ func (a *auth) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return err
 	}
-	json.Unmarshal(m["type"], &a.Type) // no type: inherit
+	if json.Unmarshal(m["type"], &a.Type) != nil {
+		a.Type = "" // no type, or not a string: inherit
+	}
 	a.Params = map[string]string{}
 	var list []param
 	var obj map[string]text

@@ -142,6 +142,10 @@ Every error is printed to stderr as text, `vegtam: file:line: message`.
 With JSON output it is also in the document: in the result it belongs to,
 or as the top-level `error` when the command ends before any request.
 
+A bug that makes vegtam panic is printed to stderr only, as
+`vegtam: internal error:` and a stack trace, with secret values masked
+there too, and the exit code is 2, as for any Go program that panics.
+
 When `run` covers several requests, an error stops only its own request;
 the others are still sent. A file that does not parse becomes one result
 with a `parse` error. `list` lists every file that parses, reports the

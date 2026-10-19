@@ -81,17 +81,22 @@ HTTP/1.1 200 OK (TIME)
 plain
 [truncated: the body is longer than --max-body]
 `, ""},
-		{"errors", []string{"run", "api.http", "--fail", "--timeout", "50ms", "--max-body", "0"}, exitStatus,
+		{
+			"errors",
+			[]string{"run", "api.http", "--fail", "--timeout", "50ms", "--max-body", "0"},
+			exitStatus,
 			"### api.http#echo\nHTTP/1.1 200 OK (TIME)\n[truncated: the body is longer than --max-body]\n\n✓ status == 200\n\n" +
 				"### api.http#fail\nHTTP/1.1 500 Internal Server Error (TIME)\n[truncated: the body is longer than --max-body]\n\n" +
 				"### api.http#refused\n\n### api.http#slow\n\n" +
 				"### api.http#binary\nHTTP/1.1 200 OK (TIME)\n[truncated: the body is longer than --max-body]\n\n" +
 				"### api.http#big\nHTTP/1.1 200 OK (TIME)\n[truncated: the body is longer than --max-body]\n\n" +
-				"### api.http#hidden\n",
+				"### api.http#hidden\n\n### api.http#hops\n",
 			"vegtam: api.http:20: HTTP 500 Internal Server Error\n" +
 				`vegtam: api.http:25: Get "http://127.0.0.1:PORT/?key={{token}}&env={{$env VEGTAM_TEST_KEY}}": dial tcp 127.0.0.1:PORT: connect: connection refused` + "\n" +
 				`vegtam: api.http:29: no complete response within 50ms: Get "HOST/slow?key={{token}}&env={{$env VEGTAM_TEST_KEY}}": context deadline exceeded (Client.Timeout exceeded while awaiting headers)` + "\n" +
-				`vegtam: api.http:41: Get "{{base}}/?key={{token}}": dial tcp LOCALHOST***: connect: connection refused` + "\n"},
+				`vegtam: api.http:41: Get "{{base}}/?key={{token}}": dial tcp LOCALHOST***: connect: connection refused` + "\n" +
+				`vegtam: api.http:45: Get "/hops/xxxxxxxxxxx?key=***&env=***": stopped after 10 redirects` + "\n",
+		},
 		{"show as written", []string{"show", "api.http#2"}, exitOK, `GET {{host}}/fail?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
 Authorization: Bearer {{token}}
 `, ""},
@@ -103,6 +108,7 @@ api.http#slow      GET     {{host}}/slow?key={{token}}&env={{$env VEGTAM_TEST_KE
 api.http#binary    GET     {{host}}/binary?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
 api.http#big       GET     {{host}}/big?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
 api.http#hidden    GET     {{base}}/?key={{token}}
+api.http#hops      GET     {{host}}/hops?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
 more/plain.http#1  GET     {{host}}/plain
 `, ""},
 	}
@@ -135,7 +141,7 @@ func TestRunJSON(t *testing.T) {
 	code, stdout, _ := runCLI(t, false, "run", fx.path("api.http#echo"), "-e", "test")
 	validateJSON(t, stdout)
 	var one output.Document
-	json.Unmarshal([]byte(stdout), &one)
+	decode(t, stdout, &one)
 	if r := one.Result; code != exitOK || r == nil || r.Ref != fx.path("api.http#echo") || r.Response.Status != 200 ||
 		!r.Response.Untrusted || r.Request.URL != fx.host+"/echo?key={{token}}&env={{$env VEGTAM_TEST_KEY}}" || r.Timing == nil {
 		t.Errorf("run file#ref = %d, %s", code, stdout)
@@ -214,10 +220,12 @@ plain\x1b]0;title\x07 text
 		code, stdout, stderr = runCLI(t, len(mode) > 0, append([]string{"run", "checks.http#echo", "-e", "test"}, mode...)...)
 		validateJSON(t, stdout)
 		var doc output.Document
-		json.Unmarshal([]byte(stdout), &doc)
-		wantAsserts := []output.Assert{{Expression: `jsonpath $.echo.key == "nope"`, Actual: `"***"`},
+		decode(t, stdout, &doc)
+		wantAsserts := []output.Assert{
+			{Expression: `jsonpath $.echo.key == "nope"`, Actual: `"***"`},
 			{Expression: `jsonpath $.echo.authorization contains "Bearer"`, Passed: true, Actual: `"Bearer ***"`},
-			{Expression: "header X-Echo exists", Passed: true, Actual: "key=***"}}
+			{Expression: "header X-Echo exists", Passed: true, Actual: "key=***"},
+		}
 		if r := doc.Result; code != exitAssert || r == nil || r.Response == nil || r.Error == nil || r.Error.Kind != "assert" ||
 			!slices.Equal(r.Asserts, wantAsserts) {
 			t.Errorf("run %v = %d\n%s", mode, code, stdout)
@@ -258,7 +266,7 @@ func TestRunUsageErrors(t *testing.T) {
 		want string
 	}{
 		{[]string{"run", fx.path("ftp.http"), "--dry-run"}, "URL ftp://example.test/file: want an http or https URL"},
-		{[]string{"run", fx.path("api.http#nope")}, `api.http: no request "nope" (requests: echo, fail, refused, slow, binary, big, hidden)`},
+		{[]string{"run", fx.path("api.http#nope")}, `api.http: no request "nope" (requests: echo, fail, refused, slow, binary, big, hidden, hops)`},
 		{[]string{"run", fx.path("api.http#")}, "api.http: name a request: "},
 		{[]string{"run", fx.path("a#b.http#zzz")}, `a#b.http: no request "zzz" (requests: one)`},
 		{[]string{"run", fx.path("more#1")}, "more: is a directory; #1 needs a .http file"},
@@ -287,8 +295,10 @@ func TestSchemaCommand(t *testing.T) {
 }
 
 func TestByteSize(t *testing.T) {
-	for in, want := range map[string]string{"0": "0", "100": "100", "1024": "1KiB", "64KiB": "64KiB", "10MB": "10000000",
-		"1mib": "1MiB", "2 GiB": "2GiB", "1kb": "1000"} {
+	for in, want := range map[string]string{
+		"0": "0", "100": "100", "1024": "1KiB", "64KiB": "64KiB", "10MB": "10000000",
+		"1mib": "1MiB", "2 GiB": "2GiB", "1kb": "1000",
+	} {
 		var s byteSize
 		if err := s.Set(in); err != nil || s.String() != want {
 			t.Errorf("Set(%q) = %v, %q; want %q", in, err, s.String(), want)

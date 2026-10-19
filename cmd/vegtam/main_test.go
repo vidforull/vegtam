@@ -11,8 +11,7 @@ func TestIsTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
-	defer w.Close()
+	closeAtEnd(t, r, w)
 	if isTerminal(w) {
 		t.Error("isTerminal(pipe) = true, want false")
 	}
@@ -21,8 +20,20 @@ func TestIsTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	closeAtEnd(t, f)
 	if isTerminal(f) {
 		t.Error("isTerminal(regular file) = true, want false")
 	}
+}
+
+// closeAtEnd closes files when the test ends.
+func closeAtEnd(t *testing.T, files ...*os.File) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, f := range files {
+			if err := f.Close(); err != nil {
+				t.Error(err)
+			}
+		}
+	})
 }

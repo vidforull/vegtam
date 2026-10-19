@@ -43,8 +43,10 @@ func (imp *importer) collection(col *collection) {
 	if !varName.MatchString(prefix) {
 		prefix = "_" + prefix
 	}
-	c := &converter{imp: imp, dir: dir, prefix: prefix, byValue: map[string]string{}, unset: map[string]string{},
-		known: names{}, used: map[string]bool{}}
+	c := &converter{
+		imp: imp, dir: dir, prefix: prefix, byValue: map[string]string{}, unset: map[string]string{},
+		known: names{}, used: map[string]bool{},
+	}
 	c.vars = imp.variables(col.Variable)
 	for _, ps := range [][]param{imp.globals, c.vars} {
 		for _, p := range ps {
@@ -236,7 +238,7 @@ func (q *rq) check(block string) string {
 func commentOut(lines []string, reason string) []string {
 	out := []string{"# Not imported: " + oneLine(reason)}
 	for _, l := range lines {
-		for _, l := range strings.Split(strings.ReplaceAll(l, "\r\n", "\n"), "\n") {
+		for l := range strings.SplitSeq(strings.ReplaceAll(l, "\r\n", "\n"), "\n") {
 			out = append(out, strings.TrimRight("## "+l, " "))
 		}
 	}
@@ -491,8 +493,10 @@ func (q *rq) auth(a *auth) {
 
 // rawTypes are the Content-Type headers Postman sends for raw bodies, by
 // the language chosen for them.
-var rawTypes = map[string]string{"": "text/plain", "text": "text/plain", "json": "application/json",
-	"xml": "application/xml", "html": "text/html", "javascript": "application/javascript"}
+var rawTypes = map[string]string{
+	"": "text/plain", "text": "text/plain", "json": "application/json",
+	"xml": "application/xml", "html": "text/html", "javascript": "application/javascript",
+}
 
 func (q *rq) convertBody(b *body) {
 	if b == nil || b.Disabled {
@@ -540,78 +544,112 @@ func (q *rq) jsonSecrets(body string) string {
 	if t := strings.TrimSpace(body); !strings.HasPrefix(t, "{") && !strings.HasPrefix(t, "[") {
 		return body
 	}
-	var out strings.Builder
-	last, depth, secretDepth := 0, 0, 0 // secretDepth: the depth of the container under a secret key
-	key, afterColon := "", false
+	s := &jsonScan{q: q, body: body}
 	for i := 0; i < len(body); {
-		c := body[i]
-		if strings.IndexByte(" \t\r\n", c) >= 0 {
-			i++
-			continue
-		}
-		secret := secretDepth > 0 || afterColon && secretName(key)
-		afterColon = false
-		var m []int
-		if c == '{' {
-			m = placeholderAt.FindStringIndex(body[i:])
-		}
-		switch {
-		case c == '"':
-			j := stringEnd(body, i)
-			if j < 0 {
-				return out.String() + body[last:]
-			}
-			if strings.HasPrefix(strings.TrimLeft(body[j:], " \t\r\n"), ":") {
-				key = body[i+1 : j-1]
-			} else if secret && j-i > 2 {
-				out.WriteString(body[last:i+1] + q.secret(body[i+1:j-1], base(key)))
-				last = j - 1
-			}
-			i = j
-		case m != nil:
-			if secret {
-				q.secret(body[i:i+m[1]], "") // all placeholders: marks their variables
-			}
-			i += m[1]
-		case c == ':':
-			afterColon = true
-			i++
-		case c == '{' || c == '[':
-			depth++
-			if secret && secretDepth == 0 {
-				secretDepth = depth
-			}
-			i++
-		case c == '}' || c == ']':
-			if depth == secretDepth {
-				secretDepth = 0
-			}
-			depth--
-			i++
-		case strings.HasPrefix(body[i:], "//"):
-			if n := strings.IndexByte(body[i:], '\n'); n >= 0 {
-				i += n
-			} else {
-				i = len(body)
-			}
-		case strings.HasPrefix(body[i:], "/*"):
-			if n := strings.Index(body[i+2:], "*/"); n >= 0 {
-				i += n + 4
-			} else {
-				i = len(body)
-			}
-		case secret && (c == '-' || '0' <= c && c <= '9'):
-			j := i + 1
-			for j < len(body) && strings.IndexByte("+-.0123456789eE", body[j]) >= 0 {
-				j++
-			}
-			out.WriteString(body[last:i] + "{{" + q.c.extract(base(key), body[i:j]) + "}}")
-			last, i = j, j
-		default:
-			i++
-		}
+		i = s.step(i)
 	}
-	return out.String() + body[last:]
+	return s.out.String() + body[s.last:]
+}
+
+// jsonScan is how far jsonSecrets has read a body.
+type jsonScan struct {
+	q           *rq
+	body        string
+	out         strings.Builder // body[:last], with secret values moved to variables
+	last        int
+	depth       int
+	secretDepth int    // the depth of the container under a secret key, or 0
+	key         string // the last object key read
+	afterColon  bool
+}
+
+// step reads the token at body[i] and returns where the next one starts.
+func (s *jsonScan) step(i int) int {
+	body, c := s.body, s.body[i]
+	if strings.IndexByte(" \t\r\n", c) >= 0 {
+		return i + 1
+	}
+	secret := s.secretDepth > 0 || s.afterColon && secretName(s.key)
+	s.afterColon = false
+	var m []int
+	if c == '{' {
+		m = placeholderAt.FindStringIndex(body[i:])
+	}
+	switch {
+	case c == '"':
+		return s.str(i, secret)
+	case m != nil:
+		if secret {
+			s.q.secret(body[i:i+m[1]], "") // all placeholders: marks their variables
+		}
+		return i + m[1]
+	case c == ':':
+		s.afterColon = true
+	case c == '{' || c == '[':
+		s.depth++
+		if secret && s.secretDepth == 0 {
+			s.secretDepth = s.depth
+		}
+	case c == '}' || c == ']':
+		if s.depth == s.secretDepth {
+			s.secretDepth = 0
+		}
+		s.depth--
+	case strings.HasPrefix(body[i:], "//"):
+		return lineEnd(body, i)
+	case strings.HasPrefix(body[i:], "/*"):
+		return commentEnd(body, i)
+	case secret && (c == '-' || '0' <= c && c <= '9'):
+		j := numberEnd(body, i)
+		s.out.WriteString(body[s.last:i] + "{{" + s.q.c.extract(base(s.key), body[i:j]) + "}}")
+		s.last = j
+		return j
+	}
+	return i + 1
+}
+
+// str reads the string at body[i]: an object key, or a value that moves to
+// a variable if it is secret. A string that does not end ends the body.
+func (s *jsonScan) str(i int, secret bool) int {
+	body := s.body
+	j := stringEnd(body, i)
+	if j < 0 {
+		return len(body)
+	}
+	if strings.HasPrefix(strings.TrimLeft(body[j:], " \t\r\n"), ":") {
+		s.key = body[i+1 : j-1]
+	} else if secret && j-i > 2 {
+		s.out.WriteString(body[s.last:i+1] + s.q.secret(body[i+1:j-1], base(s.key)))
+		s.last = j - 1
+	}
+	return j
+}
+
+// lineEnd returns the index of the line feed that ends the line at
+// body[i], or len(body).
+func lineEnd(body string, i int) int {
+	if n := strings.IndexByte(body[i:], '\n'); n >= 0 {
+		return i + n
+	}
+	return len(body)
+}
+
+// commentEnd returns the index after the /* comment */ at body[i], or
+// len(body) if it does not end.
+func commentEnd(body string, i int) int {
+	if n := strings.Index(body[i+2:], "*/"); n >= 0 {
+		return i + n + 4
+	}
+	return len(body)
+}
+
+// numberEnd returns the index after the number at body[i].
+func numberEnd(body string, i int) int {
+	j := i + 1
+	for j < len(body) && strings.IndexByte("+-.0123456789eE", body[j]) >= 0 {
+		j++
+	}
+	return j
 }
 
 var placeholderAt = regexp.MustCompile(`^\{\{[^{}]*\}\}`)

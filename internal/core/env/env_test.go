@@ -2,6 +2,7 @@ package env
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,6 +34,7 @@ func writeFiles(t *testing.T, dir string, files map[string]string) {
 // tree writes environment files and a .http file with src, and returns
 // the path of the .http file.
 func tree(t *testing.T, src string) string {
+	t.Helper()
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{
 		PublicFile: `{"$shared": {"scheme": "https"},
@@ -55,7 +57,7 @@ func prepare(t *testing.T, l *Loader, path string) (*core.Prepared, error) {
 	if err != nil {
 		return nil, err
 	}
-	return v.Prepare(f.Requests[0])
+	return v.Prepare(t.Context(), f.Requests[0])
 }
 
 func TestPrepare(t *testing.T) {
@@ -80,7 +82,7 @@ X-Key: {{ $env VEGTAM_TEST_KEY }}
 	}
 
 	// The prepared request refers to secrets by name only.
-	b, err := json.Marshal(p)
+	b, err := json.Marshal(p) //nolint:musttag // every field of the internal type, whatever its name
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,6 +111,60 @@ func TestPrepareBodyFile(t *testing.T) {
 	}
 }
 
+// A body file is read through an os.Root of the .http file's directory: no
+// path leads outside it, by "..", as an absolute path or through a
+// symbolic link.
+func TestPrepareBodyFileStaysInside(t *testing.T) {
+	path := tree(t, "")
+	dir := filepath.Dir(path)
+	outside := filepath.Join(filepath.Dir(dir), "outside.json")
+	writeFiles(t, filepath.Dir(dir), map[string]string{"outside.json": "OUTSIDE", "deeper/in/x.json": "inside"})
+	for link, target := range map[string]string{
+		"inlink.json":  "in/x.json",
+		"abslink.json": outside,
+		"rellink.json": "../outside.json",
+		"up":           "..",
+	} {
+		if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		file string
+		want string // the body, or what the error says
+		ok   bool
+	}{
+		{"./in/x.json", "inside", true},
+		{"in/../in/x.json", "inside", true},
+		{"inlink.json", "inside", true},
+		{"../outside.json", "is outside the directory of the .http file", false},
+		{outside, "is outside the directory of the .http file", false},
+		{"abslink.json", "escapes", false},
+		{"rellink.json", "escapes", false},
+		{"up/outside.json", "escapes", false},
+	}
+	for _, tt := range tests {
+		if err := os.WriteFile(path, []byte("POST https://example.com\n\n< "+tt.file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p, err := prepare(t, NewLoader(Options{}), path)
+		switch {
+		case tt.ok && (err != nil || p.Body.Masked() != tt.want):
+			t.Errorf("< %s: %v, %v; want the body %q", tt.file, p, err, tt.want)
+		case tt.ok:
+		case err == nil:
+			t.Errorf("< %s: read %q, want an error", tt.file, p.Body.Masked())
+		case !isKind(err, core.KindRequest) || !strings.Contains(err.Error(), tt.want) || strings.Contains(err.Error(), "OUTSIDE"):
+			t.Errorf("< %s: error %v, want kind request saying %q", tt.file, err, tt.want)
+		}
+	}
+}
+
+func isKind(err error, k core.Kind) bool {
+	e, ok := errors.AsType[*core.Error](err)
+	return ok && e.Kind == k
+}
+
 func TestPrepareErrors(t *testing.T) {
 	tests := []struct {
 		name, env, src string
@@ -116,25 +172,36 @@ func TestPrepareErrors(t *testing.T) {
 		want           string
 		vars           []string
 	}{
-		{"unresolved without -e", "", "GET {{host}}/x?a={{a}}&b={{a}}\nX-Key: {{$env VEGTAM_UNSET}}", core.KindVariable,
+		{
+			"unresolved without -e", "", "GET {{host}}/x?a={{a}}&b={{a}}\nX-Key: {{$env VEGTAM_UNSET}}", core.KindVariable,
 			"unresolved variables: host, a, $env VEGTAM_UNSET (no environment selected; use -e <name>)",
-			[]string{"host", "a", "$env VEGTAM_UNSET"}},
-		{"unresolved with -e", "prod", "GET https://{{host}}/{{token}}", core.KindVariable,
-			"a.http:1: unresolved variables: token\n", []string{"token"}},
-		{"$cmd without a command file", "", "GET https://example.com/{{$cmd TOKEN}}", core.KindVariable,
-			"{{$cmd TOKEN}}: no http-client.cmd.json in ", nil},
+			[]string{"host", "a", "$env VEGTAM_UNSET"},
+		},
+		{
+			"unresolved with -e", "prod", "GET https://{{host}}/{{token}}", core.KindVariable,
+			"a.http:1: unresolved variables: token\n",
+			[]string{"token"},
+		},
+		{
+			"$cmd without a command file", "", "GET https://example.com/{{$cmd TOKEN}}", core.KindVariable,
+			"{{$cmd TOKEN}}: no http-client.cmd.json in ", nil,
+		},
 		{"$cmd without a name", "", "GET https://example.com/{{$cmd}}", core.KindVariable, "want {{$cmd NAME}}", nil},
-		{"unknown dynamic variable", "", "GET https://example.com/{{$uuid}}", core.KindVariable,
-			"{{$uuid}}: unknown dynamic variable $uuid (supported: $env, $cmd)", nil},
+		{
+			"unknown dynamic variable", "", "GET https://example.com/{{$uuid}}", core.KindVariable,
+			"{{$uuid}}: unknown dynamic variable $uuid (supported: $env, $cmd)", nil,
+		},
 		{"$env without a name", "", "GET https://example.com/{{$env}}", core.KindVariable, "want {{$env NAME}}", nil},
 		{"missing body file", "", "POST https://example.com\n\n< ./nope.json", core.KindRequest, "body file: open", nil},
-		{"unknown environment", "staging", "GET https://example.com", core.KindUsage,
-			`environment "staging" is not defined in`, nil},
+		{
+			"unknown environment", "staging", "GET https://example.com", core.KindUsage,
+			`environment "staging" is not defined in`, nil,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := prepare(t, NewLoader(Options{Env: tt.env}), tree(t, tt.src))
-			e, ok := err.(*core.Error)
+			e, ok := errors.AsType[*core.Error](err)
 			if !ok || e.Kind != tt.kind || !strings.Contains(e.Error()+"\n", tt.want) || !slices.Equal(e.Variables, tt.vars) {
 				t.Errorf("error = %#v; want %s error with %q, variables %q", err, tt.kind, tt.want, tt.vars)
 			}
@@ -149,19 +216,26 @@ func TestEnvironmentFiles(t *testing.T) {
 		kind  core.Kind
 		want  string
 	}{
-		{"defined list", map[string]string{PublicFile: `{"$shared": {}, "b": {}}`, PrivateFile: `{"a": {}, "b": {}}`},
-			core.KindUsage, "(defined: a, b)"},
+		{
+			"defined list",
+			map[string]string{PublicFile: `{"$shared": {}, "b": {}}`, PrivateFile: `{"a": {}, "b": {}}`},
+			core.KindUsage, "(defined: a, b)",
+		},
 		{"no files", nil, core.KindUsage, "no http-client.env.json or http-client.private.env.json in"},
 		{"bad JSON", map[string]string{PublicFile: `{"dev": `}, core.KindParse, PublicFile + ": unexpected EOF"},
-		{"object value", map[string]string{PrivateFile: `{"dev": {"auth": {"type": "x"}}}`}, core.KindParse,
-			"dev.auth: value must be a string, number or boolean"},
+		{
+			"object value",
+			map[string]string{PrivateFile: `{"dev": {"auth": {"type": "x"}}}`},
+			core.KindParse,
+			"dev.auth: value must be a string, number or boolean",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeFiles(t, dir, tt.files)
 			_, err := NewLoader(Options{Env: "dev"}).For(filepath.Join(dir, "a.http"))
-			if e, ok := err.(*core.Error); !ok || e.Kind != tt.kind || !strings.Contains(e.Error(), tt.want) {
+			if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != tt.kind || !strings.Contains(e.Error(), tt.want) {
 				t.Errorf("error = %v; want %s error with %q", err, tt.kind, tt.want)
 			}
 		})
@@ -184,12 +258,12 @@ Authorization: Bearer {{token}}
 	}
 	// Before an @capture declares it, token is the private one.
 	l.Declare("user")
-	before, err := v.Prepare(f.Requests[0])
+	before, err := v.Prepare(t.Context(), f.Requests[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	l.Declare("token")
-	after, err := v.Prepare(f.Requests[0])
+	after, err := v.Prepare(t.Context(), f.Requests[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,14 +272,14 @@ Authorization: Bearer {{token}}
 	if got := after.URL.Masked() + " " + after.Headers[0].Value.Masked(); got != "https://api.example.test/users/{{user}} Bearer {{token}}" {
 		t.Errorf("masked = %q", got)
 	}
-	if _, err := after.URL.Reveal(v); err == nil || !strings.Contains(err.Error(), "user was not captured") {
+	if _, err = after.URL.Reveal(v); err == nil || !strings.Contains(err.Error(), "user was not captured") {
 		t.Errorf("Reveal before the capture = %v", err)
 	}
-	if _, err := after.URL.Reveal(NewLoader(Options{DryRun: true}).must(t, path)); err != core.ErrLate {
+	if _, err = after.URL.Reveal(NewLoader(Options{DryRun: true}).must(t, path)); !errors.Is(err, core.ErrLate) {
 		t.Errorf("Reveal in a dry run = %v, want ErrLate", err)
 	}
 
-	if _, err := l.Fill(after); err == nil ||
+	if _, err = l.Fill(after); err == nil ||
 		!strings.HasSuffix(err.Error(), "not captured: user (an earlier request took no value), token (an earlier request took no value)") {
 		t.Errorf("Fill before the captures = %v", err)
 	}
@@ -231,11 +305,11 @@ Authorization: Bearer {{token}}
 	// A capture that took nothing leaves no older value behind, and the
 	// masker still knows the old one.
 	l.Forget("token", "a.http#login")
-	if _, err := p.Headers[0].Value.Reveal(v); err == nil {
+	if _, err = p.Headers[0].Value.Reveal(v); err == nil {
 		t.Error("Reveal after Forget: want an error")
 	}
 	_, err = l.Fill(after)
-	if e, ok := err.(*core.Error); !ok || e.Kind != core.KindVariable || !slices.Equal(e.Variables, []string{"token"}) ||
+	if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != core.KindVariable || !slices.Equal(e.Variables, []string{"token"}) ||
 		!strings.HasSuffix(e.Msg, "not captured: token (a.http#login took no value)") {
 		t.Errorf("Fill after Forget = %v", err)
 	}

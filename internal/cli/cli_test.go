@@ -11,7 +11,7 @@ import (
 func runCLI(t *testing.T, tty bool, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	code = Run(args, Config{Stdout: &out, Stderr: &errOut, TTY: tty, Version: "v1.2.3"})
+	code = Run(t.Context(), args, Config{Stdout: &out, Stderr: &errOut, TTY: tty, Version: "v1.2.3"})
 	return code, out.String(), errOut.String()
 }
 
@@ -23,13 +23,22 @@ func TestVersion(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"terminal", true, []string{"version"},
-			"vegtam v1.2.3 (" + runtime.Version() + ", " + runtime.GOOS + "/" + runtime.GOARCH + ")\n"},
-		{"not a terminal", false, []string{"version"},
-			`{"name":"vegtam","version":"v1.2.3","go":"` + build + `"}` + "\n"},
-		{"--json on a terminal", true, []string{"version", "--json"},
+		{
+			"terminal", true,
+			[]string{"version"},
+			"vegtam v1.2.3 (" + runtime.Version() + ", " + runtime.GOOS + "/" + runtime.GOARCH + ")\n",
+		},
+		{
+			"not a terminal", false,
+			[]string{"version"},
+			`{"name":"vegtam","version":"v1.2.3","go":"` + build + `"}` + "\n",
+		},
+		{
+			"--json on a terminal", true,
+			[]string{"version", "--json"},
 			"{\n  \"name\": \"vegtam\",\n  \"version\": \"v1.2.3\",\n  \"go\": \"" + runtime.Version() +
-				"\",\n  \"os\": \"" + runtime.GOOS + "\",\n  \"arch\": \"" + runtime.GOARCH + "\"\n}\n"},
+				"\",\n  \"os\": \"" + runtime.GOOS + "\",\n  \"arch\": \"" + runtime.GOARCH + "\"\n}\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

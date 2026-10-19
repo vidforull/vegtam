@@ -126,8 +126,10 @@ func NewMasker(values []string) *Masker {
 // escapes returns v and the forms it may come back in.
 func escapes(v string) []string {
 	j := jsonString(v, false)
-	forms := []string{v, url.QueryEscape(v), url.PathEscape(v), jsonString(v, true), j,
-		strings.ReplaceAll(j, "/", `\/`)} // as PHP escapes JSON
+	forms := []string{
+		v, url.QueryEscape(v), url.PathEscape(v), jsonString(v, true), j,
+		strings.ReplaceAll(j, "/", `\/`),
+	} // as PHP escapes JSON
 	// A server that decodes a query and echoes it turns "+" into a space.
 	if d, err := url.QueryUnescape(v); err == nil {
 		forms = append(forms, d)

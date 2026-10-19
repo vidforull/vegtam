@@ -228,3 +228,87 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   allow this" (6). Trust is the first piece of the policy planned for
   vegtam; confirmation of unsafe methods and host allowlists will
   join it under the same kind and codes.
+
+## 2026-10-19: the quality gate
+
+- **Body files stay beside the request.** A `< path` body is read
+  through an `os.Root` of the `.http` file's directory, so `..`, an
+  absolute path or a symbolic link cannot lead out of it. A collection is
+  often someone else's: without this, a cloned `.http` file could send
+  `~/.ssh/id_ed25519` as a body to its own host. `filepath.Join` and
+  `Clean` are no boundary, they only rewrite the path. JetBrains allows
+  any path; payloads kept beside the collection have to move below it.
+- **Redirects keep secrets and TLS.** A redirect from https to http is
+  refused, secrets or not: the request was written for TLS, and what
+  the server sends back, a cookie or a token, would cross in clear. A
+  307 or 308 to another origin is refused when the body holds a
+  secret: net/http sends the body again, and unlike a header it cannot
+  be dropped. A 301, 302 or 303 turns the request into a GET without a
+  body and is followed as before.
+- **Files are written whole.** Import writes each file to a new file
+  beside it, syncs and closes it, checking both, and renames it over the
+  old one; the trust store did so already and now syncs too. A failed or
+  interrupted write leaves the old file, never half of the new one, and
+  a private file replaced this way gets 0600 even if the old one was
+  0644. The directories vegtam makes are 0700: each collection holds a
+  private environment file.
+- **A panic is masked too.** Go prints a panic's value as is, and a bug
+  could panic with a secret or an escape sequence in it. `cli.Run`
+  recovers and prints the value and the stack as terminal text, masked
+  with every secret the environment loader has read so far, which may be
+  before the command has its own masker. It exits with 2, the code Go
+  gives, so that the exit codes do not change. `import` reads no
+  environment: the values of an export are data it writes, and a panic
+  there is masked with nothing. The secret-output test covers panics,
+  and a redirect error that names a URL other than the request's.
+- **Terminal text is UTF-8.** Text output already showed control
+  characters as `\xNN`; bytes that are not UTF-8 are now shown the same
+  way. A lone 0x9b is the 8-bit form of CSI, which a terminal that does
+  not read UTF-8 takes as the start of an escape sequence. Fuzzing the
+  function found this at once, with the property every terminal string
+  must have: valid UTF-8, no control characters but tab and line feed.
+- **One gate, run by make.** `make check-fast` and `make check` are what
+  "done" means for a change, for people and scripts alike; there is no
+  CI yet. Rules a contributor has to remember are kept to what no tool
+  checks, and each of those has a test (CONTRIBUTING.md lists them).
+  The gate's own files change only in pull requests of their own, and
+  suppressions are counted against a baseline from `origin/main`.
+- **Set for the defects it must catch.** The linters are configured to
+  catch an unclosed response body, a shadowed `err`, an empty
+  `default:` hiding an enum case, and `defer f.Close()` on a file open
+  for writing. A data race and a secret in an error are for the tests to
+  catch, under the race detector and in the secret-output tests: no
+  linter sees them. Hence:
+  - govet's **shadow** is on: a shadowed `err` can lose an error, that
+    of a rename for one, and the other linters let it through. A
+    shadowed `err` is fixed with `=`.
+  - errcheck runs **without the std-error-handling preset**, which lets
+    `(*os.File).Close` through, and with it the write error that
+    `defer f.Close()` loses on a file open for writing. Closes of
+    interface values, writes through an `io.Writer` or into a
+    tabwriter, and cleanup removals stay excluded; a write to or the
+    Close of an `*os.File` is checked.
+  - exhaustive keeps **`default-signifies-exhaustive: false`**: with
+    `true` an empty `default:` would hide a missing case from it.
+    Switches list every case; gojq's term types are ignored, as vegtam
+    refuses all but a few in a `default`.
+  - gosec **G115** stays on: an integer conversion from input gets a
+    bounds check where it happens.
+- **Smaller choices.** misspell has no locale, since the prose here
+  is British. gocognit (30) skips tests, which are scripts of checks.
+  sloglint waits for the first slog call. os/exec is allowed in
+  `internal/core/env/cmd.go` only, and the process environment is read
+  in two places, `{{$env NAME}}` and the trust store location. The
+  points that open files by path carry a `//nolint` with the reason
+  rather than an exclusion by file, so that a new one in the same file
+  is still reported.
+- **Write errors on stdout stay unreported.** As `writeJSON` already
+  decided, a failed write to stdout or stderr has nowhere to go; errcheck
+  excludes `fmt.Fprint*` to an `io.Writer` for that reason.
+- **goleak when there is a goroutine.** vegtam's code starts none; the
+  first package that does adds `goleak.VerifyTestMain`, and
+  `go.uber.org/goleak` becomes a dependency of its tests only.
+- **Fuzzing.** The parser, templates, masking and terminal text have fuzz
+  targets with properties rather than examples. Their seeds are in the
+  tests, and the parser's are the `.http` files in testdata; inputs that
+  once failed are kept in `testdata/fuzz` and run with every `go test`.

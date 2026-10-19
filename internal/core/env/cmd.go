@@ -56,7 +56,7 @@ func ReadCommandFile(path string) (*CommandFile, error) {
 	fail := func(format string, args ...any) error {
 		return core.Errorf(core.KindParse, core.Source{File: canonical}, format, args...)
 	}
-	src, err := os.ReadFile(canonical)
+	src, err := os.ReadFile(canonical) //nolint:forbidigo,gosec // G304: the command file, found by its name from the .http file's directory up
 	if err != nil {
 		return nil, fail("%v", err)
 	}
@@ -71,10 +71,10 @@ func ReadCommandFile(path string) (*CommandFile, error) {
 	}
 	dec := json.NewDecoder(bytes.NewReader(src))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&raw); err != nil {
+	if err = dec.Decode(&raw); err != nil {
 		return nil, fail("%v", err)
 	}
-	if _, err := dec.Token(); err != io.EOF {
+	if _, err = dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, fail("data after the object")
 	}
 	f := &CommandFile{Path: canonical, Contents: src, Commands: map[string]Command{}}
@@ -104,7 +104,7 @@ func duplicateKey(src []byte) (string, bool) {
 	// value reads one value; an error ends the walk, and the parse
 	// reports it.
 	var value func() (string, error)
-	value = func() (string, error) {
+	value = func() (dup string, err error) {
 		tok, err := dec.Token()
 		if err != nil || tok != json.Delim('{') && tok != json.Delim('[') {
 			return "", err
@@ -112,17 +112,20 @@ func duplicateKey(src []byte) (string, bool) {
 		keys := map[string]bool{}
 		for dec.More() {
 			if tok == json.Delim('{') {
-				k, err := dec.Token()
-				if err != nil {
+				var k json.Token
+				if k, err = dec.Token(); err != nil {
 					return "", err
 				}
-				key := k.(string)
+				key, ok := k.(string)
+				if !ok { // json.Decoder gives every object key as a string
+					return "", nil
+				}
 				if keys[key] {
 					return key, nil
 				}
 				keys[key] = true
 			}
-			if dup, err := value(); dup != "" || err != nil {
+			if dup, err = value(); dup != "" || err != nil {
 				return dup, err
 			}
 		}
@@ -151,7 +154,7 @@ func (f *CommandFile) Sum() (string, error) {
 			if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
 				continue
 			}
-			contents, err := os.ReadFile(path)
+			contents, err := os.ReadFile(path) //nolint:forbidigo,gosec // G304: a script the command file names, hashed for the trust store, never sent or printed
 			if err != nil {
 				return "", err
 			}
@@ -212,12 +215,12 @@ func (l *Loader) findCommands(dir string) (*commands, error) {
 // trusted and has it. Outside a dry run, it also runs it, once for the
 // whole run, so that the masker knows the value before anything is
 // printed.
-func (v *Vars) command(r core.Ref, src core.Source) error {
+func (v *Vars) command(ctx context.Context, r core.Ref, src core.Source) error {
 	cf, err := v.commandFile()
 	if _, ok := errors.AsType[*core.Error](err); ok {
 		return err
 	} else if err != nil {
-		return fmt.Errorf("%s: %v", r, err)
+		return fmt.Errorf("%s: %w", r, err)
 	}
 	if cf.status != policy.Trusted {
 		why := "is not trusted to run commands; read it, then trust it with"
@@ -232,11 +235,12 @@ func (v *Vars) command(r core.Ref, src core.Source) error {
 	if v.loader.opts.DryRun {
 		return nil
 	}
-	_, err = v.loader.run(cf, r.Name)
+	_, err = v.loader.run(ctx, cf, r.Name)
 	return err
 }
 
-// commandValue returns the value of {{$cmd name}} for the requests of v.
+// commandValue returns the value of {{$cmd name}} for the requests of v:
+// what its command printed when the request was prepared.
 func (v *Vars) commandValue(name string) (string, error) {
 	if v.loader.opts.DryRun {
 		return "", core.ErrLate
@@ -245,10 +249,11 @@ func (v *Vars) commandValue(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, ok := cf.Commands[name]; !ok || cf.status != policy.Trusted {
-		return "", fmt.Errorf("no trusted command %s", name)
+	r, ok := v.loader.ran[ranKey(cf.Path, name)]
+	if !ok || cf.status != policy.Trusted {
+		return "", fmt.Errorf("no trusted command %s has run", name)
 	}
-	return v.loader.run(cf, name)
+	return r.value, r.err
 }
 
 // ran is the outcome of running a command.
@@ -257,25 +262,28 @@ type ran struct {
 	err   error
 }
 
+// ranKey is the key of a command in Loader.ran.
+func ranKey(path, name string) string { return path + "\x00" + name }
+
 // run runs the command name of cf, or returns what running it gave
 // before.
-func (l *Loader) run(cf *commands, name string) (string, error) {
-	key := cf.Path + "\x00" + name
+func (l *Loader) run(ctx context.Context, cf *commands, name string) (string, error) {
+	key := ranKey(cf.Path, name)
 	if r, ok := l.ran[key]; ok {
 		return r.value, r.err
 	}
-	v, err := runCommand(filepath.Dir(cf.Path), cf.Commands[name])
+	v, err := runCommand(ctx, filepath.Dir(cf.Path), cf.Commands[name])
 	if err != nil {
-		err = fmt.Errorf("{{$cmd %s}}: %v", name, err)
+		err = fmt.Errorf("{{$cmd %s}}: %w", name, err)
 	}
 	l.ran[key] = ran{v, err}
 	return v, err
 }
 
-func runCommand(dir string, c Command) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
+func runCommand(ctx context.Context, dir string, c Command) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, c.Argv[0], c.Argv[1:]...)
+	cmd := exec.CommandContext(ctx, c.Argv[0], c.Argv[1:]...) //nolint:gosec // G204: the argv of a trusted command file, without a shell
 	cmd.Dir = dir
 	stdout, stderr := &capped{max: maxStdout}, &capped{max: maxStderr}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
@@ -289,16 +297,18 @@ func runCommand(dir string, c Command) (string, error) {
 	}
 	prog := c.Argv[0]
 	switch {
-	case ctx.Err() != nil:
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return "", fmt.Errorf("%s did not finish within %s", prog, c.Timeout)
+	case ctx.Err() != nil:
+		return "", fmt.Errorf("%s: %w", prog, ctx.Err())
 	case err != nil:
 		if msg := strings.TrimSpace(strings.ToValidUTF8(stderr.String(), "")); msg != "" {
 			if stderr.over {
 				msg += "..."
 			}
-			return "", fmt.Errorf("%s: %v: %s", prog, err, msg)
+			return "", fmt.Errorf("%s: %w: %s", prog, err, msg)
 		}
-		return "", fmt.Errorf("%s: %v", prog, err)
+		return "", fmt.Errorf("%s: %w", prog, err)
 	case stdout.over:
 		return "", fmt.Errorf("%s printed more than %d bytes", prog, maxStdout)
 	}

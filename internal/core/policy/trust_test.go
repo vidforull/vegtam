@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,7 +72,7 @@ func TestStoreRefuses(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := NewStore(path).Check("/a/http-client.cmd.json", "")
-		if e, ok := err.(*core.Error); !ok || e.Kind != core.KindPolicy || !strings.Contains(e.Error(), tt.want) {
+		if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != core.KindPolicy || !strings.Contains(e.Error(), tt.want) {
 			t.Errorf("%s: %v, want a policy error with %q", tt.name, err, tt.want)
 		}
 	}
@@ -96,8 +97,12 @@ func TestDefaultStore(t *testing.T) {
 func TestCanonical(t *testing.T) {
 	dir, _ := filepath.EvalSymlinks(t.TempDir())
 	file := filepath.Join(dir, "real", "http-client.cmd.json")
-	os.MkdirAll(filepath.Dir(file), 0o755)
-	os.WriteFile(file, nil, 0o644)
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")); err != nil {
 		t.Skip(err)
 	}

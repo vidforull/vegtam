@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"runtime/debug"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -22,6 +24,7 @@ const (
 	exitNetwork = 3 // network or TLS error, timeout
 	exitStatus  = 4 // HTTP status 400 or above, with run --fail
 	exitPolicy  = 6 // not allowed by policy: a command file that is not trusted
+	exitPanic   = 2 // a bug in vegtam: the code Go exits with on a panic
 )
 
 // exitCode returns the exit code for an error of kind k.
@@ -35,6 +38,8 @@ func exitCode(k core.Kind) int {
 		return exitStatus
 	case core.KindPolicy:
 		return exitPolicy
+	case core.KindUsage, core.KindParse, core.KindVariable, core.KindRequest, core.KindImport, core.KindCapture:
+		return exitUsage
 	}
 	return exitUsage
 }
@@ -67,6 +72,10 @@ type Config struct {
 
 	json   bool         // --json
 	masker *core.Masker // the secrets the command has read
+	// secrets returns a masker for every secret read so far, from the
+	// moment the command has an environment loader: masker is set only
+	// once the requests are resolved, and a panic may come before.
+	secrets func() *core.Masker
 	// Commands write to out and errOut, never to Stdout and Stderr, so
 	// that everything they print goes through masker.
 	out, errOut io.Writer
@@ -103,6 +112,17 @@ func (c *Config) printError(e *output.Error) {
 	fmt.Fprintf(c.errOut, "vegtam: %s%s\n", printable(loc), printable(e.Message))
 }
 
+// internalError prints v, the value of a panic, and stack on stderr. A
+// panic is a bug in vegtam, and its value may hold a secret or a control
+// character that Go would print as is: it is masked with every secret
+// read so far, and shown as text for a terminal.
+func (c *Config) internalError(v any, stack []byte) {
+	if c.secrets != nil {
+		c.masker = c.secrets()
+	}
+	fmt.Fprint(c.errOut, printable(fmt.Sprintf("vegtam: internal error: %v\n%s", v, stack)))
+}
+
 // masked is stdout or stderr with secret values masked. A value split
 // across two writes would escape, so callers write whole lines or blocks.
 type masked struct {
@@ -123,9 +143,16 @@ type exitError struct{ code int }
 
 func (e *exitError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
 
-// Run runs the command line args and returns the exit code.
-func Run(args []string, cfg Config) int {
+// Run runs the command line args and returns the exit code. The commands
+// stop when ctx is done.
+func Run(ctx context.Context, args []string, cfg Config) (code int) {
 	cfg.out, cfg.errOut = masked{cfg.Stdout, &cfg}, masked{cfg.Stderr, &cfg}
+	defer func() {
+		if v := recover(); v != nil {
+			cfg.internalError(v, debug.Stack())
+			code = exitPanic
+		}
+	}()
 	root := &cobra.Command{
 		Use:           "vegtam",
 		Short:         "A local-first API client for .http files",
@@ -140,7 +167,7 @@ func Run(args []string, cfg Config) int {
 	root.AddCommand(newRunCmd(&cfg), newShowCmd(&cfg), newListCmd(&cfg), newImportCmd(&cfg), newTrustCmd(&cfg),
 		newSchemaCmd(&cfg), newVersionCmd(&cfg))
 
-	cmd, err := root.ExecuteC()
+	cmd, err := root.ExecuteContextC(ctx)
 	if err == nil {
 		return exitOK
 	}

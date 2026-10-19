@@ -39,3 +39,7 @@ GET {{host}}/big?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
 ### A host from the private environment file, where nothing listens
 # @name hidden
 GET {{base}}/?key={{token}}
+
+### Redirects, with the secrets in the URL, until vegtam stops following
+# @name hops
+GET {{host}}/hops?key={{token}}&env={{$env VEGTAM_TEST_KEY}}

@@ -39,12 +39,12 @@ var Schema string
 //   - trust: Trust;
 //   - an error that ends a command before any request: Result.Error.
 type Document struct {
-	SchemaVersion int `json:"schema_version"`
-	*Result
-	Results  []*Result  `json:"results,omitzero"`
-	Requests []*Listed  `json:"requests,omitzero"`
-	Import   *Import    `json:"import,omitempty"`
-	Trust    []*Trusted `json:"trust,omitzero"`
+	SchemaVersion int        `json:"schema_version"`
+	*Result                  //nolint:embeddedstructfieldcheck // schema_version comes first in every document
+	Results       []*Result  `json:"results,omitzero"`
+	Requests      []*Listed  `json:"requests,omitzero"`
+	Import        *Import    `json:"import,omitempty"`
+	Trust         []*Trusted `json:"trust,omitzero"`
 }
 
 // Result is the outcome of one request.
@@ -206,8 +206,10 @@ func Written(r *core.Request) *Request {
 
 // NewResponse returns r with every secret value in it hidden by m.
 func NewResponse(r *exec.Response, m *core.Masker) (*Response, *Timing) {
-	resp := &Response{Proto: r.Proto, Status: r.Status, Reason: m.Mask(r.Reason), Headers: []Header{},
-		Truncated: r.Truncated, Untrusted: true}
+	resp := &Response{
+		Proto: r.Proto, Status: r.Status, Reason: m.Mask(r.Reason), Headers: []Header{},
+		Truncated: r.Truncated, Untrusted: true,
+	}
 	for _, name := range slices.Sorted(maps.Keys(r.Header)) {
 		for _, v := range r.Header[name] {
 			resp.Headers = append(resp.Headers, Header{m.Mask(name), m.Mask(v)})
@@ -257,7 +259,7 @@ func Checked(outcomes []assert.Outcome, m *core.Masker) []Assert {
 			actual = maskBody([]byte(o.Actual), o.Cut, m)
 		case assert.JSON:
 			actual = maskJSON(o.Actual, m)
-		default:
+		case assert.Text:
 			actual = m.Mask(o.Actual)
 		}
 		actual = strings.ToValidUTF8(actual, "\uFFFD")
@@ -296,8 +298,10 @@ func NewError(err error, m *core.Masker) *Error {
 func List(f *core.File) []*Listed {
 	var list []*Listed
 	for i, r := range f.Requests {
-		l := &Listed{Ref: Ref(f, i), File: f.Path, Line: r.Source.Line, Index: i + 1, Name: r.Name,
-			Method: r.Method, URL: r.URL, Directives: []Directive{}}
+		l := &Listed{
+			Ref: Ref(f, i), File: f.Path, Line: r.Source.Line, Index: i + 1, Name: r.Name,
+			Method: r.Method, URL: r.URL, Directives: []Directive{},
+		}
 		for _, d := range r.Directives {
 			l.Directives = append(l.Directives, Directive{d.Kind, d.Value})
 		}

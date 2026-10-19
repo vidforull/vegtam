@@ -1,6 +1,7 @@
 package httpfile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,7 +45,8 @@ func TestParse(t *testing.T) {
 		name, src, want string
 	}{
 		{"one request", "GET https://example.com/users\n", "1 GET https://example.com/users\n"},
-		{"several requests", `### List users
+		{
+			"several requests", `### List users
 # @name list
 GET https://api.example.test/users HTTP/1.1
 Accept: application/json
@@ -60,14 +62,22 @@ Content-Type: application/json
 DELETE {{host}}/users/1`,
 			"3 GET https://api.example.test/users #list HTTP/1.1 [Accept: application/json]\n" +
 				`8 POST https://api.example.test/users #create [Content-Type: application/json] body=<<{"name": "{{user}}"}>>` + "\n" +
-				"14 DELETE {{host}}/users/1\n"},
-		{"body kept verbatim, blank edges trimmed", "POST https://example.com/notes\n\n\nfirst\n# not a comment\n\nlast\n\n\n",
-			`1 POST https://example.com/notes body=<<first\n# not a comment\n\nlast>>` + "\n"},
-		{"body from file", "POST https://example.com/upload\nContent-Type: application/json\n\n< ./payload.json\n",
-			"1 POST https://example.com/upload [Content-Type: application/json] <./payload.json\n"},
-		{"CRLF and BOM", "\ufeff# @name crlf\r\nGET https://example.com\r\nAccept: */*\r\n\r\nbody\r\n",
-			"2 GET https://example.com #crlf [Accept: */*] body=<<body>>\n"},
-		{"comments and directives", `# a comment
+				"14 DELETE {{host}}/users/1\n",
+		},
+		{
+			"body kept verbatim, blank edges trimmed", "POST https://example.com/notes\n\n\nfirst\n# not a comment\n\nlast\n\n\n",
+			`1 POST https://example.com/notes body=<<first\n# not a comment\n\nlast>>` + "\n",
+		},
+		{
+			"body from file", "POST https://example.com/upload\nContent-Type: application/json\n\n< ./payload.json\n",
+			"1 POST https://example.com/upload [Content-Type: application/json] <./payload.json\n",
+		},
+		{
+			"CRLF and BOM", "\ufeff# @name crlf\r\nGET https://example.com\r\nAccept: */*\r\n\r\nbody\r\n",
+			"2 GET https://example.com #crlf [Accept: */*] body=<<body>>\n",
+		},
+		{
+			"comments and directives", `# a comment
 // another comment
 # @name check
 #@tag smoke
@@ -77,9 +87,12 @@ GET https://example.com/health
 # @capture token = $.token
 Accept: application/json`,
 			"5 GET https://example.com/health #check [Accept: application/json] " +
-				"@tag(smoke):4 @assert(status == 200):7 @capture(token = $.token):8\n"},
-		{"placeholders with spaces", "GET {{ $env BASE_URL }}/items?q={{query}} HTTP/2\nAuthorization: Bearer {{$env TOKEN}}",
-			"1 GET {{ $env BASE_URL }}/items?q={{query}} HTTP/2 [Authorization: Bearer {{$env TOKEN}}]\n"},
+				"@tag(smoke):4 @assert(status == 200):7 @capture(token = $.token):8\n",
+		},
+		{
+			"placeholders with spaces", "GET {{ $env BASE_URL }}/items?q={{query}} HTTP/2\nAuthorization: Bearer {{$env TOKEN}}",
+			"1 GET {{ $env BASE_URL }}/items?q={{query}} HTTP/2 [Authorization: Bearer {{$env TOKEN}}]\n",
+		},
 		{"empty file", "\n# only a comment\n", ""},
 	}
 	for _, tt := range tests {
@@ -101,12 +114,18 @@ func TestParseErrors(t *testing.T) {
 		line      int
 		want      string
 	}{
-		{"duplicate name", "# @name a\nGET https://example.com\n###\n# @name a\nGET https://example.com", 4,
-			`duplicate request name "a" (first on line 1)`},
-		{"header without colon", "POST https://example.com\nContent-Type: application/json\n{\"a\": 1}", 3,
-			`expected a header "Name: value"`},
-		{"unclosed placeholder in header", "GET https://example.com\nAuthorization: Bearer {{token\n", 2,
-			`header Authorization: unclosed placeholder "{{token"`},
+		{
+			"duplicate name", "# @name a\nGET https://example.com\n###\n# @name a\nGET https://example.com", 4,
+			`duplicate request name "a" (first on line 1)`,
+		},
+		{
+			"header without colon", "POST https://example.com\nContent-Type: application/json\n{\"a\": 1}", 3,
+			`expected a header "Name: value"`,
+		},
+		{
+			"unclosed placeholder in header", "GET https://example.com\nAuthorization: Bearer {{token\n", 2,
+			`header Authorization: unclosed placeholder "{{token"`,
+		},
 		{"invalid placeholder", "GET https://example.com/{{a b}}", 1, `URL: invalid placeholder "{{a b}}"`},
 		{"unknown line", "hello world", 1, `expected a request line "METHOD URL", got "hello world"`},
 		{"lowercase method", "get https://example.com", 1, "expected a request line"},
@@ -137,7 +156,7 @@ func TestParseErrors(t *testing.T) {
 			if err == nil || !strings.HasPrefix(err.Error(), want) || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v; want %q...%q", err, want, tt.want)
 			}
-			if e, ok := err.(*core.Error); !ok || e.Kind != core.KindParse {
+			if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != core.KindParse {
 				t.Errorf("error is %T %+v, want a parse *core.Error", err, err)
 			}
 		})
@@ -159,7 +178,7 @@ func TestLoad(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c, errs := Load(dir, filepath.Join(dir, ".hidden/x.http"), filepath.Join(dir, "missing"), filepath.Join(dir, "a/y.txt"))
+	c, errs := Load(dir, filepath.Join(dir, ".hidden", "x.http"), filepath.Join(dir, "missing"), filepath.Join(dir, "a", "y.txt"))
 	var got []string
 	for _, f := range c.Files {
 		got = append(got, strings.TrimPrefix(f.Path, dir+"/"))

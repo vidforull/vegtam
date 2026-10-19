@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"regexp"
 	"strings"
 	"text/tabwriter"
@@ -35,7 +34,8 @@ its command file is not trusted, but its command does not run.`,
 			res := &output.Result{Ref: output.Ref(f, i), Request: output.Written(f.Requests[i])}
 			if envName != "" {
 				loader := env.NewLoader(env.Options{Env: envName, DryRun: true, Trust: policy.DefaultStore()})
-				j := prepare(loader, f, i)
+				cfg.secrets = loader.Masker
+				j := prepare(cmd.Context(), loader, f, i)
 				cfg.masker = loader.Masker()
 				if j.err != nil {
 					return j.err
@@ -48,7 +48,7 @@ its command file is not trusted, but its command does not run.`,
 			}
 			var b strings.Builder
 			writeRequest(&b, res.Request)
-			io.WriteString(cfg.out, printable(b.String()))
+			fmt.Fprint(cfg.out, printable(b.String()))
 			return nil
 		},
 	}
@@ -64,7 +64,7 @@ func newListCmd(cfg *Config) *cobra.Command {
 and below it: how to refer to each, its method and URL as written, and
 its directives. Files that do not parse are reported, the rest listed.`,
 		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			paths, err := httpfile.Files(args[0])
 			if err != nil {
 				return err
@@ -92,7 +92,7 @@ its directives. Files that do not parse are reported, the rest listed.`,
 					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", l.Ref, l.Method, l.URL, directives(l.Directives))
 				}
 				tw.Flush()
-				io.WriteString(cfg.out, printable(trailingSpace.ReplaceAllString(b.String(), "")))
+				fmt.Fprint(cfg.out, printable(trailingSpace.ReplaceAllString(b.String(), "")))
 			}
 			if doc.Result != nil {
 				return &exitError{exitCode(core.KindParse)}
@@ -137,7 +137,7 @@ show, list, import and trust print. Fields are only ever added; schema_version
 changes if one has to change its meaning or go away.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
-			io.WriteString(cfg.out, output.Schema)
+			fmt.Fprint(cfg.out, output.Schema)
 			return nil
 		},
 	}

@@ -1,7 +1,9 @@
 package env
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/httpfile"
 	"github.com/vidforull/vegtam/internal/core/policy"
 )
 
@@ -27,22 +30,28 @@ func TestHelperProcess(t *testing.T) {
 	}
 	switch args[1] {
 	case "print":
-		fmt.Println(args[2])
+		fmt.Fprintln(os.Stdout, args[2])
 	case "crlf":
-		fmt.Print(args[2] + "\r\n")
+		fmt.Fprint(os.Stdout, args[2]+"\r\n")
 	case "count": // appends to a file, to count the runs
-		f, _ := os.OpenFile(args[2], os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		f.WriteString("x")
-		f.Close()
-		fmt.Println("counted")
+		f, err := os.OpenFile(args[2], os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, err = f.WriteString("x")
+			err = errors.Join(err, f.Close())
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, "counted")
 	case "pwd":
 		wd, _ := os.Getwd()
-		fmt.Println(wd)
+		fmt.Fprintln(os.Stdout, wd)
 	case "stdin":
 		b, _ := io.ReadAll(os.Stdin)
-		fmt.Printf("read %d bytes", len(b))
+		fmt.Fprintf(os.Stdout, "read %d bytes", len(b))
 	case "env":
-		fmt.Println(os.Getenv(args[2]))
+		fmt.Fprintln(os.Stdout, os.Getenv(args[2]))
 	case "fail":
 		fmt.Fprintln(os.Stderr, args[2])
 		os.Exit(3)
@@ -50,19 +59,24 @@ func TestHelperProcess(t *testing.T) {
 		time.Sleep(time.Minute)
 	case "cat":
 		b, _ := os.ReadFile(args[2])
-		os.Stdout.Write(b)
+		if _, err := os.Stdout.Write(b); err != nil {
+			os.Exit(1)
+		}
 	case "background": // leaves a process behind with the output open
-		child := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "--", "linger")
+		child := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestHelperProcess$", "--", "linger")
 		child.Stdout = os.Stdout
-		child.Start()
-		fmt.Println("started")
+		if err := child.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, "started")
 	case "linger":
 		time.Sleep(3 * time.Second)
 	case "failbig":
 		fmt.Fprint(os.Stderr, strings.Repeat("e", 2*maxStderr))
 		os.Exit(1)
 	case "big":
-		fmt.Print(strings.Repeat("x", maxStdout+1))
+		fmt.Fprint(os.Stdout, strings.Repeat("x", maxStdout+1))
 	case "nothing":
 	}
 	os.Exit(0)
@@ -138,7 +152,7 @@ X-Count: {{$cmd COUNT}}
 	}
 	// Prepared again, as for a second request: the commands do not run
 	// again.
-	if _, err := prepare(t, l, path); err != nil {
+	if _, err = prepare(t, l, path); err != nil {
 		t.Fatal(err)
 	}
 	v, _ := l.For(path)
@@ -152,7 +166,7 @@ X-Count: {{$cmd COUNT}}
 	if runs, _ := os.ReadFile(counter); string(runs) != "x" {
 		t.Errorf("COUNT ran %d times, want once", len(runs))
 	}
-	if got := l.Masker().Mask("Cmd-t0ken/x+y " + url(t, "Cmd-t0ken/x+y")); got != "*** ***" {
+	if got := l.Masker().Mask("Cmd-t0ken/x+y " + url("Cmd-t0ken/x+y")); got != "*** ***" {
 		t.Errorf("Masker().Mask = %q", got)
 	}
 
@@ -163,7 +177,7 @@ X-Count: {{$cmd COUNT}}
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.URL.Reveal(l.must(t, path)); err != core.ErrLate {
+	if _, err := p.URL.Reveal(l.must(t, path)); !errors.Is(err, core.ErrLate) {
 		t.Errorf("Reveal in a dry run = %v, want ErrLate", err)
 	}
 	if _, err := os.Stat(counter); err == nil {
@@ -171,7 +185,7 @@ X-Count: {{$cmd COUNT}}
 	}
 }
 
-func url(t *testing.T, s string) string {
+func url(s string) string {
 	return strings.NewReplacer("/", "%2F", "+", "%2B").Replace(s)
 }
 
@@ -187,37 +201,77 @@ func TestCommandErrors(t *testing.T) {
 	}{
 		{"untrusted", ok, false, "OK", core.KindPolicy, "is not trusted to run commands; read it, then trust it with: vegtam trust "},
 		{"unknown command", ok, true, "NOPE", core.KindVariable, "{{$cmd NOPE}}: no command NOPE in "},
-		{"failure", map[string]any{"F": map[string]any{"argv": helper("fail", "not signed in")}}, true, "F",
-			core.KindVariable, ": exit status 3: not signed in"},
-		{"no program", map[string]any{"F": map[string]any{"argv": []string{"vegtam-test-no-such-program"}}}, true, "F",
-			core.KindVariable, `{{$cmd F}}: vegtam-test-no-such-program: exec: "vegtam-test-no-such-program": executable file not found`},
-		{"timeout", map[string]any{"S": map[string]any{"argv": helper("sleep"), "timeout": "100ms"}}, true, "S",
-			core.KindVariable, "did not finish within 100ms"},
+		{
+			"failure",
+			map[string]any{"F": map[string]any{"argv": helper("fail", "not signed in")}},
+			true, "F",
+			core.KindVariable, ": exit status 3: not signed in",
+		},
+		{
+			"no program",
+			map[string]any{"F": map[string]any{"argv": []string{"vegtam-test-no-such-program"}}},
+			true, "F",
+			core.KindVariable, `{{$cmd F}}: vegtam-test-no-such-program: exec: "vegtam-test-no-such-program": executable file not found`,
+		},
+		{
+			"timeout",
+			map[string]any{"S": map[string]any{"argv": helper("sleep"), "timeout": "100ms"}},
+			true, "S",
+			core.KindVariable, "did not finish within 100ms",
+		},
 		{"nothing", map[string]any{"N": map[string]any{"argv": helper("nothing")}}, true, "N", core.KindVariable, "printed nothing"},
-		{"too much", map[string]any{"B": map[string]any{"argv": helper("big")}}, true, "B", core.KindVariable,
-			"printed more than 1048576 bytes"},
+		{
+			"too much",
+			map[string]any{"B": map[string]any{"argv": helper("big")}},
+			true, "B", core.KindVariable,
+			"printed more than 1048576 bytes",
+		},
 		// A file that does not parse cannot be trusted either.
-		{"empty argv", map[string]any{"E": map[string]any{"argv": []string{}}}, false, "E", core.KindParse,
-			"E: argv needs at least the program"},
-		{"bad timeout", map[string]any{"T": map[string]any{"argv": []string{"x"}, "timeout": "soon"}}, false, "T", core.KindParse,
-			`T: invalid timeout "soon"`},
-		{"bad name", map[string]any{"A B": map[string]any{"argv": []string{"x"}}}, false, "A", core.KindParse,
-			`invalid command name "A B"`},
-		{"unknown field", map[string]any{"S": map[string]any{"argv": []string{"x"}, "shell": true}}, false, "S", core.KindParse,
-			`unknown field "shell"`},
-		{"a command twice", `{"A": {"argv": ["echo", "first"]}, "A": {"argv": ["echo", "second"]}}`, false, "A", core.KindParse,
-			`"A" is there twice`},
-		{"argv twice", `{"A": {"argv": ["echo", "first"], "timeout": "1s", "argv": ["sh"]}}`, false, "A", core.KindParse,
-			`"argv" is there twice`},
+		{
+			"empty argv",
+			map[string]any{"E": map[string]any{"argv": []string{}}},
+			false, "E", core.KindParse,
+			"E: argv needs at least the program",
+		},
+		{
+			"bad timeout",
+			map[string]any{"T": map[string]any{"argv": []string{"x"}, "timeout": "soon"}},
+			false, "T", core.KindParse,
+			`T: invalid timeout "soon"`,
+		},
+		{
+			"bad name",
+			map[string]any{"A B": map[string]any{"argv": []string{"x"}}},
+			false, "A", core.KindParse,
+			`invalid command name "A B"`,
+		},
+		{
+			"unknown field",
+			map[string]any{"S": map[string]any{"argv": []string{"x"}, "shell": true}},
+			false, "S", core.KindParse,
+			`unknown field "shell"`,
+		},
+		{
+			"a command twice", `{"A": {"argv": ["echo", "first"]}, "A": {"argv": ["echo", "second"]}}`, false, "A", core.KindParse,
+			`"A" is there twice`,
+		},
+		{
+			"argv twice", `{"A": {"argv": ["echo", "first"], "timeout": "1s", "argv": ["sh"]}}`, false, "A", core.KindParse,
+			`"argv" is there twice`,
+		},
 		{"data after it", `{"A": {"argv": ["echo"]}} {"A": {"argv": ["sh"]}}`, false, "A", core.KindParse, "data after the object"},
-		{"stderr cut", map[string]any{"F": map[string]any{"argv": helper("failbig")}}, true, "F", core.KindVariable,
-			": exit status 1: " + strings.Repeat("e", maxStderr) + "..."},
+		{
+			"stderr cut",
+			map[string]any{"F": map[string]any{"argv": helper("failbig")}},
+			true, "F", core.KindVariable,
+			": exit status 1: " + strings.Repeat("e", maxStderr) + "...",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path, store := cmdTree(t, tt.cmds, tt.trust, "GET https://example.com/{{$cmd "+tt.ref+"}}")
 			_, err := prepare(t, NewLoader(Options{Trust: store}), path)
-			if e, ok := err.(*core.Error); !ok || e.Kind != tt.kind || !strings.Contains(e.Error(), tt.want) {
+			if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != tt.kind || !strings.Contains(e.Error(), tt.want) {
 				t.Errorf("error = %v; want %s error with %q", err, tt.kind, tt.want)
 			}
 		})
@@ -231,13 +285,13 @@ func TestCommandErrors(t *testing.T) {
 	}
 	for _, dry := range []bool{false, true} {
 		_, err := prepare(t, NewLoader(Options{Trust: store, DryRun: dry}), path)
-		if e, ok := err.(*core.Error); !ok || e.Kind != core.KindPolicy || !strings.Contains(e.Msg, "has changed since it was trusted") {
+		if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != core.KindPolicy || !strings.Contains(e.Msg, "has changed since it was trusted") {
 			t.Errorf("changed file (dry run %v): %v", dry, err)
 		}
 	}
 	// Without a store, nothing is trusted.
 	path, _ = cmdTree(t, ok, true, "GET https://example.com/{{$cmd OK}}")
-	if _, err := prepare(t, NewLoader(Options{}), path); err == nil || err.(*core.Error).Kind != core.KindPolicy {
+	if _, err := prepare(t, NewLoader(Options{}), path); !isKind(err, core.KindPolicy) {
 		t.Errorf("no store: %v", err)
 	}
 }
@@ -255,7 +309,7 @@ func TestCommandTrust(t *testing.T) {
 	if _, err := prepare(t, NewLoader(Options{Trust: store}), victim); err != nil {
 		t.Errorf("the trusted file: %v", err)
 	}
-	if _, err := prepare(t, NewLoader(Options{Trust: store}), other); err == nil || err.(*core.Error).Kind != core.KindPolicy {
+	if _, err := prepare(t, NewLoader(Options{Trust: store}), other); !isKind(err, core.KindPolicy) {
 		t.Errorf("a link to it: %v, want a policy error", err)
 	}
 
@@ -265,7 +319,9 @@ func TestCommandTrust(t *testing.T) {
 		"TOKEN": map[string]any{"argv": append([]string{"./bin/helper"}, helper("cat", "token.txt")[1:]...)},
 	}, false, "GET https://example.com/{{$cmd TOKEN}}")
 	cmdDir := filepath.Join(filepath.Dir(path), "..")
-	os.Mkdir(filepath.Join(cmdDir, "bin"), 0o755)
+	if err := os.Mkdir(filepath.Join(cmdDir, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(os.Args[0], filepath.Join(cmdDir, "bin", "helper")); err != nil {
 		t.Fatal(err)
 	}
@@ -302,5 +358,29 @@ func TestCommandBackground(t *testing.T) {
 	}
 	if v, _ := p.URL.Reveal(l.must(t, path)); v != "https://example.com/started" {
 		t.Errorf("value = %q", v)
+	}
+}
+
+// A command stops when the run is canceled, not only at its timeout.
+func TestCommandCanceled(t *testing.T) {
+	path, store := cmdTree(t, map[string]any{"S": map[string]any{"argv": helper("sleep"), "timeout": "1m"}}, true,
+		"GET https://example.com/{{$cmd S}}")
+	f, err := httpfile.ParseFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := NewLoader(Options{Trust: store}).For(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer time.AfterFunc(100*time.Millisecond, cancel).Stop()
+	start := time.Now()
+	_, err = v.Prepare(ctx, f.Requests[0])
+	if err == nil || !strings.Contains(err.Error(), "{{$cmd S}}: ") || !strings.Contains(err.Error(), "context canceled") {
+		t.Errorf("Prepare = %v, want the command canceled", err)
+	}
+	if d := time.Since(start); d > 30*time.Second {
+		t.Errorf("Prepare returned after %s", d)
 	}
 }

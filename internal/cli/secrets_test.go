@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/env"
 )
 
 // leaks returns the forms of the test secrets that s contains: the value,
@@ -20,9 +21,11 @@ func (fx *fixture) leaks(s string) []string {
 	found := slices.DeleteFunc([]string{fx.hidden, ":" + port}, func(h string) bool { return !strings.Contains(s, h) })
 	for _, secret := range []string{privateSecret, envSecret} {
 		j, _ := json.Marshal(secret)
-		forms := []string{secret, url.QueryEscape(secret), url.PathEscape(secret), string(j[1 : len(j)-1]),
+		forms := []string{
+			secret, url.QueryEscape(secret), url.PathEscape(secret), string(j[1 : len(j)-1]),
 			strings.ReplaceAll(secret, "/", `\/`), strings.ReplaceAll(secret, "+", `\u002B`),
-			strings.ReplaceAll(secret, "+", " "), secret[:4]}
+			strings.ReplaceAll(secret, "+", " "), secret[:4],
+		}
 		for _, f := range forms {
 			if strings.Contains(s, f) {
 				found = append(found, f)
@@ -37,8 +40,8 @@ func bodies(v any) []string {
 	var out []string
 	switch v := v.(type) {
 	case map[string]any:
-		if v["encoding"] == "base64" {
-			b, _ := base64.StdEncoding.DecodeString(v["body"].(string))
+		if body, ok := v["body"].(string); ok && v["encoding"] == "base64" {
+			b, _ := base64.StdEncoding.DecodeString(body)
 			out = append(out, string(b))
 		}
 		for _, x := range v {
@@ -72,6 +75,7 @@ func TestNoSecretInOutput(t *testing.T) {
 		{"binary body", []string{"run", api + "#binary"}, exitOK, ""},
 		{"truncated body", []string{"run", api + "#big", "--max-body", "106"}, exitOK, "xx***"},
 		{"secret host", []string{"run", api + "#hidden"}, exitNetwork, "{{base}}/?key={{token}}"},
+		{"redirect error", []string{"run", api + "#hops"}, exitNetwork, "stopped after 10 redirects"},
 		{"directory", []string{"run", fx.dir, "--timeout", "100ms", "--max-body", "106", "--fail"}, exitStatus, "***"},
 		{"show", []string{"show", api + "#echo"}, exitOK, "Bearer {{token}}"},
 	}
@@ -101,7 +105,7 @@ func TestNoSecretInOutput(t *testing.T) {
 				if m.json {
 					validateJSON(t, stdout)
 					var doc any
-					json.Unmarshal([]byte(stdout), &doc)
+					decode(t, stdout, &doc)
 					all += "\n" + strings.Join(bodies(doc), "\n")
 				}
 				if found := fx.leaks(all); len(found) > 0 {
@@ -128,10 +132,52 @@ func TestMaskedWriter(t *testing.T) {
 	var out strings.Builder
 	cfg := &Config{Stdout: &out, TTY: true, masker: core.NewMasker([]string{privateSecret, envSecret, "url"})}
 	cfg.out = masked{&out, cfg}
-	cfg.out.Write([]byte("text " + privateSecret + " " + url.QueryEscape(envSecret) + "\n"))
+	if _, err := cfg.out.Write([]byte("text " + privateSecret + " " + url.QueryEscape(envSecret) + "\n")); err != nil {
+		t.Fatal(err)
+	}
 	cfg.writeJSON(map[string]string{"url": "url " + envSecret})
 	want := "text *** ***\n{\n  \"url\": \"*** ***\"\n}\n"
 	if out.String() != want {
 		t.Errorf("output = %q, want %q", out.String(), want)
+	}
+}
+
+// panicWriter panics when it is written to, with a message that names a
+// secret, as a bug might.
+type panicWriter struct{ msg string }
+
+func (w panicWriter) Write([]byte) (int, error) { panic(w.msg) }
+
+// TestPanicIsMasked checks that a panic, whose value may hold a secret,
+// is printed masked: Go would print it as is.
+func TestPanicIsMasked(t *testing.T) {
+	fx := newFixture(t)
+	var stderr strings.Builder
+	code := Run(t.Context(), []string{"run", fx.path("api.http") + "#echo", "-e", "test"},
+		Config{Stdout: panicWriter{"cannot print " + privateSecret}, Stderr: &stderr, TTY: true})
+	if code != exitPanic || !strings.HasPrefix(stderr.String(), "vegtam: internal error: cannot print ***\ngoroutine ") {
+		t.Errorf("Run = %d\n%s", code, stderr.String())
+	}
+	if found := fx.leaks(stderr.String()); len(found) > 0 {
+		t.Errorf("secret forms %q in\n%s", found, stderr.String())
+	}
+}
+
+// TestPanicBeforeOutputIsMasked checks a panic that comes while requests
+// are resolved, before the command has a masker: the secrets the loader
+// has read mask it, and its text cannot drive the terminal.
+func TestPanicBeforeOutputIsMasked(t *testing.T) {
+	fx := newFixture(t)
+	loader := env.NewLoader(env.Options{Env: "test"})
+	if _, err := loader.For(fx.path("api.http")); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	cfg := &Config{Stderr: &stderr, secrets: loader.Masker}
+	cfg.errOut = masked{&stderr, cfg}
+	cfg.internalError("cannot resolve "+privateSecret+" \x1b]0;title\x07", []byte("goroutine 1 [running]:\n"))
+	want := `vegtam: internal error: cannot resolve *** \x1b]0;title\x07` + "\ngoroutine 1 [running]:\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
 	}
 }

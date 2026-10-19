@@ -56,7 +56,10 @@ resolved.
 
 **Body from a file.** A body consisting of one line `< path` is replaced by
 the contents of that file, sent as is: placeholders in the file are not
-resolved. A relative path is relative to the `.http` file.
+resolved. The path is relative to the directory of the `.http` file and
+must stay inside it: an absolute path, a path that leads out with `..`
+and a symbolic link to a file elsewhere are errors, so that a `.http`
+file cannot send a file from elsewhere on the machine.
 
 **Names.** `# @name <id>` or `// @name <id>` names the request that
 follows. An id consists of letters, digits, `.`, `_` and `-`, is not a
@@ -287,7 +290,9 @@ secret value, including its URL- and JSON-escaped forms, is replaced with
 When a redirect leads to another origin (scheme, host or port),
 `Authorization`, `Cookie`, `Proxy-Authorization`, `Referer` and every
 header whose value holds a secret are dropped for the rest of the redirect
-chain.
+chain. A 307 or 308 redirect sends the body again, so one to another
+origin is refused if the body holds a secret. A redirect from `https` to
+`http` is always refused. A refused redirect is a `network` error.
 
 ## Importing from Postman
 

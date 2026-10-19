@@ -65,7 +65,7 @@ func compilePath(src string) (*path, error) {
 	}
 	parsed, err := gojq.Parse(q)
 	if err != nil {
-		return nil, fmt.Errorf("path %s: %v", src, err)
+		return nil, fmt.Errorf("path %s: %w", src, err)
 	}
 	p := &path{}
 	if parsed.Op == gojq.OpPipe && isLength(parsed.Right) {
@@ -79,7 +79,7 @@ func compilePath(src string) (*path, error) {
 		p.keys, err = gojq.Compile(keys)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("path %s: %v", src, err)
+		return nil, fmt.Errorf("path %s: %w", src, err)
 	}
 	return p, nil
 }

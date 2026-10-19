@@ -240,12 +240,14 @@ make build        # builds ./vegtam
 make test
 ```
 
-`make vet`, `make fmt` (gofmt check) and `make lint` (golangci-lint, if
-installed) are available too.
+`make check` runs the whole gate: golangci-lint, the tests with the race
+detector, and the other checks a change must pass. It needs golangci-lint
+v2.15.0; [CONTRIBUTING.md](CONTRIBUTING.md) says how to install it.
 
 ## Contributing
 
-Commit timestamps are kept in UTC: commit with `TZ=UTC git commit`.
+See [CONTRIBUTING.md](CONTRIBUTING.md): the gate, the rules it cannot
+check, and how commits are written.
 
 ## License
 

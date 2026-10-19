@@ -40,15 +40,15 @@ func TestImport(t *testing.T) {
 	got["report.json.golden"] = string(report) + "\n"
 
 	if *update {
-		if err := os.RemoveAll(golden); err != nil {
+		if err = os.RemoveAll(golden); err != nil {
 			t.Fatal(err)
 		}
 		for name, data := range got {
 			p := filepath.Join(golden, filepath.FromSlash(name))
-			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			if err = os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			if err = os.WriteFile(p, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -135,8 +135,10 @@ func TestImportErrors(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, data string) string {
 		p := filepath.Join(dir, name)
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return p
@@ -178,8 +180,10 @@ func TestSlug(t *testing.T) {
 }
 
 func TestVariable(t *testing.T) {
-	tests := map[string]string{"host": "host", "a.b-c_d": "a.b-c_d", "api key": "api_key", "1st": "_1st",
-		"Токен": "Token", "-x": "_-x"}
+	tests := map[string]string{
+		"host": "host", "a.b-c_d": "a.b-c_d", "api key": "api_key", "1st": "_1st",
+		"Токен": "Token", "-x": "_-x",
+	}
 	for in, want := range tests {
 		if got := variable(in); got != want {
 			t.Errorf("variable(%q) = %q, want %q", in, got, want)

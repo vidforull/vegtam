@@ -94,11 +94,12 @@ func (p *parser) line(n int, s string) error {
 			return p.comment(n, t)
 		}
 		return p.header(n, s)
+	case body:
+		if len(p.body) == 0 {
+			p.bodyAt = n
+		}
+		p.body = append(p.body, s)
 	}
-	if len(p.body) == 0 {
-		p.bodyAt = n
-	}
-	p.body = append(p.body, s)
 	return nil
 }
 
@@ -264,8 +265,8 @@ var captureRE = regexp.MustCompile(`^\s*(?:#|//)\s*@capture\s+(?:plain\s+)?([A-Z
 // the environment's values in place of the captured ones.
 func CaptureNames(src []byte) []string {
 	var names []string
-	for _, line := range strings.Split(string(src), "\n") {
-		if m := captureRE.FindStringSubmatch(line); m != nil && !slices.Contains(names, m[1]) {
+	for line := range strings.SplitSeq(string(src), "\n") {
+		if m := captureRE.FindStringSubmatch(line); len(m) > 1 && !slices.Contains(names, m[1]) {
 			names = append(names, m[1])
 		}
 	}
@@ -294,12 +295,16 @@ func isToken(s string) bool {
 		return false
 	}
 	for _, c := range []byte(s) {
-		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
-			strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0) {
+		if !isTokenChar(c) {
 			return false
 		}
 	}
 	return true
+}
+
+func isTokenChar(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
+		strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
 }
 
 func clip(s string) string {

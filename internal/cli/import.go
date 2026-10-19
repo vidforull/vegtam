@@ -1,9 +1,9 @@
 package cli
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -51,7 +51,7 @@ not imported and why, and the variables to check or set.
 Existing files are not overwritten without --force; then nothing is
 written.`,
 		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			res, err := postman.Import(args[0], out)
 			if err != nil {
 				return err
@@ -63,21 +63,24 @@ written.`,
 				cfg.writeJSON(output.Document{SchemaVersion: output.SchemaVersion, Import: res.Report})
 				return nil
 			}
-			io.WriteString(cfg.out, printable(importText(res.Report)))
+			fmt.Fprint(cfg.out, printable(importText(res.Report)))
 			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&out, "output", "o", "", "the directory to write to")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing files")
-	cmd.MarkFlagRequired("output")
+	if err := cmd.MarkFlagRequired("output"); err != nil {
+		panic(err) // only if the flag above were renamed
+	}
 	return cmd
 }
 
 // writeFiles writes files under dir, through an os.Root so that no path
 // leads outside it. Without force, nothing is written if any file exists.
+// The directories it makes are private: each collection holds secrets.
 func writeFiles(dir string, files []postman.File, force bool) error {
 	fail := func(err error) error { return core.Errorf(core.KindUsage, core.Source{}, "%v", err) }
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fail(err)
 	}
 	root, err := os.OpenRoot(dir)
@@ -108,19 +111,40 @@ func writeFiles(dir string, files []postman.File, force bool) error {
 		if f.Private {
 			perm = 0o600
 		}
-		if err := root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		if err := root.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 			return fail(err)
 		}
-		// WriteFile keeps the mode of a file that exists: set it first,
-		// so that secrets never go into a file others can read.
-		if err := root.Chmod(p, perm); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fail(err)
-		}
-		if err := root.WriteFile(p, f.Data, perm); err != nil {
+		if err := writeFile(root, p, f.Data, perm); err != nil {
 			return fail(err)
 		}
 	}
 	return nil
+}
+
+// writeFile writes data to the file name under root: to a new file beside
+// it, synced and closed, then renamed over name. name never holds part of
+// the data, and the mode of an old file, such as 0644 on one that now
+// holds secrets, does not carry over: the file has mode perm.
+func writeFile(root *os.Root, name string, data []byte, perm fs.FileMode) error {
+	tmp := filepath.Join(filepath.Dir(name), "."+filepath.Base(name)+"."+rand.Text()+".tmp")
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm) //nolint:forbidigo // the one write of import: Sync, Close and Rename are checked
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = root.Rename(tmp, name)
+	}
+	if err != nil {
+		root.Remove(tmp)
+	}
+	return err
 }
 
 // categories are the kinds of skipped things, in the order the text

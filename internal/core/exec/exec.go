@@ -39,7 +39,12 @@ type Client struct {
 
 // New returns a Client.
 func New(opts Options) *Client {
-	t := http.DefaultTransport.(*http.Transport).Clone()
+	// A clone keeps the defaults: the proxy from the environment, HTTP/2.
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok { // replaced by the program; vegtam does not
+		base = &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true}
+	}
+	t := base.Clone()
 	if opts.TLS != nil {
 		t.TLSClientConfig = opts.TLS.Clone()
 	}
@@ -63,7 +68,7 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 	if err != nil {
 		return nil, err
 	}
-	hc := &http.Client{Transport: c.transport, Timeout: c.opts.Timeout, CheckRedirect: redirectPolicy(sensitive)}
+	hc := &http.Client{Transport: c.transport, Timeout: c.opts.Timeout, CheckRedirect: redirectPolicy(sensitive, p.Body.HasSecret())}
 	start := time.Now()
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -96,8 +101,8 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 // invalid URL or header, or a secret that cannot be found. A part that
 // holds a value s gives as core.ErrLate, one known only when the request
 // is sent, is left unchecked.
-func (c *Client) Check(p *core.Prepared, s core.Secrets) error {
-	_, _, err := c.build(context.Background(), p, s, true)
+func (c *Client) Check(ctx context.Context, p *core.Prepared, s core.Secrets) error {
+	_, _, err := c.build(ctx, p, s, true)
 	return err
 }
 
@@ -128,7 +133,8 @@ func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets, ch
 	}
 	if urlKnown {
 		// Messages name raw; fail shows it masked.
-		u, err := url.Parse(raw)
+		var u *url.URL
+		u, err = url.Parse(raw)
 		switch {
 		case err != nil:
 			return nil, nil, fail("invalid URL %s: %v", raw, errors.Unwrap(err))
@@ -148,7 +154,9 @@ func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets, ch
 	sensitive := []string{"Authorization", "Cookie", "Proxy-Authorization", "Referer"}
 	header, host := http.Header{}, ""
 	for _, h := range p.Headers {
-		v, known, err := reveal(h.Value)
+		var v string
+		var known bool
+		v, known, err = reveal(h.Value)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -192,10 +200,17 @@ func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets, ch
 	return req, sensitive, nil
 }
 
-func redirectPolicy(sensitive []string) func(*http.Request, []*http.Request) error {
+// redirectPolicy follows a redirect unless it goes from https to http, or
+// to another origin with a body that holds a secret: a 307 or 308 sends
+// the body again, and no header can be dropped from it. On the way to
+// another origin the sensitive headers are dropped.
+func redirectPolicy(sensitive []string, secretBody bool) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
 		if len(via) > MaxRedirects {
 			return fmt.Errorf("stopped after %d redirects", MaxRedirects)
+		}
+		if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme == "http" {
+			return errors.New("refused a redirect from https to http")
 		}
 		// net/http copies the headers of the first request on every hop,
 		// so once the chain has left the first origin they are dropped on
@@ -206,6 +221,9 @@ func redirectPolicy(sensitive []string) func(*http.Request, []*http.Request) err
 			left = left || origin(r.URL) != first
 		}
 		if left {
+			if secretBody && req.Body != nil && req.Body != http.NoBody {
+				return errors.New("refused a redirect to another origin: it would send the body again, and the body holds a secret")
+			}
 			for _, h := range sensitive {
 				req.Header.Del(h)
 			}

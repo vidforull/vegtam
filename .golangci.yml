@@ -1,0 +1,277 @@
+# golangci-lint v2 configuration: a Go 1.27 command-line client of HTTP
+# APIs that handles secrets and runs untrusted .http files.
+#
+# Needs golangci-lint v2.15.0 (Go 1.27 support from v2.13.0), built with
+# Go 1.27 or later: `golangci-lint version` says what it was built with.
+# Install the binary; `make check-fast` and `make check` run it.
+#
+# A setting that is not a default says why it is there. The decisions
+# behind them are in docs/DECISIONS.md (2026-10-19: the quality gate).
+version: "2"
+
+run:
+  modules-download-mode: readonly # the linter never changes go.mod or go.sum
+
+issues:
+  max-issues-per-linter: 0 # show everything, so that one pass fixes it all
+  max-same-issues: 0
+  # Every finding on a line, not only the first: otherwise one linter
+  # hides another (gosec G304 would hide forbidigo on an os.ReadFile).
+  uniq-by-line: false
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    # resources and net/http
+    - bodyclose # an unclosed resp.Body
+    - noctx # http.Get, NewRequest, exec.Command without a context
+    - canonicalheader # header names not in canonical form
+    - usestdlibvars # http.MethodGet, http.StatusOK rather than literals
+    # errors
+    - errorlint # %w; errors.Is/As rather than == and type assertions
+    - errname # ErrFoo, FooError
+    - nilerr # returning nil when err is not nil
+    - nilnesserr # returning another (nil) error after checking err
+    # concurrency and contexts
+    - fatcontext # contexts nested in a loop
+    - embeddedstructfieldcheck # no embedded sync.Mutex (forbid-mutex)
+    # security and supply chain
+    - gosec # see settings: G115, G304 and G204 are on on purpose
+    - bidichk # trojan source: bidirectional characters
+    - asciicheck # non-ASCII identifiers (homoglyphs)
+    - depguard # denied packages (with no rules it denies all but the standard library)
+    - forbidigo # denied calls; each message says what to do instead
+    - gomoddirectives # replace, retract and toolchain in go.mod
+    # correctness
+    - asasalint # []any passed as one any to a variadic function
+    - durationcheck # the product of two time.Durations
+    - exhaustive # enum values missing from a switch
+    - gocritic # the default checks plus the diagnostics below
+    - makezero # append to a slice of non-zero length
+    - musttag # a struct marshaled without tags
+    - predeclared # shadowing len, new, error and other predeclared names
+    - reassign # assigning to another package's variables (io.EOF = ...)
+    - unparam # a parameter or result that is always the same
+    - revive # the default rules plus the list below
+    - gocheckcompilerdirectives # mistyped //go: directives
+    - gochecknoinits # no init()
+    - modernize # outdated idioms (what go fix does); covers copyloopvar and intrange
+    - gocognit # a safety net for complexity
+    - misspell # misspellings in comments and strings
+    # tests
+    - thelper # t.Helper() in helpers
+    - tparallel # wrong use of t.Parallel
+    - usetesting # t.TempDir, t.Context, t.Setenv rather than os.* and context.*
+    # suppressions
+    - nolintlint # //nolint only for named linters, with a reason
+  # sloglint is not enabled: vegtam does not use log/slog (and depguard
+  # denies log). Enable it with the first slog call.
+  #
+  # Not enabled on purpose, as in most large Go projects (noise or taste):
+  # contextcheck (false positives; forbidigo on context.Background covers
+  # it), wrapcheck, err113, exhaustruct, ireturn, varnamelen, wsl_v5,
+  # nlreturn, lll, mnd, funlen, paralleltest, prealloc, perfsprint,
+  # gochecknoglobals, nilnil, forcetypeassert (errcheck checks type
+  # assertions), copyloopvar and intrange (in modernize), testifylint (no
+  # testify).
+
+  settings:
+    errcheck:
+      check-type-assertions: true # v := x.(T) without ok
+      check-blank: false # `_ =` is allowed, and counted by make suppressions
+      # Replaces the std-error-handling preset, which also lets an unchecked
+      # (*os.File).Close through, and with it the write error that
+      # `defer f.Close()` loses on a file open for writing. What the preset
+      # excluded stays excluded, but for files:
+      exclude-functions:
+        # Close of any value held as an interface, response bodies first.
+        # Files are opened for writing in two places only (see forbidigo),
+        # and both check Close on the *os.File.
+        - (io.Closer).Close
+        - (*os.Root).Close # a directory handle loses nothing on close
+        - (*os.Root).Remove # cleanup after an error that is returned
+        - os.Remove
+        - os.RemoveAll
+        # Writes to an io.Writer: the CLI's stdout and stderr, where a failed
+        # write has nowhere to be reported (see Config.writeJSON in
+        # internal/cli). A write to an *os.File is still checked.
+        - fmt.Fprint(io.Writer)
+        - fmt.Fprintf(io.Writer)
+        - fmt.Fprintln(io.Writer)
+        # tabwriter here fills an in-memory buffer.
+        - fmt.Fprint(*text/tabwriter.Writer)
+        - fmt.Fprintf(*text/tabwriter.Writer)
+        - fmt.Fprintln(*text/tabwriter.Writer)
+        - (*text/tabwriter.Writer).Flush
+    govet:
+      enable-all: true # adds nilness, waitgroup, hostport, httpmux, stdversion, inline...
+      disable:
+        - fieldalignment # memory layout: noise
+      # shadow is on: an err shadowed in an inner scope can lose an error,
+      # and ineffassign and SA4006 let it through. A shadowed err is fixed
+      # by reusing it with `=`.
+    staticcheck:
+      checks: ["all", "-ST1000", "-ST1003", "-ST1016", "-ST1020", "-ST1021", "-ST1022", "-QF1008"]
+    gosec:
+      excludes:
+        - G104 # duplicates errcheck. G115 stays on: a conversion of input gets a bounds check
+      config:
+        global:
+          nosec: true # ignore #nosec comments: they would bypass nolintlint
+        G301: "0700" # MkdirAll: 0700 at most
+        G302: "0600" # OpenFile, Chmod: 0600 at most
+        G306: "0600" # WriteFile: 0600 at most
+    exhaustive:
+      check: [switch, mapliteral]
+      default-signifies-exhaustive: false # else an empty default: silences the check for free
+      # gojq's syntax tree: vegtam accepts a few term types and refuses
+      # every other one in a default, so listing them adds nothing.
+      ignore-types: ["github.com/itchyny/gojq.TermType"]
+    gocritic:
+      enabled-checks: # experimental diagnostics, added to the defaults
+        - badLock
+        - badRegexp
+        - badSorting
+        - badSyncOnceFunc
+        - deferInLoop
+        - dupOption
+        - evalOrder
+        - externalErrorReassign
+        - filepathJoin
+        - nilValReturn
+        - rangeAppendAll
+        - regexpPattern
+        - returnAfterHttpError
+        - sloppyReassign
+        - sortSlice
+        - sprintfQuotedString
+        - syncMapLoadAndDelete
+        - truncateCmp
+        - uncheckedInlineErr
+        - weakCond
+    revive:
+      enable-default-rules: true # without it, listing rules turns the defaults off
+      rules:
+        - name: deep-exit # os.Exit, log.Fatal outside main
+        - name: datarace # a named result returned from a goroutine
+        - name: defer # defer in a loop, recover outside defer
+        - name: unconditional-recursion
+        - name: identical-branches
+        - name: time-equal # compare time.Time with Equal
+        - name: string-of-int # string(int)
+        - name: struct-tag # mistyped tags
+        - name: atomic # x = atomic.AddInt64(&x, 1)
+        - name: redundant-test-main-exit
+    gocognit:
+      min-complexity: 30 # a safety net; at 20, functions get cut into parsePart2
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    embeddedstructfieldcheck:
+      forbid-mutex: true
+      empty-line: false
+    # No locale: the prose of this project is British English. Without
+    # one, misspell still finds misspellings and accepts both.
+    misspell: {}
+    depguard:
+      rules:
+        deprecated:
+          list-mode: lax
+          files: ["$all"]
+          deny:
+            - { pkg: "io/ioutil", desc: "deprecated since Go 1.16: use io and os" }
+            - { pkg: "github.com/pkg/errors", desc: "use fmt.Errorf %w and errors.Is/AsType/Join" }
+            - { pkg: "golang.org/x/exp/slices", desc: "use slices" }
+            - { pkg: "golang.org/x/exp/maps", desc: "use maps" }
+            - { pkg: "go.uber.org/atomic", desc: "use sync/atomic typed values" }
+        non-test:
+          list-mode: lax
+          files: ["!$test"]
+          deny:
+            - { pkg: "math/rand$", desc: "crypto/rand for secrets, math/rand/v2 otherwise" }
+            - { pkg: "unsafe", desc: "no unsafe without design review" }
+            - { pkg: "log$", desc: "use log/slog (redaction via LogValuer/ReplaceAttr)" }
+        # {{$cmd NAME}} runs commands: os/exec is allowed in the one file
+        # that does, and denied everywhere else.
+        subprocess:
+          list-mode: lax
+          files: ["!$test", "!**/internal/core/env/cmd.go"]
+          deny:
+            - { pkg: "os/exec", desc: "commands run only in internal/core/env/cmd.go ({{$cmd NAME}})" }
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^(fmt\.Print(|f|ln)|print|println)$
+          msg: "write to an injected io.Writer (Config.Stdout, Config.Stderr)"
+        - pattern: ^http\.DefaultClient$
+          msg: "no timeout; use the *http.Client of internal/core/exec"
+        - pattern: ^context\.(Background|TODO)$
+          msg: "take ctx from the caller; the root ctx is made in cmd/, tests use t.Context()"
+        - pattern: ^httputil\.Dump(Request|RequestOut|Response)$
+          msg: "dumps Authorization and Cookie; print through output, which masks"
+        # There is no single file-system package: the points that may
+        # open files by path carry a //nolint with the reason. Writes
+        # include os.CreateTemp and the writes of os.Root.
+        - pattern: ^os\.(Open|OpenFile|ReadFile|Create|CreateTemp|WriteFile)$
+          msg: "paths from a .http file: os.Root of its directory (see readBodyFile in internal/core/env); writes: temporary file, Sync, Close, Rename (see writeFile in internal/cli)"
+        - pattern: ^os\.Root\.(Create|OpenFile|WriteFile)$
+          msg: "writes: temporary file, Sync, Close, Rename (see writeFile in internal/cli)"
+        - pattern: ^os\.(Getenv|LookupEnv|Environ)$
+          msg: "the process environment is read for {{$env NAME}} in internal/core/env and for the trust store location only"
+    usetesting:
+      os-temp-dir: true
+
+  exclusions:
+    warn-unused: true # a rule that matches nothing shows up as a warning
+    # No presets: std-error-handling is replaced by the errcheck
+    # exclude-functions above. Not legacy (hides G104/G301/G302/G307),
+    # not common-false-positives (hides G204/G304).
+    presets: []
+    rules:
+      - path: ^cmd/ # the root ctx
+        linters: [forbidigo]
+        text: 'context\.Background'
+      # The two places that read the process environment, by file
+      # rather than by package.
+      - path: ^internal/core/env/env\.go$ # {{$env NAME}}
+        linters: [forbidigo]
+        text: 'os\.LookupEnv'
+      - path: ^internal/core/policy/trust\.go$ # XDG_CONFIG_HOME, for the trust store
+        linters: [forbidigo]
+        text: 'os\.Getenv'
+      - path: _test\.go$ # fixtures, golden files and the environment of helper processes
+        linters: [forbidigo]
+        text: 'os\.(Open|OpenFile|ReadFile|Create|CreateTemp|WriteFile|Getenv|LookupEnv)'
+      # Tests hold made-up credentials (G101), read and write fixtures and
+      # golden files (G304, G306), set loose modes to check that vegtam
+      # refuses or tightens them (G301, G302), run the test binary again
+      # as a helper process (G204), and serve and read what they built
+      # themselves, which the taint analyses take for user input (G122,
+      # G70x).
+      - path: _test\.go$
+        linters: [gosec]
+        text: 'G101|G122|G204|G301|G302|G304|G306|G70[0-9]|G710'
+      # Helper processes are the test binary run again: they end with
+      # os.Exit.
+      - path: _test\.go$
+        linters: [revive]
+        text: '^deep-exit:'
+      # Helper processes print to os.Stdout and httptest handlers to the
+      # response: a failed write fails the test that reads it.
+      - path: _test\.go$
+        linters: [errcheck]
+        text: 'Error return value of `fmt\.Fprint(f|ln)?` is not checked'
+      # A test is a script of checks, each an if: gocognit counts them
+      # as complexity.
+      - path: _test\.go$
+        linters: [gocognit]
+      - path: ^internal/ # doc comments of exported names in internal/: "Foo does foo"
+        linters: [revive]
+        text: '^(exported|package-comments):'
+
+formatters:
+  enable: [gofumpt, goimports] # golangci-lint fmt; make check runs golangci-lint fmt --diff
+  settings:
+    goimports:
+      local-prefixes: [github.com/vidforull/vegtam]

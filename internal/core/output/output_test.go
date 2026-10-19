@@ -20,7 +20,8 @@ var masker = core.NewMasker([]string{"t0ken/x"})
 func secret(name string) core.Segment { return core.Segment{Secret: &core.Secret{Name: name}} }
 
 func TestSent(t *testing.T) {
-	p := &core.Prepared{Method: "POST",
+	p := &core.Prepared{
+		Method:  "POST",
 		URL:     core.Text{{Text: "https://api.example.test/?key="}, secret("token")},
 		Headers: []core.PreparedHeader{{Name: "Authorization", Value: core.Text{{Text: "Bearer "}, secret("$env KEY")}}},
 		Body:    core.Text{{Text: `{"copied": "t0ken/x"}`}},
@@ -38,8 +39,10 @@ func TestSent(t *testing.T) {
 }
 
 func TestWritten(t *testing.T) {
-	r := &core.Request{Method: "POST", URL: "{{host}}/up", Headers: []core.Header{{Name: "X", Value: "{{$env K}}"}},
-		BodyFile: "./payload.json"}
+	r := &core.Request{
+		Method: "POST", URL: "{{host}}/up", Headers: []core.Header{{Name: "X", Value: "{{$env K}}"}},
+		BodyFile: "./payload.json",
+	}
 	got, _ := json.Marshal(Written(r))
 	want := `{"method":"POST","url":"{{host}}/up","headers":[{"name":"X","value":"{{$env K}}"}],"body_file":"./payload.json"}`
 	if string(got) != want {
@@ -48,9 +51,11 @@ func TestWritten(t *testing.T) {
 }
 
 func TestNewResponse(t *testing.T) {
-	r := &exec.Response{Proto: "HTTP/1.1", Status: 200, Reason: "OK", Duration: 1234567 * time.Nanosecond,
+	r := &exec.Response{
+		Proto: "HTTP/1.1", Status: 200, Reason: "OK", Duration: 1234567 * time.Nanosecond,
 		Header: http.Header{"X-B": {"2", "t0ken%2Fx"}, "X-A": {"1"}},
-		Body:   []byte(`{"echo": "t0ken\/x", "raw": "t0ken/x"}`)}
+		Body:   []byte(`{"echo": "t0ken\/x", "raw": "t0ken/x"}`),
+	}
 	resp, timing := NewResponse(r, masker)
 	got, _ := json.Marshal(Document{SchemaVersion: 1, Result: &Result{Response: resp, Timing: timing}})
 	want := `{"schema_version":1,"response":{"proto":"HTTP/1.1","status":200,"reason":"OK","headers":` +
@@ -64,8 +69,10 @@ func TestNewResponse(t *testing.T) {
 	if resp, _ := NewResponse(cut, masker); resp.Body != "id=***" || !resp.Truncated {
 		t.Errorf("truncated body = %q, %v; want the cut value masked", resp.Body, resp.Truncated)
 	}
-	escaped := &exec.Response{Body: []byte(`{"net": "t0ken\u002Fx", "py": "\u043a\u043b\u044e\u0447", "k": "\u006b"}`),
-		Header: http.Header{}}
+	escaped := &exec.Response{
+		Body:   []byte(`{"net": "t0ken\u002Fx", "py": "\u043a\u043b\u044e\u0447", "k": "\u006b"}`),
+		Header: http.Header{},
+	}
 	m := core.NewMasker([]string{"t0ken/x", "ключ"})
 	if resp, _ := NewResponse(escaped, m); resp.Body != `{"net": "***", "py": "***", "k": "\u006b"}` {
 		t.Errorf("escaped JSON body = %s; want every escaping of a value masked, the rest as sent", resp.Body)
@@ -94,14 +101,23 @@ func TestNewError(t *testing.T) {
 
 func TestChecked(t *testing.T) {
 	long := strings.Repeat("я", 99) + "t0ken/x" + strings.Repeat("x", 100)
-	got := Checked([]assert.Outcome{{Expr: "status == 200", Passed: true, Actual: "200"},
-		{Expr: `body contains "y"`, Actual: long, Form: assert.Body}, {Expr: "x", Actual: "t0ken/x\xff"},
+	got := Checked([]assert.Outcome{
+		{Expr: "status == 200", Passed: true, Actual: "200"},
+		{Expr: `body contains "y"`, Actual: long, Form: assert.Body},
+		{Expr: "x", Actual: "t0ken/x\xff"},
 		// Escaped as a server may escape it, in a body or a path's value.
 		{Expr: "b", Actual: `{"t": "t0ken\/x", "u": "t0ke\u006e/x"}`, Form: assert.Body},
 		{Expr: "j", Actual: `"t0ken/\u0078"`, Form: assert.JSON},
-		{Expr: "cut", Actual: `{"t": "t0k`, Form: assert.Body, Cut: true}}, masker)
-	want := []Assert{{"status == 200", true, "200"}, {`body contains "y"`, false, strings.Repeat("я", 99) + "**..."},
-		{"x", false, "***\uFFFD"}, {"b", false, `{"t": "***", "u": "***"}`}, {"j", false, `"***"`}, {"cut", false, `{"t": "***`}}
+		{Expr: "cut", Actual: `{"t": "t0k`, Form: assert.Body, Cut: true},
+	}, masker)
+	want := []Assert{
+		{"status == 200", true, "200"},
+		{`body contains "y"`, false, strings.Repeat("я", 99) + "**..."},
+		{"x", false, "***\uFFFD"},
+		{"b", false, `{"t": "***", "u": "***"}`},
+		{"j", false, `"***"`},
+		{"cut", false, `{"t": "***`},
+	}
 	if !slices.Equal(got, want) {
 		t.Errorf("Checked = %+v\nwant      %+v", got, want)
 	}
@@ -109,8 +125,10 @@ func TestChecked(t *testing.T) {
 
 func TestList(t *testing.T) {
 	f := &core.File{Path: "dir/a.http", Requests: []*core.Request{
-		{Name: "list", Method: "GET", URL: "{{host}}/u", Source: core.Source{Line: 3},
-			Directives: []core.Directive{{Kind: "tag", Value: "smoke", Line: 2}}},
+		{
+			Name: "list", Method: "GET", URL: "{{host}}/u", Source: core.Source{Line: 3},
+			Directives: []core.Directive{{Kind: "tag", Value: "smoke", Line: 2}},
+		},
 		{Method: "POST", URL: "{{host}}/u", Source: core.Source{Line: 7}},
 	}}
 	got, _ := json.Marshal(List(f))
@@ -133,14 +151,14 @@ func TestSchemaMatchesTypes(t *testing.T) {
 	if err := json.Unmarshal([]byte(Schema), &root); err != nil {
 		t.Fatal(err)
 	}
-	defs := root["$defs"].(map[string]any)
+	defs := must[map[string]any](t, root["$defs"])
 	resolve := func(node map[string]any) map[string]any {
 		for {
 			ref, ok := node["$ref"].(string)
 			if !ok {
 				return node
 			}
-			node = defs[strings.TrimPrefix(ref, "#/$defs/")].(map[string]any)
+			node = must[map[string]any](t, defs[strings.TrimPrefix(ref, "#/$defs/")])
 		}
 	}
 	var check func(path string, typ reflect.Type, node map[string]any)
@@ -159,8 +177,7 @@ func TestSchemaMatchesTypes(t *testing.T) {
 		var fields, required []string
 		var walk func(reflect.Type)
 		walk = func(typ reflect.Type) {
-			for i := range typ.NumField() {
-				f := typ.Field(i)
+			for f := range typ.Fields() {
 				if f.Anonymous {
 					walk(f.Type.Elem())
 					continue
@@ -186,7 +203,7 @@ func TestSchemaMatchesTypes(t *testing.T) {
 		var want []string
 		req, _ := node["required"].([]any)
 		for _, r := range req {
-			want = append(want, r.(string))
+			want = append(want, must[string](t, r))
 		}
 		slices.Sort(required)
 		slices.Sort(want)
@@ -195,4 +212,14 @@ func TestSchemaMatchesTypes(t *testing.T) {
 		}
 	}
 	check("Document", reflect.TypeFor[Document](), root)
+}
+
+// must returns v as a T, or fails the test.
+func must[T any](t *testing.T, v any) T {
+	t.Helper()
+	x, ok := v.(T)
+	if !ok {
+		t.Fatalf("%v is a %T, not a %T", v, v, x)
+	}
+	return x
 }

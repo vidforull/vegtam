@@ -57,9 +57,13 @@ type environment struct {
 // environment files for the directory out. It writes nothing: the caller
 // writes Result.Files. Paths in the report start with out.
 func Import(src, out string) (*Result, error) {
-	imp := &importer{src: src, out: out, envNames: names{}, dirs: names{}, secret: map[string]bool{}, renamed: map[string]bool{}, nested: map[string]bool{},
-		report: &output.Import{Source: src, Output: out, Environments: []string{}, Files: []string{},
-			Skipped: []output.Skipped{}, Variables: []output.ImportVariable{}}}
+	imp := &importer{
+		src: src, out: out, envNames: names{}, dirs: names{}, secret: map[string]bool{}, renamed: map[string]bool{}, nested: map[string]bool{},
+		report: &output.Import{
+			Source: src, Output: out, Environments: []string{}, Files: []string{},
+			Skipped: []output.Skipped{}, Variables: []output.ImportVariable{},
+		},
+	}
 	if err := imp.load(); err != nil {
 		return nil, err
 	}
@@ -103,7 +107,8 @@ func (imp *importer) load() error {
 		return core.Errorf(core.KindUsage, core.Source{}, "%v", err)
 	}
 	if !fi.IsDir() {
-		v, err := readFile(imp.src)
+		var v any
+		v, err = readFile(imp.src)
 		if err != nil {
 			return importErrorf(imp.src, "%v", err)
 		}
@@ -152,25 +157,25 @@ var errUnknownFile = errors.New("not a Postman collection, environment or global
 // readFile reads a Postman file: a *collection, or *vars for an
 // environment or the globals.
 func readFile(path string) (any, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:forbidigo,gosec // G304: an export named on the command line, or found below a directory named there
 	if err != nil {
 		return nil, err
 	}
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(data, &probe); err != nil {
-		return nil, fmt.Errorf("not JSON: %v", err)
+		return nil, fmt.Errorf("not JSON: %w", err)
 	}
 	switch {
 	case probe["info"] != nil && probe["item"] != nil:
 		var c collection
 		if err := json.Unmarshal(data, &c); err != nil {
-			return nil, fmt.Errorf("collection: %v", err)
+			return nil, fmt.Errorf("collection: %w", err)
 		}
 		return &c, nil
 	case probe["values"] != nil:
 		var v vars
 		if err := json.Unmarshal(data, &v); err != nil {
-			return nil, fmt.Errorf("environment: %v", err)
+			return nil, fmt.Errorf("environment: %w", err)
 		}
 		return &v, nil
 	}

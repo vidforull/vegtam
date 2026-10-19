@@ -283,8 +283,10 @@ func Evaluate(ctx context.Context, req *core.Request, resp *exec.Response) *Resu
 	line := 0
 	for _, a := range asserts {
 		passed, actual := a.check(r)
-		res.Outcomes = append(res.Outcomes, Outcome{Expr: a.Expr, Line: a.Line, Passed: passed, Actual: actual,
-			Form: a.form, Cut: a.form == Body && resp.Truncated})
+		res.Outcomes = append(res.Outcomes, Outcome{
+			Expr: a.Expr, Line: a.Line, Passed: passed, Actual: actual,
+			Form: a.form, Cut: a.form == Body && resp.Truncated,
+		})
 		if !passed {
 			failed = append(failed, a.Expr)
 			line = cmp.Or(line, a.Line)

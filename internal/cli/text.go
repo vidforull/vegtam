@@ -5,10 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/vidforull/vegtam/internal/core/output"
 )
@@ -31,44 +31,51 @@ func (c *Config) printResult(res *output.Result, i int, several, verbose bool) {
 			b.WriteString("\n")
 		}
 	}
-	if r := res.Response; r != nil {
-		status := strings.TrimSpace(fmt.Sprintf("%s %d %s", r.Proto, r.Status, r.Reason))
-		fmt.Fprintf(&b, "%s (%s)\n", status, duration(res.Timing))
-		if verbose {
-			writeHeaders(&b, r.Headers)
-		}
-		if r.Body != "" {
-			b.WriteString("\n")
-			writeBody(&b, r.Body, r.Encoding, true)
-		}
-		if r.Truncated {
-			b.WriteString("[truncated: the body is longer than --max-body]\n")
-		}
-		if len(res.Asserts) > 0 || len(res.Captures) > 0 {
-			b.WriteString("\n")
-		}
-		for _, a := range res.Asserts {
-			if a.Passed {
-				fmt.Fprintf(&b, "✓ %s\n", a.Expression)
-			} else {
-				fmt.Fprintf(&b, "✗ %s (actual: %s)\n", a.Expression, strings.ReplaceAll(a.Actual, "\n", `\n`))
-			}
-		}
-		if len(res.Captures) > 0 {
-			var names []string
-			for _, c := range res.Captures {
-				if c.Secret {
-					names = append(names, c.Name)
-				} else {
-					names = append(names, c.Name+" (plain)")
-				}
-			}
-			fmt.Fprintf(&b, "captured: %s\n", strings.Join(names, ", "))
-		}
+	if res.Response != nil {
+		writeResponse(&b, res, verbose)
 	}
-	io.WriteString(c.out, printable(b.String()))
+	fmt.Fprint(c.out, printable(b.String()))
 	if res.Error != nil {
 		c.printError(res.Error)
+	}
+}
+
+// writeResponse writes the response of res: the status and the time, the
+// headers with verbose, the body, and the outcomes of its directives.
+func writeResponse(b *strings.Builder, res *output.Result, verbose bool) {
+	r := res.Response
+	status := strings.TrimSpace(fmt.Sprintf("%s %d %s", r.Proto, r.Status, r.Reason))
+	fmt.Fprintf(b, "%s (%s)\n", status, duration(res.Timing))
+	if verbose {
+		writeHeaders(b, r.Headers)
+	}
+	if r.Body != "" {
+		b.WriteString("\n")
+		writeBody(b, r.Body, r.Encoding, true)
+	}
+	if r.Truncated {
+		b.WriteString("[truncated: the body is longer than --max-body]\n")
+	}
+	if len(res.Asserts) > 0 || len(res.Captures) > 0 {
+		b.WriteString("\n")
+	}
+	for _, a := range res.Asserts {
+		if a.Passed {
+			fmt.Fprintf(b, "✓ %s\n", a.Expression)
+		} else {
+			fmt.Fprintf(b, "✗ %s (actual: %s)\n", a.Expression, strings.ReplaceAll(a.Actual, "\n", `\n`))
+		}
+	}
+	if len(res.Captures) > 0 {
+		var names []string
+		for _, c := range res.Captures {
+			if c.Secret {
+				names = append(names, c.Name)
+			} else {
+				names = append(names, c.Name+" (plain)")
+			}
+		}
+		fmt.Fprintf(b, "captured: %s\n", strings.Join(names, ", "))
 	}
 }
 
@@ -110,20 +117,27 @@ func writeBody(b *strings.Builder, body, encoding string, indent bool) {
 }
 
 // printable returns s with control characters other than tab and line
-// feed shown as \xNN: a response must not be able to drive the terminal.
+// feed, and bytes that are not UTF-8, shown as \xNN: a response must not
+// be able to drive the terminal, and a lone byte such as 0x9b starts an
+// escape sequence on a terminal that does not read UTF-8.
 func printable(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	isControl := func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }
-	if !strings.ContainsFunc(s, isControl) {
+	if utf8.ValidString(s) && !strings.ContainsFunc(s, isControl) {
 		return s
 	}
 	var b strings.Builder
-	for _, r := range s {
-		if isControl(r) {
+	for s != "" {
+		r, size := utf8.DecodeRuneInString(s)
+		switch {
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[0])
+		case isControl(r):
 			fmt.Fprintf(&b, `\x%02x`, r)
-		} else {
-			b.WriteRune(r)
+		default:
+			b.WriteString(s[:size])
 		}
+		s = s[size:]
 	}
 	return b.String()
 }

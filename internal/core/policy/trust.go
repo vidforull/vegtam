@@ -49,7 +49,7 @@ func DefaultStore() *Store {
 	if !filepath.IsAbs(dir) {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return &Store{err: fmt.Errorf("no trust store: %v; set XDG_CONFIG_HOME or HOME", err)}
+			return &Store{err: fmt.Errorf("no trust store: %w; set XDG_CONFIG_HOME or HOME", err)}
 		}
 		dir = filepath.Join(home, ".config")
 	}
@@ -76,8 +76,8 @@ func Canonical(file string) (string, error) {
 		return "", err
 	}
 	dir, name := filepath.Split(abs)
-	if real, err := filepath.EvalSymlinks(dir); err == nil {
-		return filepath.Join(real, name), nil
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return filepath.Join(resolved, name), nil
 	}
 	return abs, nil
 }
@@ -138,13 +138,13 @@ func (s *Store) load() (map[string]string, error) {
 	fail := func(format string, args ...any) error {
 		return core.Errorf(core.KindPolicy, core.Source{File: s.path}, format, args...)
 	}
-	f, err := os.Open(s.path)
+	f, err := os.Open(s.path) //nolint:forbidigo // the trust store, in the user's config directory
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]string{}, nil
 	} else if err != nil {
 		return nil, fail("%v", err)
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck // open for reading: a failed Close loses nothing
 	// Whoever can write the store, or replace it in its directory, can
 	// trust any command.
 	fi, err := f.Stat()
@@ -177,8 +177,8 @@ func (s *Store) load() (map[string]string, error) {
 	return r.Trusted, nil
 }
 
-// save writes m to the store's file: to a new file, renamed over the old
-// one, so that a reader never sees half of it.
+// save writes m to the store's file: to a new file, synced and renamed
+// over the old one, so that a reader never sees half of it.
 func (s *Store) save(m map[string]string) error {
 	fail := func(err error) error { return core.Errorf(core.KindPolicy, core.Source{File: s.path}, "%v", err) }
 	var b bytes.Buffer
@@ -190,11 +190,14 @@ func (s *Store) save(m map[string]string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fail(err)
 	}
-	tmp, err := os.CreateTemp(dir, ".trust-*.json") // mode 0600
+	tmp, err := os.CreateTemp(dir, ".trust-*.json") //nolint:forbidigo // mode 0600; Sync, Close and Rename are checked below
 	if err != nil {
 		return fail(err)
 	}
 	_, err = tmp.Write(b.Bytes())
+	if err == nil {
+		err = tmp.Sync()
+	}
 	if err2 := tmp.Close(); err == nil {
 		err = err2
 	}

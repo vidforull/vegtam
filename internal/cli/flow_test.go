@@ -3,7 +3,6 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,7 +28,7 @@ const (
 func newFlowFixture(t *testing.T) (dir, host string) {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /login", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Session", sessionID)
 		fmt.Fprintf(w, `{"ok": true, "token": %q, "user": {"id": 7}}`, loginToken)
@@ -42,9 +41,9 @@ func newFlowFixture(t *testing.T) (dir, host string) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"id": 7, "token": %q}`, loginToken)
 	})
-	mux.HandleFunc("GET /users/1", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /users/1", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"id": 1}`)
+		fmt.Fprint(w, `{"id": 1}`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -126,7 +125,7 @@ HTTP/1.1 200 OK (TIME)
 		tty, json bool
 		args      []string
 	}{{true, false, []string{"-v"}}, {false, true, nil}, {true, true, []string{"--json", "-v"}}} {
-		code, stdout, stderr := runCLI(t, m.tty, append([]string{"run", "login.http", "-e", "test"}, m.args...)...)
+		code, stdout, stderr = runCLI(t, m.tty, append([]string{"run", "login.http", "-e", "test"}, m.args...)...)
 		if found := flowLeaks(stdout + stderr); len(found) > 0 || code != exitOK {
 			t.Errorf("run %q = %d, secret forms %q in the output\n%s\n%s", m.args, code, found, stdout, stderr)
 		}
@@ -138,9 +137,12 @@ HTTP/1.1 200 OK (TIME)
 		}
 		validateJSON(t, stdout)
 		var doc output.Document
-		json.Unmarshal([]byte(stdout), &doc)
-		wantCaptures := []output.Capture{{Name: "token", Source: "$.token", Secret: true},
-			{Name: "session", Source: "header X-Session", Secret: true}, {Name: "user", Source: "$.user.id"}}
+		decode(t, stdout, &doc)
+		wantCaptures := []output.Capture{
+			{Name: "token", Source: "$.token", Secret: true},
+			{Name: "session", Source: "header X-Session", Secret: true},
+			{Name: "user", Source: "$.user.id"},
+		}
 		if len(doc.Results) != 3 || !slices.Equal(doc.Results[1].Captures, wantCaptures) || doc.Results[2].Captures != nil {
 			t.Fatalf("captures:\n%s", stdout)
 		}
@@ -160,13 +162,13 @@ HTTP/1.1 200 OK (TIME)
 	type outcome struct{ ref, kind, msg string }
 	runDir := func() (int, []outcome, *output.Document) {
 		t.Helper()
-		code, stdout, stderr := runCLI(t, false, "run", ".", "-e", "test")
-		validateJSON(t, stdout)
-		if found := flowLeaks(stdout + stderr); len(found) > 0 {
-			t.Errorf("run .: secret forms %q in the output\n%s\n%s", found, stdout, stderr)
+		c, out, errOut := runCLI(t, false, "run", ".", "-e", "test")
+		validateJSON(t, out)
+		if found := flowLeaks(out + errOut); len(found) > 0 {
+			t.Errorf("run .: secret forms %q in the output\n%s\n%s", found, out, errOut)
 		}
 		var doc output.Document
-		json.Unmarshal([]byte(stdout), &doc)
+		decode(t, out, &doc)
 		var got []outcome
 		for _, r := range doc.Results {
 			o := outcome{ref: r.Ref}
@@ -175,7 +177,7 @@ HTTP/1.1 200 OK (TIME)
 			}
 			got = append(got, o)
 		}
-		return code, got, &doc
+		return c, got, &doc
 	}
 	code, got, doc := runDir()
 	wantOutcomes := []outcome{
@@ -215,7 +217,7 @@ HTTP/1.1 200 OK (TIME)
 	code, stdout, _ = runCLI(t, false, "run", ".", "-e", "test", "--dry-run")
 	validateJSON(t, stdout)
 	*doc = output.Document{}
-	json.Unmarshal([]byte(stdout), doc)
+	decode(t, stdout, doc)
 	if code != exitOK || len(doc.Results) != 7 || doc.Results[2].Request.URL != host+"/users/{{session}}" ||
 		doc.Results[3].Request.URL != host+"/users/1" || doc.Results[5].Request.URL != host+"/users/{{user}}" ||
 		strings.Contains(stdout, `"captures"`) {

@@ -2,6 +2,8 @@ module github.com/vidforull/vegtam
 
 go 1.27
 
+toolchain go1.27.2
+
 require (
 	github.com/itchyny/gojq v0.12.19
 	github.com/spf13/cobra v1.10.2

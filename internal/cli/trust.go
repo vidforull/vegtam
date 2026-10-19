@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -50,7 +49,7 @@ whether it is unchanged, changed or gone.`,
 			}
 			return cobra.ExactArgs(1)(cmd, args)
 		},
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			store := policy.DefaultStore()
 			switch {
 			case list:
@@ -87,7 +86,7 @@ func trust(cfg *Config, store *policy.Store, arg string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(path); err != nil {
+	if _, err = os.Stat(path); err != nil {
 		return core.Errorf(core.KindUsage, core.Source{}, "%v", err)
 	}
 	// What is trusted is what was read and parsed, byte for byte, with the
@@ -119,7 +118,7 @@ func trust(cfg *Config, store *policy.Store, arg string) error {
 		fmt.Fprintf(tw, "  %s\t%s\n", name, strings.Join(argv, " "))
 	}
 	tw.Flush()
-	io.WriteString(cfg.out, printable(b.String()))
+	fmt.Fprint(cfg.out, printable(b.String()))
 	return nil
 }
 
@@ -135,15 +134,16 @@ func revokeTrust(cfg *Config, store *policy.Store, arg string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.asJSON() {
+	switch {
+	case cfg.asJSON():
 		t := &output.Trusted{File: path, Status: string(policy.Untrusted)}
 		if was {
 			t.Status = string(policy.Revoked)
 		}
 		cfg.writeJSON(output.Document{SchemaVersion: output.SchemaVersion, Trust: []*output.Trusted{t}})
-	} else if was {
+	case was:
 		fmt.Fprintf(cfg.out, "Revoked the trust in %s: its commands no longer run.\n", printable(path))
-	} else {
+	default:
 		fmt.Fprintf(cfg.out, "%s was not trusted.\n", printable(path))
 	}
 	return nil
@@ -181,6 +181,6 @@ func listTrusted(cfg *Config, store *policy.Store) error {
 		fmt.Fprintf(tw, "%s\t%s\n", t.Status, t.File)
 	}
 	tw.Flush()
-	io.WriteString(cfg.out, printable(b.String()))
+	fmt.Fprint(cfg.out, printable(b.String()))
 	return nil
 }

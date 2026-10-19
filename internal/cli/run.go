@@ -86,7 +86,8 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 	}
 	t := parseTarget(arg)
 	loader := env.NewLoader(env.Options{Env: f.env, DryRun: f.dryRun, Trust: policy.DefaultStore()})
-	jobs, err := t.jobs(loader)
+	cfg.secrets = loader.Masker
+	jobs, err := t.jobs(ctx, loader)
 	// Every request is resolved before the first is sent, so the masker
 	// knows every secret before anything is printed; captured ones join
 	// it as they are taken, before their response is printed.
@@ -104,7 +105,7 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 		case err != nil:
 		case f.dryRun:
 			res.Request = output.Sent(j.p, cfg.masker)
-			err = client.Check(j.p, j.vars)
+			err = client.Check(ctx, j.p, j.vars)
 		default:
 			err = send(ctx, cfg, client, loader, j, f.fail, res)
 		}
@@ -180,8 +181,8 @@ type target struct {
 // taken whole, even if it contains '#'.
 func parseTarget(arg string) target {
 	if _, err := os.Stat(arg); err != nil {
-		if i := strings.LastIndex(arg, "#"); i >= 0 {
-			return target{path: arg[:i], ref: arg[i+1:], one: true}
+		if path, ref, ok := strings.CutLast(arg, "#"); ok {
+			return target{path: path, ref: ref, one: true}
 		}
 	}
 	return target{path: arg}
@@ -218,13 +219,13 @@ func (t target) request() (*core.File, int, error) {
 // jobs resolves the requests t names. A file that does not parse and a
 // request that cannot be resolved become jobs with an error; the error
 // returned is for t itself.
-func (t target) jobs(loader *env.Loader) ([]job, error) {
+func (t target) jobs(ctx context.Context, loader *env.Loader) ([]job, error) {
 	if t.one {
 		f, i, err := t.request()
 		if err != nil {
 			return nil, err
 		}
-		return []job{prepare(loader, f, i)}, nil
+		return []job{prepare(ctx, loader, f, i)}, nil
 	}
 	paths, err := httpfile.Files(t.path)
 	if err != nil {
@@ -232,12 +233,13 @@ func (t target) jobs(loader *env.Loader) ([]job, error) {
 	}
 	var jobs []job
 	for _, path := range paths {
-		f, err := httpfile.ParseFile(path)
+		src, err := httpfile.ReadFile(path)
+		var f *core.File
+		if err == nil {
+			f, err = httpfile.Parse(path, src)
+		}
 		if err != nil {
-			j := job{ref: path, err: err}
-			if src, err := os.ReadFile(path); err == nil {
-				j.captures = httpfile.CaptureNames(src)
-			}
+			j := job{ref: path, err: err, captures: httpfile.CaptureNames(src)}
 			for _, name := range j.captures {
 				loader.Declare(name)
 			}
@@ -245,7 +247,7 @@ func (t target) jobs(loader *env.Loader) ([]job, error) {
 			continue
 		}
 		for i := range f.Requests {
-			jobs = append(jobs, prepare(loader, f, i))
+			jobs = append(jobs, prepare(ctx, loader, f, i))
 		}
 	}
 	return jobs, nil
@@ -253,11 +255,11 @@ func (t target) jobs(loader *env.Loader) ([]job, error) {
 
 // prepare resolves the i-th request of f, then declares the variables
 // its captures take for the requests prepared after it.
-func prepare(loader *env.Loader, f *core.File, i int) job {
+func prepare(ctx context.Context, loader *env.Loader, f *core.File, i int) job {
 	j := job{ref: output.Ref(f, i), req: f.Requests[i]}
 	j.vars, j.err = loader.For(f.Path)
 	if j.err == nil {
-		j.p, j.err = j.vars.Prepare(j.req)
+		j.p, j.err = j.vars.Prepare(ctx, j.req)
 	}
 	_, captures, _ := assert.Directives(j.req) // the file parsed, so they do
 	for _, c := range captures {

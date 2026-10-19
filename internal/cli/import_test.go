@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,6 +25,11 @@ func TestImportPostman(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &doc); err != nil || doc.Import == nil {
 		t.Fatalf("import printed %s", stdout)
 	}
+	for _, dir := range []string{out, filepath.Join(out, "crm"), filepath.Join(out, "shop-api", "products")} {
+		if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+			t.Errorf("%s: %v, want a directory with mode 0700", dir, err)
+		}
+	}
 	for _, f := range doc.Import.Files {
 		fi, err := os.Stat(f)
 		if err != nil {
@@ -44,17 +50,19 @@ func TestImportPostman(t *testing.T) {
 		code, stdout, _ := runCLI(t, false, "run", out, "--dry-run", "-e", env)
 		validateJSON(t, stdout)
 		var run output.Document
-		json.Unmarshal([]byte(stdout), &run)
+		decode(t, stdout, &run)
 		var failed []string
 		for _, r := range run.Results {
 			if r.Error != nil {
 				failed = append(failed, strings.TrimPrefix(r.Ref, out+string(filepath.Separator)))
 			}
 		}
-		want := []string{"crm/contacts.http#find-contact", "shop-api/edge-cases.http#loose-json",
+		want := []string{
+			"crm/contacts.http#find-contact", "shop-api/edge-cases.http#loose-json",
 			"shop-api/edge-cases.http#mixed-basic", "shop-api/edge-cases.http#cookie",
 			"shop-api/products/admin.http#delete-product", "shop-api/shop-api.http#ping",
-			"shop-api/zakazy.http#log-in-as-user"}
+			"shop-api/zakazy.http#log-in-as-user",
+		}
 		if code != exitUsage || len(run.Results) != doc.Import.Imported || !slices.Equal(failed, want) {
 			t.Errorf("run --dry-run -e %s = %d, %d results, failed %q; want %d, %d results, failed %q",
 				env, code, len(run.Results), failed, exitUsage, doc.Import.Imported, want)
@@ -103,6 +111,12 @@ func TestImportPostmanExisting(t *testing.T) {
 	if err := os.Chmod(private, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A second name for the old file: a file rewritten in place would
+	// change under it too, one replaced by a rename does not.
+	kept := filepath.Join(t.TempDir(), "kept")
+	if err := os.Link(edited, kept); err != nil {
+		t.Fatal(err)
+	}
 	if code, _, stderr := runCLI(t, false, "import", "postman", postmanExport, "-o", out, "--force"); code != exitOK {
 		t.Errorf("import --force = %d, %q", code, stderr)
 	}
@@ -111,6 +125,18 @@ func TestImportPostmanExisting(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(edited); !strings.HasPrefix(string(b), "### List contacts\n") {
 		t.Errorf("import --force left %s as %q", edited, b)
+	}
+	if b, _ := os.ReadFile(kept); string(b) != "# mine\n" {
+		t.Errorf("import --force rewrote %s in place: %q", edited, b)
+	}
+	err := filepath.WalkDir(out, func(path string, _ fs.DirEntry, err error) error {
+		if err == nil && strings.HasSuffix(path, ".tmp") {
+			t.Errorf("import left %s behind", path)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -151,7 +177,7 @@ func TestImportPostmanErrors(t *testing.T) {
 		code, stdout, stderr := runCLI(t, false, tt.args...)
 		validateJSON(t, stdout)
 		var doc output.Document
-		json.Unmarshal([]byte(stdout), &doc)
+		decode(t, stdout, &doc)
 		if code != exitUsage || doc.Result == nil || string(doc.Error.Kind) != tt.kind || !strings.Contains(stderr, tt.want) {
 			t.Errorf("%q = %d, %s, %q; want %d, kind %s and %q", tt.args, code, stdout, stderr, exitUsage, tt.kind, tt.want)
 		}

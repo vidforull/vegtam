@@ -10,6 +10,7 @@ package env
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,10 +76,12 @@ type envMap map[string]map[string]string
 // NewLoader returns a Loader. Without an environment, only {{$env NAME}}
 // and captured variables resolve.
 func NewLoader(opts Options) *Loader {
-	return &Loader{opts: opts, dirs: map[string]*Vars{}, errs: map[string]error{},
+	return &Loader{
+		opts: opts, dirs: map[string]*Vars{}, errs: map[string]error{},
 		files: map[string]envMap{}, process: map[string]string{},
 		declared: map[string]bool{}, captured: map[string]captured{}, lost: map[string]string{},
-		cmdFiles: map[string]*commands{}, ran: map[string]ran{}}
+		cmdFiles: map[string]*commands{}, ran: map[string]ran{},
+	}
 }
 
 // Masker returns a Masker for every secret the loader has handed out or
@@ -263,7 +266,7 @@ func (l *Loader) read(path string) (envMap, error) {
 	fail := func(format string, args ...any) error {
 		return core.Errorf(core.KindParse, core.Source{File: path}, format, args...)
 	}
-	src, err := os.ReadFile(path)
+	src, err := os.ReadFile(path) //nolint:forbidigo,gosec // G304: an environment file, found by its name from the .http file's directory up
 	if err != nil {
 		return nil, fail("%v", err)
 	}
@@ -321,19 +324,16 @@ func (v *Vars) SecretValue(s core.Secret) (string, error) {
 }
 
 // Prepare resolves the placeholders of r and reads its body file. All
-// unresolved variables are reported in one error.
-func (v *Vars) Prepare(r *core.Request) (*core.Prepared, error) {
+// unresolved variables are reported in one error. Outside a dry run, the
+// commands of {{$cmd NAME}} placeholders run, until ctx is done.
+func (v *Vars) Prepare(ctx context.Context, r *core.Request) (*core.Prepared, error) {
 	res := resolver{vars: v, src: r.Source}
-	p := &core.Prepared{Request: r, Method: r.Method, URL: res.text(r.URL), Body: res.text(r.Body)}
+	p := &core.Prepared{Request: r, Method: r.Method, URL: res.text(ctx, r.URL), Body: res.text(ctx, r.Body)}
 	for _, h := range r.Headers {
-		p.Headers = append(p.Headers, core.PreparedHeader{Name: h.Name, Value: res.text(h.Value)})
+		p.Headers = append(p.Headers, core.PreparedHeader{Name: h.Name, Value: res.text(ctx, h.Value)})
 	}
 	if r.BodyFile != "" {
-		path := r.BodyFile
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(filepath.Dir(r.Source.File), path)
-		}
-		b, err := os.ReadFile(path)
+		b, err := readBodyFile(r)
 		if err != nil {
 			return nil, core.Errorf(core.KindRequest, r.Source, "body file: %v", err)
 		}
@@ -356,6 +356,24 @@ func (v *Vars) Prepare(r *core.Request) (*core.Prepared, error) {
 	return p, nil
 }
 
+// readBodyFile reads the body file of r. Its path is relative to the
+// directory of the .http file, and the file is opened through an os.Root
+// of that directory: neither "..", an absolute path nor a symbolic link
+// leads outside it, so that a .http file from someone else cannot send a
+// file from elsewhere on the machine.
+func readBodyFile(r *core.Request) ([]byte, error) {
+	name := filepath.FromSlash(r.BodyFile)
+	if !filepath.IsLocal(name) {
+		return nil, fmt.Errorf("%s is outside the directory of the .http file", r.BodyFile)
+	}
+	root, err := os.OpenRoot(filepath.Dir(r.Source.File))
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return root.ReadFile(name)
+}
+
 type resolver struct {
 	vars    *Vars
 	src     core.Source // the request
@@ -363,7 +381,7 @@ type resolver struct {
 	fail    error // the first placeholder that cannot be resolved at all
 }
 
-func (rs *resolver) text(s string) core.Text {
+func (rs *resolver) text(ctx context.Context, s string) core.Text {
 	pieces, err := core.ParseTemplate(s)
 	if err != nil && rs.fail == nil {
 		rs.fail = err
@@ -373,13 +391,13 @@ func (rs *resolver) text(s string) core.Text {
 		if p.Ref == nil {
 			t = append(t, core.Segment{Text: p.Text})
 		} else {
-			t = append(t, rs.ref(*p.Ref))
+			t = append(t, rs.ref(ctx, *p.Ref))
 		}
 	}
 	return t
 }
 
-func (rs *resolver) ref(r core.Ref) core.Segment {
+func (rs *resolver) ref(ctx context.Context, r core.Ref) core.Segment {
 	secret := func(name string) core.Segment { return core.Segment{Secret: &core.Secret{Name: name}} }
 	var err error
 	switch r.Func {
@@ -405,7 +423,7 @@ func (rs *resolver) ref(r core.Ref) core.Segment {
 	case "$cmd":
 		if !core.IsVarName(r.Name) {
 			err = fmt.Errorf("%s: want {{$cmd NAME}}", r)
-		} else if err = rs.vars.command(r, rs.src); err == nil {
+		} else if err = rs.vars.command(ctx, r, rs.src); err == nil {
 			return secret("$cmd " + r.Name)
 		}
 	default:

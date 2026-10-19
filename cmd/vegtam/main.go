@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 
 	"github.com/vidforull/vegtam/internal/cli"
@@ -10,7 +11,7 @@ import (
 var version = "dev"
 
 func main() {
-	os.Exit(cli.Run(os.Args[1:], cli.Config{
+	os.Exit(cli.Run(context.Background(), os.Args[1:], cli.Config{
 		Stdout:  os.Stdout,
 		Stderr:  os.Stderr,
 		TTY:     isTerminal(os.Stdout),

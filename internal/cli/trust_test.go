@@ -17,7 +17,7 @@ const cmdSecret = "Cmd-s3cr/et+v"
 // TestHelperProcess is not a test: the {{$cmd NAME}} tests run the test
 // binary as their command. It prints cmdSecret, or with "leak" fails with
 // cmdSecret on stderr.
-func TestHelperProcess(t *testing.T) {
+func TestHelperProcess(_ *testing.T) {
 	if os.Getenv("VEGTAM_TEST_HELPER") != "1" {
 		return
 	}
@@ -25,7 +25,7 @@ func TestHelperProcess(t *testing.T) {
 		fmt.Fprintln(os.Stderr, "cannot read", cmdSecret)
 		os.Exit(1)
 	}
-	fmt.Println(cmdSecret)
+	fmt.Fprintln(os.Stdout, cmdSecret)
 	os.Exit(0)
 }
 
@@ -35,14 +35,18 @@ func TestTrust(t *testing.T) {
 	t.Setenv("VEGTAM_TEST_HELPER", "1")
 	t.Setenv("GORACE", "atexit_sleep_ms=0") // a helper built with -race would wait a second
 	helper := []string{os.Args[0], "-test.run=^TestHelperProcess$"}
-	cmds, _ := json.Marshal(map[string]any{"KEY": map[string]any{"argv": helper},
-		"LEAK": map[string]any{"argv": append(helper, "--", "leak")}})
+	cmds, _ := json.Marshal(map[string]any{
+		"KEY":  map[string]any{"argv": helper},
+		"LEAK": map[string]any{"argv": append(helper, "--", "leak")},
+	})
 	files := map[string]string{
 		"cmd/http-client.cmd.json": string(cmds),
 		"cmd/key.http": "# @name echo\nPOST {{host}}/echo?key={{$cmd KEY}}\nAuthorization: Bearer {{$cmd KEY}}\n\n" +
 			"###\n# @name leak\nGET {{host}}/echo?key={{$cmd KEY}}&other={{$cmd LEAK}}\n",
 	}
-	os.Mkdir(fx.path("cmd"), 0o755)
+	if err := os.Mkdir(fx.path("cmd"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for name, src := range files {
 		if err := os.WriteFile(fx.path(name), []byte(src), 0o644); err != nil {
 			t.Fatal(err)
@@ -67,8 +71,11 @@ func TestTrust(t *testing.T) {
 
 	// Not trusted yet: exit 6 with the command that trusts, and no command
 	// runs, not even for a dry run or show.
-	for _, args := range [][]string{{"run", "cmd/key.http#echo", "-e", "test"}, {"run", "cmd", "-e", "test", "--dry-run"},
-		{"show", "cmd/key.http#echo", "-e", "test"}} {
+	for _, args := range [][]string{
+		{"run", "cmd/key.http#echo", "-e", "test"},
+		{"run", "cmd", "-e", "test", "--dry-run"},
+		{"show", "cmd/key.http#echo", "-e", "test"},
+	} {
 		code, stdout, stderr := run(false, args...)
 		want := file + " is not trusted to run commands; read it, then trust it with: vegtam trust DIR/cmd\n"
 		if code != exitPolicy || !strings.HasSuffix(stderr, want) || !strings.Contains(stdout, `"kind":"policy"`) {
@@ -107,11 +114,11 @@ func TestTrust(t *testing.T) {
 
 	list := func() []*output.Trusted {
 		t.Helper()
-		code, stdout, _ := run(false, "trust", "--list")
+		c, out, _ := run(false, "trust", "--list")
 		var doc output.Document
-		json.Unmarshal([]byte(stdout), &doc)
-		if code != exitOK || doc.Trust == nil {
-			t.Errorf("trust --list = %d\n%s", code, stdout)
+		decode(t, out, &doc)
+		if c != exitOK || doc.Trust == nil {
+			t.Errorf("trust --list = %d\n%s", c, out)
 		}
 		return doc.Trust
 	}
@@ -143,19 +150,24 @@ func TestTrust(t *testing.T) {
 	if l := list(); len(l) != 0 {
 		t.Errorf("list after revoking: %+v", l)
 	}
-	if code, stdout, _ := run(true, "trust", "--list"); code != exitOK || stdout != "No command file is trusted.\n" {
-		t.Errorf("empty list = %d, %q", code, stdout)
+	if c, out, _ := run(true, "trust", "--list"); c != exitOK || out != "No command file is trusted.\n" {
+		t.Errorf("empty list = %d, %q", c, out)
 	}
 
-	for _, args := range [][]string{{"trust"}, {"trust", "--list", "cmd"}, {"trust", "--list", "--revoke", "cmd"},
-		{"trust", "none"}, {"trust", "api.http"}} {
-		if code, _, _ := run(false, args...); code != exitUsage {
-			t.Errorf("%q = %d, want %d", args, code, exitUsage)
+	for _, args := range [][]string{
+		{"trust"},
+		{"trust", "--list", "cmd"},
+		{"trust", "--list", "--revoke", "cmd"},
+		{"trust", "none"},
+		{"trust", "api.http"},
+	} {
+		if c, _, _ := run(false, args...); c != exitUsage {
+			t.Errorf("%q = %d, want %d", args, c, exitUsage)
 		}
 	}
 
 	// The trust in a directory since deleted can be revoked.
-	if code, _, _ := run(false, "trust", "cmd"); code != exitOK {
+	if c, _, _ := run(false, "trust", "cmd"); c != exitOK {
 		t.Fatal("trust again")
 	}
 	os.RemoveAll(fx.path("cmd"))

@@ -70,9 +70,11 @@ func (fx *fixture) handler() http.Handler {
 	echo := func(status int) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
-			e, _ := json.Marshal(map[string]string{"query": r.URL.RawQuery, "escaped": url.QueryEscape(r.URL.RawQuery),
+			e, _ := json.Marshal(map[string]string{
+				"query": r.URL.RawQuery, "escaped": url.QueryEscape(r.URL.RawQuery),
 				"authorization": r.Header.Get("Authorization"), "api_key": r.Header.Get("X-Api-Key"), "body": string(body),
-				"key": r.URL.Query().Get("key")})
+				"key": r.URL.Query().Get("key"),
+			})
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Echo", r.URL.RawQuery)
 			w.WriteHeader(status)
@@ -83,16 +85,24 @@ func (fx *fixture) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/echo", echo(http.StatusOK))
 	mux.HandleFunc("/fail", echo(http.StatusInternalServerError))
-	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+	mux.HandleFunc("/slow", func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
 	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "\xff\xfe"+r.URL.RawQuery+"\x00")
+		fmt.Fprint(w, "\xff\xfe"+r.URL.RawQuery+"\x00")
 	})
 	mux.HandleFunc("/big", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, strings.Repeat("x", 100)+strings.TrimPrefix(r.URL.RawQuery, "key="))
+		fmt.Fprint(w, strings.Repeat("x", 100)+strings.TrimPrefix(r.URL.RawQuery, "key="))
 	})
-	mux.HandleFunc("/plain", func(w http.ResponseWriter, r *http.Request) {
+	// Each hop goes to a new URL, so that the error names one that is not
+	// the request's: the secrets in it are found by their values.
+	mux.HandleFunc("/hops/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.Path+"x?"+r.URL.RawQuery, http.StatusFound)
+	})
+	mux.HandleFunc("/hops", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/hops/x?"+r.URL.RawQuery, http.StatusFound)
+	})
+	mux.HandleFunc("/plain", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		io.WriteString(w, "plain\x1b]0;title\x07 text")
+		fmt.Fprint(w, "plain\x1b]0;title\x07 text")
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fx.mu.Lock()
@@ -101,4 +111,12 @@ func (fx *fixture) handler() http.Handler {
 		w.Header().Set("Date", "Mon, 19 Oct 2026 00:00:00 GMT")
 		mux.ServeHTTP(w, r)
 	})
+}
+
+// decode unmarshals the JSON document s into v.
+func decode(t *testing.T, s string, v any) {
+	t.Helper()
+	if err := json.Unmarshal([]byte(s), v); err != nil {
+		t.Fatalf("%v in %s", err, s)
+	}
 }

@@ -1,7 +1,7 @@
 package assert
 
 import (
-	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -12,8 +12,10 @@ import (
 )
 
 func response(status int, body string) *exec.Response {
-	return &exec.Response{Status: status, Duration: 120 * time.Millisecond, Body: []byte(body),
-		Header: http.Header{"Content-Type": {"application/json"}, "Set-Cookie": {"a=1", "sid=x9"}}}
+	return &exec.Response{
+		Status: status, Duration: 120 * time.Millisecond, Body: []byte(body),
+		Header: http.Header{"Content-Type": {"application/json"}, "Set-Cookie": {"a=1", "sid=x9"}},
+	}
 }
 
 const doc = `{"ok": true, "name": "Ada Lovelace", "deleted_at": null, "items": [{"id": 42}, {"id": 43.0}],
@@ -66,7 +68,7 @@ func TestCheck(t *testing.T) {
 		{"duration < 500ms", true, "120ms"},
 		{"duration <= 100ms", false, "120ms"},
 	}
-	r := &Response{Response: response(200, doc), ctx: context.Background()}
+	r := &Response{Response: response(200, doc), ctx: t.Context()}
 	for _, tt := range tests {
 		a, err := Parse(tt.expr)
 		if err != nil {
@@ -94,14 +96,16 @@ func TestCheckBodies(t *testing.T) {
 	for _, tt := range tests {
 		resp := response(200, tt.body)
 		resp.Truncated = tt.truncated
-		if passed, actual := a.check(&Response{Response: resp, ctx: context.Background()}); passed || actual != tt.actual {
+		if passed, actual := a.check(&Response{Response: resp, ctx: t.Context()}); passed || actual != tt.actual {
 			t.Errorf("body %q = %v, %q; want a failure, %q", tt.body, passed, actual, tt.actual)
 		}
 	}
 	// The form of an outcome says how to mask it.
-	for expr, want := range map[string]Form{"status == 200": Text, `body contains "x"`: Body, "jsonpath $.ok exists": JSON,
-		"header X exists": Text, "duration < 1s": Text} {
-		r := Evaluate(context.Background(), request("assert "+expr), response(200, doc))
+	for expr, want := range map[string]Form{
+		"status == 200": Text, `body contains "x"`: Body, "jsonpath $.ok exists": JSON,
+		"header X exists": Text, "duration < 1s": Text,
+	} {
+		r := Evaluate(t.Context(), request("assert "+expr), response(200, doc))
 		if r.Outcomes[0].Form != want {
 			t.Errorf("%s: form %v, want %v", expr, r.Outcomes[0].Form, want)
 		}
@@ -164,15 +168,19 @@ func request(directives ...string) *core.Request {
 }
 
 func TestEvaluate(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	res := Evaluate(ctx, request("assert status == 200", "assert jsonpath $.ok == true"), response(200, doc))
 	if res.Err != nil || len(res.Outcomes) != 2 || !res.Outcomes[0].Passed || !res.Outcomes[1].Passed {
 		t.Errorf("all passing: %+v", res)
 	}
+	res = Evaluate(ctx, request("assert status in 400..499", "assert status != 200"), response(http.StatusNotFound, doc))
+	if res.Err != nil || len(res.Outcomes) != 2 || !res.Outcomes[0].Passed || !res.Outcomes[1].Passed {
+		t.Errorf("404: %+v", res)
+	}
 
 	// Every assertion is checked; the error names the first failure.
 	res = Evaluate(ctx, request("assert status == 200", "assert status == 201", "assert jsonpath $.ok == false"), response(200, doc))
-	if e, ok := res.Err.(*core.Error); !ok || e.Kind != core.KindAssert || e.Source.Line != 2 ||
+	if e, ok := errors.AsType[*core.Error](res.Err); !ok || e.Kind != core.KindAssert || e.Source.Line != 2 ||
 		e.Msg != "2 of 3 assertions failed: status == 201; jsonpath $.ok == false" || len(res.Outcomes) != 3 {
 		t.Errorf("failing asserts: %+v, %v", res, res.Err)
 	}
@@ -200,7 +208,7 @@ func TestCapture(t *testing.T) {
 		{"cookie = header set-cookie", "cookie", "header set-cookie", true, "a=1"},
 		{"plain code = status", "code", "status", false, "200"},
 	}
-	r := &Response{Response: response(200, doc), ctx: context.Background()}
+	r := &Response{Response: response(200, doc), ctx: t.Context()}
 	for _, tt := range tests {
 		c, err := ParseCapture(tt.directive)
 		if err != nil {
@@ -230,22 +238,22 @@ func TestCapture(t *testing.T) {
 		}
 	}
 	c, _ := ParseCapture("token = $.token")
-	if _, err := c.take(&Response{Response: response(200, "<html>"), ctx: context.Background()}); err == nil ||
+	if _, err := c.take(&Response{Response: response(200, "<html>"), ctx: t.Context()}); err == nil ||
 		err.Error() != "the body is not JSON" {
 		t.Errorf("not JSON: %v", err)
 	}
 	cut := response(200, `{"token": "t-1"}`)
 	cut.Truncated = true
-	if _, err := c.take(&Response{Response: cut, ctx: context.Background()}); err == nil ||
+	if _, err := c.take(&Response{Response: cut, ctx: t.Context()}); err == nil ||
 		err.Error() != "the body was cut off at the size limit" {
 		t.Errorf("cut off: %v", err)
 	}
 	// What a path does not fit is not quoted: it could be a secret.
-	if _, err := c.take(&Response{Response: response(200, `{"token": "s3cret-value"}`), ctx: context.Background()}); err != nil {
+	if _, err := c.take(&Response{Response: response(200, `{"token": "s3cret-value"}`), ctx: t.Context()}); err != nil {
 		t.Fatal(err)
 	}
 	c, _ = ParseCapture("x = $.token.x")
-	if _, err := c.take(&Response{Response: response(200, `{"token": "s3cret-value"}`), ctx: context.Background()}); err == nil ||
+	if _, err := c.take(&Response{Response: response(200, `{"token": "s3cret-value"}`), ctx: t.Context()}); err == nil ||
 		strings.Contains(err.Error(), "s3cr") {
 		t.Errorf("misfit: %v", err)
 	}
@@ -277,10 +285,10 @@ func TestParseCaptureErrors(t *testing.T) {
 }
 
 func TestEvaluateCaptures(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	res := Evaluate(ctx, request("capture token = $.token", "assert status == 201", "capture plain id = $.items[0].id"),
 		response(200, doc))
-	if res.Err == nil || res.Err.(*core.Error).Kind != core.KindAssert || len(res.Captured) != 2 ||
+	if e, ok := errors.AsType[*core.Error](res.Err); !ok || e.Kind != core.KindAssert || len(res.Captured) != 2 ||
 		res.Captured[0].Value != "t-1" || !res.Captured[0].Secret || res.Captured[1].Value != "42" || res.Captured[1].Secret {
 		t.Errorf("captures with a failed assertion: %+v, %v", res, res.Err)
 	}
@@ -288,7 +296,7 @@ func TestEvaluateCaptures(t *testing.T) {
 	// are still taken.
 	res = Evaluate(ctx, request("assert status == 201", "capture a = $.a", "capture token = $.token", "capture b = header B"),
 		response(200, doc))
-	e, ok := res.Err.(*core.Error)
+	e, ok := errors.AsType[*core.Error](res.Err)
 	if !ok || e.Kind != core.KindCapture || e.Source.Line != 2 || len(res.Captured) != 1 || len(res.Outcomes) != 1 ||
 		e.Msg != "2 of 3 captures failed: a = $.a: the body has no such value; b = header B: the response has no such header" {
 		t.Errorf("failed captures: %+v, %v", res, res.Err)

@@ -36,11 +36,20 @@ func Load(paths ...string) (*core.Collection, []error) {
 
 // ParseFile reads and parses one .http file.
 func ParseFile(path string) (*core.File, error) {
-	src, err := os.ReadFile(path)
+	src, err := ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return Parse(path, src)
+}
+
+// ReadFile reads the .http file at path.
+func ReadFile(path string) ([]byte, error) {
+	src, err := os.ReadFile(path) //nolint:forbidigo,gosec // G304: a .http file named on the command line, or found below a directory named there
 	if err != nil {
 		return nil, core.Errorf(core.KindUsage, core.Source{}, "%v", err)
 	}
-	return Parse(path, src)
+	return src, nil
 }
 
 // Files returns the .http files at root, in the order Load parses them:

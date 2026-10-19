@@ -38,8 +38,8 @@ func validate(root, node map[string]any, v any, path string) []string {
 		switch key {
 		case "$schema", "$defs", "title", "description", "properties":
 		case "$ref":
-			name, _ := strings.CutPrefix(want.(string), "#/$defs/")
-			def := root["$defs"].(map[string]any)[name].(map[string]any)
+			name, _ := strings.CutPrefix(must[string](want), "#/$defs/")
+			def := must[map[string]any](must[map[string]any](root["$defs"])[name])
 			errs = append(errs, validate(root, def, v, path)...)
 		case "const":
 			if !reflect.DeepEqual(v, want) {
@@ -67,15 +67,15 @@ func validate(root, node map[string]any, v any, path string) []string {
 			}
 		case "required":
 			obj, _ := v.(map[string]any)
-			for _, name := range want.([]any) {
-				if _, ok := obj[name.(string)]; !ok {
+			for _, name := range must[[]any](want) {
+				if _, ok := obj[must[string](name)]; !ok {
 					fail("missing %s", name)
 				}
 			}
 		case "items":
 			arr, _ := v.([]any)
 			for i, item := range arr {
-				errs = append(errs, validate(root, want.(map[string]any), item, fmt.Sprintf("%s[%d]", path, i))...)
+				errs = append(errs, validate(root, must[map[string]any](want), item, fmt.Sprintf("%s[%d]", path, i))...)
 			}
 		default:
 			fail("the validator does not know the keyword %s", key)
@@ -85,7 +85,7 @@ func validate(root, node map[string]any, v any, path string) []string {
 		props, _ := node["properties"].(map[string]any)
 		for name, val := range obj {
 			if p, ok := props[name]; ok {
-				errs = append(errs, validate(root, p.(map[string]any), val, path+"."+name)...)
+				errs = append(errs, validate(root, must[map[string]any](p), val, path+"."+name)...)
 			} else {
 				fail("property %s is not in the schema", name)
 			}
@@ -108,9 +108,19 @@ func TestValidate(t *testing.T) {
 	}
 	for doc, want := range bad {
 		var v map[string]any
-		json.Unmarshal([]byte(doc), &v)
+		decode(t, doc, &v)
 		if errs := validate(schema, schema, v, "$"); !strings.Contains(strings.Join(errs, "\n"), want) {
 			t.Errorf("validate(%s) = %q, want an error with %q", doc, errs, want)
 		}
 	}
+}
+
+// must returns v as a T. The schema is vegtam's own: anything else is a
+// mistake in it.
+func must[T any](v any) T {
+	x, ok := v.(T)
+	if !ok {
+		panic(fmt.Sprintf("schema: %v is a %T, not a %T", v, v, x))
+	}
+	return x
 }
