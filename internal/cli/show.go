@@ -13,6 +13,7 @@ import (
 	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
 	"github.com/vidforull/vegtam/internal/core/output"
+	"github.com/vidforull/vegtam/internal/core/policy"
 )
 
 func newShowCmd(cfg *Config) *cobra.Command {
@@ -22,7 +23,9 @@ func newShowCmd(cfg *Config) *cobra.Command {
 		Short: "Print a request without sending it",
 		Long: `Print a request without sending it. With -e it is resolved for that
 environment and shown as it would go on the wire; without -e it is shown
-as written. Secrets appear as their placeholders, such as {{token}}.`,
+as written. Secrets appear as their placeholders, such as {{token}}. A
+{{$cmd NAME}} is checked against the trust store, with exit code 6 if
+its command file is not trusted, but its command does not run.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			f, i, err := parseTarget(args[0]).request()
@@ -31,7 +34,7 @@ as written. Secrets appear as their placeholders, such as {{token}}.`,
 			}
 			res := &output.Result{Ref: output.Ref(f, i), Request: output.Written(f.Requests[i])}
 			if envName != "" {
-				loader := env.NewLoader(env.Options{Env: envName, DryRun: true})
+				loader := env.NewLoader(env.Options{Env: envName, DryRun: true, Trust: policy.DefaultStore()})
 				j := prepare(loader, f, i)
 				cfg.masker = loader.Masker()
 				if j.err != nil {
@@ -130,7 +133,7 @@ func newSchemaCmd(cfg *Config) *cobra.Command {
 		Use:   "schema",
 		Short: "Print the JSON Schema of the JSON output",
 		Long: `Print the JSON Schema (draft 2020-12) of the JSON documents that run,
-show, list and import print. Fields are only ever added; schema_version
+show, list, import and trust print. Fields are only ever added; schema_version
 changes if one has to change its meaning or go away.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {

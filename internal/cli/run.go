@@ -20,6 +20,7 @@ import (
 	"github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
 	"github.com/vidforull/vegtam/internal/core/output"
+	"github.com/vidforull/vegtam/internal/core/policy"
 )
 
 type runFlags struct {
@@ -51,7 +52,9 @@ results for a file or a directory. An error stops only its own request.
 
 A captured value is a variable for the requests after it in the same
 run, over the environment; it is a secret unless the directive says
-plain.`,
+plain. {{$cmd NAME}} runs a command of http-client.cmd.json once per run,
+if the file is trusted (see vegtam trust --help); --dry-run checks the
+trust but runs nothing.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return run(cmd.Context(), cfg, f, args[0])
@@ -82,7 +85,7 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 		return core.Errorf(core.KindUsage, core.Source{}, "--timeout must not be negative")
 	}
 	t := parseTarget(arg)
-	loader := env.NewLoader(env.Options{Env: f.env, DryRun: f.dryRun})
+	loader := env.NewLoader(env.Options{Env: f.env, DryRun: f.dryRun, Trust: policy.DefaultStore()})
 	jobs, err := t.jobs(loader)
 	// Every request is resolved before the first is sent, so the masker
 	// knows every secret before anything is printed; captured ones join

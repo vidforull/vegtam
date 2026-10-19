@@ -1,15 +1,17 @@
 // Package env resolves the {{...}} placeholders of requests: variables
 // from environment files in the JetBrains format, {{$env NAME}} from the
-// process environment, and variables that @capture directives take from
-// the responses of a run. Values from the private environment file and
-// from the process environment, and captured values not marked plain, are
-// secrets: prepared requests refer to them by name only.
+// process environment, {{$cmd NAME}} from the output of a command in a
+// trusted command file, and variables that @capture directives take from
+// the responses of a run. Values from the private environment file, the
+// process environment and commands, and captured values not marked plain,
+// are secrets: prepared requests refer to them by name only.
 package env
 
 import (
 	"bytes"
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -20,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/policy"
 )
 
 // The environment files, looked up from a .http file's directory upwards.
@@ -46,12 +49,18 @@ type Loader struct {
 	captured map[string]captured // the values taken so far
 	lost     map[string]string   // variables whose latest capture took nothing: the request
 	taken    []string            // every secret value ever captured, for the masker
+
+	cmdFiles map[string]*commands // command files read, by path
+	ran      map[string]ran       // what each command gave, by command file path and name
 }
 
 // Options configure a Loader.
 type Options struct {
-	Env    string // the environment to select; "" for none
-	DryRun bool   // no request is sent: a captured value is core.ErrLate
+	Env string // the environment to select; "" for none
+	// DryRun is set when no request is sent: commands are checked but not
+	// run, and their values, like captured ones, are core.ErrLate.
+	DryRun bool
+	Trust  *policy.Store // the command files allowed to run; nil allows none
 }
 
 // captured is a value an @capture took.
@@ -68,17 +77,21 @@ type envMap map[string]map[string]string
 func NewLoader(opts Options) *Loader {
 	return &Loader{opts: opts, dirs: map[string]*Vars{}, errs: map[string]error{},
 		files: map[string]envMap{}, process: map[string]string{},
-		declared: map[string]bool{}, captured: map[string]captured{}, lost: map[string]string{}}
+		declared: map[string]bool{}, captured: map[string]captured{}, lost: map[string]string{},
+		cmdFiles: map[string]*commands{}, ran: map[string]ran{}}
 }
 
 // Masker returns a Masker for every secret the loader has handed out or
 // read: all private values of the selected environment, the process
-// environment values that placeholders referred to, and the secret values
-// captured so far.
+// environment values that placeholders referred to, the output of the
+// commands run, and the secret values captured so far.
 func (l *Loader) Masker() *core.Masker {
 	values := slices.Clone(l.taken)
 	for _, v := range l.dirs {
 		values = slices.AppendSeq(values, maps.Values(v.private))
+	}
+	for _, r := range l.ran {
+		values = append(values, r.value)
 	}
 	return core.NewMasker(slices.AppendSeq(values, maps.Values(l.process)))
 }
@@ -153,8 +166,11 @@ func (l *Loader) getenv(name string) (string, bool) {
 // Vars are the variables visible to the requests of one directory.
 type Vars struct {
 	loader  *Loader
+	dir     string
 	public  map[string]string
 	private map[string]string
+	cmd     *commands // the command file, once a request needs it
+	cmdErr  error
 }
 
 // For returns the variables for the requests of the .http file at path.
@@ -176,7 +192,7 @@ func (l *Loader) For(path string) (*Vars, error) {
 }
 
 func (l *Loader) load(dir string) (*Vars, error) {
-	v := &Vars{loader: l, public: map[string]string{}, private: map[string]string{}}
+	v := &Vars{loader: l, dir: dir, public: map[string]string{}, private: map[string]string{}}
 	env := l.opts.Env
 	if env == "" {
 		return v, nil
@@ -289,6 +305,9 @@ func (v *Vars) SecretValue(s core.Secret) (string, error) {
 		}
 		return "", fmt.Errorf("%s was not captured: the @capture of an earlier request took no value", s.Name)
 	}
+	if n, ok := strings.CutPrefix(s.Name, "$cmd "); ok {
+		return v.commandValue(n)
+	}
 	if n, ok := strings.CutPrefix(s.Name, "$env "); ok {
 		if val, ok := l.getenv(n); ok {
 			return val, nil
@@ -304,7 +323,7 @@ func (v *Vars) SecretValue(s core.Secret) (string, error) {
 // Prepare resolves the placeholders of r and reads its body file. All
 // unresolved variables are reported in one error.
 func (v *Vars) Prepare(r *core.Request) (*core.Prepared, error) {
-	res := resolver{vars: v}
+	res := resolver{vars: v, src: r.Source}
 	p := &core.Prepared{Request: r, Method: r.Method, URL: res.text(r.URL), Body: res.text(r.Body)}
 	for _, h := range r.Headers {
 		p.Headers = append(p.Headers, core.PreparedHeader{Name: h.Name, Value: res.text(h.Value)})
@@ -320,7 +339,9 @@ func (v *Vars) Prepare(r *core.Request) (*core.Prepared, error) {
 		}
 		p.Body = core.Text{{Text: string(b)}}
 	}
-	if res.fail != nil {
+	if e, ok := errors.AsType[*core.Error](res.fail); ok {
+		return nil, e
+	} else if res.fail != nil {
 		return nil, core.Errorf(core.KindVariable, r.Source, "%v", res.fail)
 	}
 	if len(res.missing) > 0 {
@@ -337,6 +358,7 @@ func (v *Vars) Prepare(r *core.Request) (*core.Prepared, error) {
 
 type resolver struct {
 	vars    *Vars
+	src     core.Source // the request
 	missing []string
 	fail    error // the first placeholder that cannot be resolved at all
 }
@@ -381,14 +403,25 @@ func (rs *resolver) ref(r core.Ref) core.Segment {
 			rs.miss("$env " + r.Name)
 		}
 	case "$cmd":
-		err = fmt.Errorf("%s: $cmd is not supported yet", r)
+		if !core.IsVarName(r.Name) {
+			err = fmt.Errorf("%s: want {{$cmd NAME}}", r)
+		} else if err = rs.vars.command(r, rs.src); err == nil {
+			return secret("$cmd " + r.Name)
+		}
 	default:
-		err = fmt.Errorf("%s: unknown dynamic variable %s (supported: $env)", r, r.Func)
+		err = fmt.Errorf("%s: unknown dynamic variable %s (supported: $env, $cmd)", r, r.Func)
 	}
-	if err != nil && rs.fail == nil {
+	// The first error wins, but policy over any other: a request that a
+	// person must allow says so whatever else is wrong with it.
+	if err != nil && (rs.fail == nil || isPolicy(err) && !isPolicy(rs.fail)) {
 		rs.fail = err
 	}
 	return core.Segment{}
+}
+
+func isPolicy(err error) bool {
+	e, ok := errors.AsType[*core.Error](err)
+	return ok && e.Kind == core.KindPolicy
 }
 
 func (rs *resolver) miss(name string) {

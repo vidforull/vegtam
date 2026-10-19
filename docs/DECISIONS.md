@@ -193,3 +193,38 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   placeholders, and the URL or header holding one is left unchecked. A
   stand-in value would make a URL such as `{{next}}`, captured from a
   `Location` header, fail the check for no reason.
+
+## 2026-10-19: secrets from commands, trust as the first policy
+
+- **Commands, not a plugin system.** `{{$cmd NAME}}` gets a secret from
+  any tool that prints it (`op`, `pass`, `security`, `vault`), with no
+  code in vegtam for each; the keychain integration planned later can
+  sit next to it. The command file holds how to get secrets, never the
+  secrets, so it can be committed with the requests.
+- **No shell.** Commands are argv lists run with os/exec. A shell would
+  bring quoting, expansion and injection along with it; anyone who wants
+  a pipeline can write a script and name it in argv. The working
+  directory is the command file's, so that a relative script path means
+  the same for every `.http` file that uses it.
+- **Run once, before sending.** A command runs while requests are
+  resolved, once per run, so that the masker knows its value before
+  anything is printed and a prompt from a password manager comes once.
+  A dry run and `show` run nothing.
+- **Trust like direnv.** A file of commands is code. `vegtam trust`
+  records where it is and a SHA-256 in the user's config directory,
+  outside any collection, so a cloned repository, a pulled change or an
+  edited file runs nothing until a person has looked at it. The sum
+  covers the file and the files its commands name by relative paths,
+  since a script next to the file is as much code as the file; programs
+  from `PATH` or absolute paths are the system's. The key is where the
+  file is found, only its directory's links resolved, so that a link
+  elsewhere to a trusted file does not borrow its trust. The command
+  file's bytes that are hashed are the bytes parsed and run; a script it
+  names is hashed just before it runs. The store is written to a new
+  file and renamed, readable by its owner only, and ignored if it or its
+  directory belongs to someone else or others can write it.
+- **Policy has its own exit code.** An untrusted file is not a malformed
+  request: a program has to tell "fix the file" (2) from "a person must
+  allow this" (6). Trust is the first piece of the policy planned for
+  vegtam; confirmation of unsafe methods and host allowlists will
+  join it under the same kind and codes.

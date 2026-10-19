@@ -21,6 +21,7 @@ const (
 	exitUsage   = 2 // bad arguments, a file that does not parse, an unresolved variable, an invalid request, a capture without a value, an export that cannot be read
 	exitNetwork = 3 // network or TLS error, timeout
 	exitStatus  = 4 // HTTP status 400 or above, with run --fail
+	exitPolicy  = 6 // not allowed by policy: a command file that is not trusted
 )
 
 // exitCode returns the exit code for an error of kind k.
@@ -32,6 +33,8 @@ func exitCode(k core.Kind) int {
 		return exitNetwork
 	case core.KindStatus:
 		return exitStatus
+	case core.KindPolicy:
+		return exitPolicy
 	}
 	return exitUsage
 }
@@ -50,8 +53,9 @@ Exit codes:
      that finds no value, or an export that cannot be imported
   3  network or TLS error, or timeout
   4  HTTP status 400 or above, with run --fail
-  5 and 6 are reserved for requests that need confirmation and requests
-  blocked by policy.
+  5  reserved for requests that need confirmation
+  6  blocked by policy: a {{$cmd NAME}} whose command file is not
+     trusted (see vegtam trust --help)
 With several requests, the exit code is the highest of theirs.`
 
 // Config is what the commands need from the process.
@@ -133,8 +137,8 @@ func Run(args []string, cfg Config) int {
 	root.SetOut(cfg.out)
 	root.SetErr(cfg.errOut)
 	root.PersistentFlags().BoolVar(&cfg.json, "json", false, "print JSON even on a terminal")
-	root.AddCommand(newRunCmd(&cfg), newShowCmd(&cfg), newListCmd(&cfg), newImportCmd(&cfg), newSchemaCmd(&cfg),
-		newVersionCmd(&cfg))
+	root.AddCommand(newRunCmd(&cfg), newShowCmd(&cfg), newListCmd(&cfg), newImportCmd(&cfg), newTrustCmd(&cfg),
+		newSchemaCmd(&cfg), newVersionCmd(&cfg))
 
 	cmd, err := root.ExecuteC()
 	if err == nil {

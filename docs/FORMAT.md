@@ -188,7 +188,7 @@ be a name, as in `plain = $.plain`.
 |---|---|
 | `{{name}}` | the variable `name`: captured by an earlier request of the run, or from the selected environment |
 | `{{$env NAME}}` | the environment variable `NAME` of the vegtam process |
-| `{{$cmd NAME}}` | reserved: the output of a command configured for the folder; an error for now |
+| `{{$cmd NAME}}` | the output of the command `NAME` of the nearest `http-client.cmd.json`, if that file is trusted |
 
 Variable names start with a letter or `_` and continue with letters,
 digits, `_`, `.` and `-`. Whitespace inside the braces is ignored. Values
@@ -225,10 +225,58 @@ Without `-e`, no environment file is read and only `{{$env NAME}}`
 resolves. Every unresolved placeholder is an error; all the names missing
 from a request are reported together.
 
+## Commands
+
+`{{$cmd NAME}}` takes a value from a command, such as a password
+manager's command-line tool, so that the secret is in no file at all.
+The commands are in `http-client.cmd.json`; vegtam uses the nearest one
+from the `.http` file's directory upwards, as for environment files:
+
+```json
+{
+  "TOKEN": {"argv": ["op", "read", "op://dev/api/token"], "timeout": "10s"},
+  "DB_PASSWORD": {"argv": ["pass", "show", "dev/db"]}
+}
+```
+
+- `argv` is the program and its arguments. There is no shell: no
+  globbing, no variables, no pipes. A program without a `/` is looked up
+  in `PATH`; a relative path such as `./bin/token` is relative to the
+  directory where `http-client.cmd.json` is.
+- The command runs in that directory, with vegtam's environment and no
+  input, for at most `timeout`, a Go duration (`30s` by default). It may
+  leave processes behind; its own exit status is what counts.
+- Its standard output, less one final line break (`\n` or `\r\n`), is
+  the value. A command that exits with an error is an error of kind
+  `variable` with the first KiB of what it wrote to standard error, in
+  which only the secrets vegtam knows are masked; so is a command that
+  prints nothing, prints more than 1 MiB or runs out of time.
+- Each command runs at most once per run, before the first request is
+  sent; every request that uses it gets the same value.
+- Any other field, a key that appears twice, data after the object, a
+  name that is not a variable name, or an empty `argv` makes the file an
+  error.
+
+The value is a secret. `http-client.cmd.json` itself holds no secret,
+only how to get them, so it can be committed.
+
+**Trust.** A command file runs nothing until a person trusts it, much
+as `direnv allow` does for `.envrc` files: `vegtam trust <dir>` records
+where the file is and a SHA-256 of it and of the files its commands
+name by relative paths, such as `./bin/token`. If any of them changes,
+the file is no longer trusted; a symbolic link to a trusted file
+elsewhere is not trusted either. A `{{$cmd NAME}}` from a file that is
+not trusted is an error of kind `policy`, exit code 6, whose message
+gives the `vegtam trust` command to run after reading the file; see
+[AUTOMATION.md](AUTOMATION.md#policy). `--dry-run` and `show -e` check
+that the file is trusted and has the command, but run nothing: the
+request shows `{{$cmd NAME}}`.
+
 ## Secrets
 
-Values from `http-client.private.env.json` and from `{{$env NAME}}` are
-secrets, and so are captured values not marked `plain`. A resolved
+Values from `http-client.private.env.json`, from `{{$env NAME}}` and
+from `{{$cmd NAME}}` are secrets, and so are captured values not marked
+`plain`. A resolved
 request holds only their names; the values are inserted
 when the request is sent. Wherever a request is shown, a secret appears as
 its placeholder (`Bearer {{token}}`). In other text that might contain a
@@ -340,6 +388,6 @@ and it overwrites no file without `--force`.
 | multipart bodies with `< file` parts | error |
 | response handlers and output redirects (`> {% ... %}`, `> script.js`, `>> file`, `<> file`) | error |
 | JetBrains directives such as `@no-redirect`, `@no-cookie-jar`, `@timeout` | error |
-| dynamic variables other than `$env` (`$uuid`, `$timestamp`, `$random.*`) | error |
+| dynamic variables other than `$env` and `$cmd` (`$uuid`, `$timestamp`, `$random.*`) | error |
 | environment values that are objects (`SSLConfiguration`, `Security`) | error |
 | WebSocket, gRPC and GraphQL requests | error (method not recognised) |

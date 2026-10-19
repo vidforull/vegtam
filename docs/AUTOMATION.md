@@ -14,8 +14,9 @@ vegtam run api/ -e dev --fail             # send everything, fail on HTTP errors
 
 ## Output
 
-When stdout is not a terminal, or with `--json`, `run`, `show`, `list`
-and `import` print one JSON document to stdout, followed by a newline. On a terminal
+When stdout is not a terminal, or with `--json`, `run`, `show`, `list`,
+`import` and `trust` print one JSON document to stdout, followed by a
+newline. On a terminal
 the output is text for people, and `--json` prints the same document
 indented. Nothing else is written to stdout; diagnostics go to stderr.
 
@@ -30,6 +31,7 @@ command and on its argument, never on what happens at run time:
 | `show <file>#<ref>` | one result with `ref` and `request` only |
 | `list <file>`, `list <dir>` | `requests` |
 | `import postman <export> -o <dir>` | `import`: the report of the import |
+| `trust <dir>`, `trust --revoke <dir>`, `trust --list` | `trust`: the command files and their status |
 | an error that ends a command before any request | `error` only |
 
 A result for `run api/users.http#list -e dev` looks like this (shortened):
@@ -112,7 +114,7 @@ by its exit code.
 | 3 | network or TLS error, or timeout |
 | 4 | HTTP status 400 or above, with `run --fail` |
 | 5 | reserved: the request needs confirmation |
-| 6 | reserved: the request is blocked by policy |
+| 6 | blocked by policy: a `{{$cmd NAME}}` whose command file is not trusted |
 
 Without `--fail`, any HTTP status is a success: the status is in the
 output. With several requests, the exit code is the highest among them,
@@ -134,6 +136,7 @@ The outcome of every assertion is in `asserts` all the same.
 | `network` | 3 | DNS, connection, TLS, redirects |
 | `timeout` | 3 | no complete response within `--timeout` |
 | `status` | 4 | HTTP status 400 or above, with `--fail` |
+| `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write |
 
 Every error is printed to stderr as text, `vegtam: file:line: message`.
 With JSON output it is also in the document: in the result it belongs to,
@@ -158,8 +161,12 @@ dry run, but none is evaluated. Nothing is captured either: a variable
 that an earlier request would capture stays a placeholder, `{{token}}`,
 and the URL or header that holds it is left unchecked.
 
+A dry run also runs no command: `{{$cmd NAME}}` is checked against the
+trust store and the command file, and the request shows the
+placeholder.
+
 `show <file>#<ref>` prints one request as written, or with `-e` as it would
-be sent.
+be sent; like a dry run, it runs no command.
 
 ## Importing
 
@@ -186,6 +193,39 @@ The exit code is 0 when the files are written, whatever was skipped.
 Without `--force`, existing files make it 2 and nothing is written. Run
 `run <dir> --dry-run -e <env>` next to check every request.
 
+## Policy
+
+Policy is what a person has to allow before vegtam does it on its own.
+So far it covers one thing: running the commands of a command file,
+`http-client.cmd.json` (see [FORMAT.md](FORMAT.md#commands)).
+
+- `vegtam trust <dir>` trusts the `http-client.cmd.json` in `<dir>` (or
+  the file named): it records where the file is, as an absolute path
+  with the symbolic links of its directory resolved, and a SHA-256 of
+  the file and of the files its commands name by relative paths, such
+  as `./bin/token` or `token.py`, in `$XDG_CONFIG_HOME/vegtam/trust.json`,
+  or `~/.config/vegtam/trust.json` if `XDG_CONFIG_HOME` is not set.
+  Programs found in `PATH` or named by absolute paths are not covered.
+- The trust is for that place: a symbolic link elsewhere to a trusted
+  file is not trusted. It holds for every `.http` file in the directory
+  and below it, as the nearest command file is used.
+- If the file or a file its commands name changes, the commands do not
+  run until it is trusted again.
+- The store is readable by its owner only; one that belongs to another
+  user, or that others can write, directory included, trusts nothing.
+- `vegtam trust --revoke <dir>` takes the trust back, also for a
+  directory since deleted; `vegtam trust --list` lists the files with a
+  `status`: `trusted`, `changed` or `missing`.
+- A request with a `{{$cmd NAME}}` from a file that is not trusted fails
+  with kind `policy` and exit code 6 before anything is sent, also with
+  `--dry-run` and `show -e`, and whatever else is wrong with it.
+
+Trusting is a decision for a person, who reads the commands first. A
+program that gets a `policy` error should stop and ask, not run `vegtam
+trust` itself: the error message names the command for the person to
+run. The confirmation of unsafe methods and the host allowlist, with
+exit code 5 and more of code 6, are still to come.
+
 ## Response size and time limits
 
 `--max-body` limits how much of a response body is kept: 1 MiB by default,
@@ -196,9 +236,10 @@ each request, body included; a request that runs out of time has a
 
 ## Secrets
 
-Values from `http-client.private.env.json`, from `{{$env NAME}}`
-placeholders and from `# @capture` directives without `plain` are
-secrets (see [FORMAT.md](FORMAT.md)). vegtam never prints them:
+Values from `http-client.private.env.json`, from `{{$env NAME}}` and
+`{{$cmd NAME}}` placeholders and from `# @capture` directives without
+`plain` are secrets (see [FORMAT.md](FORMAT.md)). vegtam never prints
+them:
 
 - requests are shown with the placeholder, `Bearer {{token}}`;
 - in everything else, such as response headers and bodies and error

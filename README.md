@@ -116,8 +116,13 @@ vegtam run api/ -e dev --fail         # every .http file below api/; exit 4 on H
 vegtam run api/ -e dev --dry-run      # resolve and check everything, send nothing
 vegtam show api.http#list -e dev      # the request as it would be sent
 vegtam list api/                      # the requests and how to refer to them
+vegtam trust api/                     # let {{$cmd NAME}} run the commands of api/http-client.cmd.json
 vegtam schema                         # the JSON Schema of the JSON output
 ```
+
+Secrets can also come from a command, such as a password manager's CLI:
+`{{$cmd TOKEN}}` runs the command `TOKEN` of `http-client.cmd.json`, but
+only once you have read the file and trusted it with `vegtam trust`.
 
 `vegtam --help` lists the exit codes.
 
@@ -213,11 +218,11 @@ lists what is and what is not.
 ## Documentation
 
 - [docs/FORMAT.md](docs/FORMAT.md): the supported `.http` subset,
-  assertions and captures, environment files, secrets, and importing
-  from Postman.
+  assertions and captures, environment files, commands, secrets, and
+  importing from Postman.
 - [docs/AUTOMATION.md](docs/AUTOMATION.md): driving vegtam from scripts
   and agents: the JSON output and its stability, exit codes, dry runs,
-  limits and secret masking.
+  policy, limits and secret masking.
 - [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and why.
 
 ## Build

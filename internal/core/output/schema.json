@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "vegtam output",
-  "description": "A JSON document printed by vegtam run, show, list or import. run <file>#<ref> and show print the fields of one result; run <file> and run <dir> print results; list prints requests; import prints import; an error that ends a command before any request is printed as error. Fields are only ever added: ignore the ones you do not know.",
+  "description": "A JSON document printed by vegtam run, show, list, import or trust. run <file>#<ref> and show print the fields of one result; run <file> and run <dir> print results; list prints requests; import prints import; trust prints trust; an error that ends a command before any request is printed as error. Fields are only ever added: ignore the ones you do not know.",
   "type": "object",
   "required": ["schema_version"],
   "properties": {
@@ -23,7 +23,20 @@
       "description": "The requests of the files: list.",
       "items": {"$ref": "#/$defs/listed"}
     },
-    "import": {"$ref": "#/$defs/import"}
+    "import": {"$ref": "#/$defs/import"},
+    "trust": {
+      "type": "array",
+      "description": "The command files trust acted on, or with --list every one the trust store records, sorted by path.",
+      "items": {
+        "type": "object",
+        "required": ["file", "status"],
+        "properties": {
+          "file": {"type": "string", "description": "The absolute path of an http-client.cmd.json, symbolic links resolved."},
+          "status": {"type": "string", "description": "trusted: its commands run; changed: it, or a file its commands name, differs from what was trusted, so they do not; missing: the file is gone; revoked: --revoke took the trust back; untrusted: --revoke found no trust to take back."},
+          "sha256": {"type": "string", "description": "The SHA-256 trusted, in hex, of the file and the files its commands name by relative paths. Absent after --revoke."}
+        }
+      }
+    }
   },
   "$defs": {
     "ref": {
@@ -127,7 +140,7 @@
       "properties": {
         "kind": {
           "type": "string",
-          "description": "assert (exit code 1); usage, parse, variable, request, import or capture (2); network or timeout (3); status (4, with --fail). New kinds may be added; rely on the exit code for anything you do not know."
+          "description": "assert (exit code 1); usage, parse, variable, request, import or capture (2); network or timeout (3); status (4, with --fail); policy (6). New kinds may be added; rely on the exit code for anything you do not know."
         },
         "message": {"type": "string"},
         "file": {"type": "string"},

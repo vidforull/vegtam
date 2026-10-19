@@ -1,5 +1,5 @@
-// Package output defines the JSON documents that run, show, list and
-// import print, and the JSON Schema that describes them. The documents are a
+// Package output defines the JSON documents that run, show, list, import
+// and trust print, and the JSON Schema that describes them. The documents are a
 // contract for scripts and agents: fields are only ever added. Building a
 // document masks every secret value in it.
 package output
@@ -36,13 +36,15 @@ var Schema string
 //   - run <file> and run <dir>: Results, one per request;
 //   - list: Requests;
 //   - import: Import;
+//   - trust: Trust;
 //   - an error that ends a command before any request: Result.Error.
 type Document struct {
 	SchemaVersion int `json:"schema_version"`
 	*Result
-	Results  []*Result `json:"results,omitzero"`
-	Requests []*Listed `json:"requests,omitzero"`
-	Import   *Import   `json:"import,omitempty"`
+	Results  []*Result  `json:"results,omitzero"`
+	Requests []*Listed  `json:"requests,omitzero"`
+	Import   *Import    `json:"import,omitempty"`
+	Trust    []*Trusted `json:"trust,omitzero"`
 }
 
 // Result is the outcome of one request.
@@ -163,6 +165,13 @@ type ImportVariable struct {
 	Name   string   `json:"name"`
 	Status string   `json:"status"` // "secret": the value from the export is in the private files; "unset": no value
 	Files  []string `json:"files"`  // the environment files to check or set it in
+}
+
+// Trusted is a command file and what the trust store says of it.
+type Trusted struct {
+	File   string `json:"file"`
+	Status string `json:"status"`           // "trusted", "changed", "missing", "revoked" or "untrusted"
+	SHA256 string `json:"sha256,omitempty"` // as recorded; absent if untrusted
 }
 
 // Ref returns how to refer to the i-th request of f, counting from 0:

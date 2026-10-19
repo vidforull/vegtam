@@ -1,0 +1,209 @@
+// Package policy holds what a person allows vegtam to do on its own. So
+// far that is running the commands of a command file,
+// http-client.cmd.json: only once a person has trusted the file with
+// "vegtam trust", and only as long as it has not changed since, as direnv
+// does with .envrc files.
+package policy
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+
+	"github.com/vidforull/vegtam/internal/core"
+)
+
+// Status is what the trust store says of a command file.
+type Status string
+
+const (
+	Untrusted Status = "untrusted" // never trusted, or trust revoked
+	Changed   Status = "changed"   // trusted, but its contents have changed since
+	Trusted   Status = "trusted"
+	Missing   Status = "missing" // trusted, but the file is gone
+	Revoked   Status = "revoked" // trusted until just now
+)
+
+// Store is the record of trusted command files: a JSON file mapping the
+// path of each to a SHA-256 of what it runs, readable by its owner only.
+type Store struct {
+	path string
+	err  error // why there is no store
+}
+
+// NewStore returns the store kept in the file at path.
+func NewStore(path string) *Store { return &Store{path: path} }
+
+// DefaultStore returns the store in $XDG_CONFIG_HOME/vegtam/trust.json,
+// or in ~/.config/vegtam/trust.json if XDG_CONFIG_HOME is not set. If
+// neither can be found, the store trusts nothing and cannot be changed.
+func DefaultStore() *Store {
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if !filepath.IsAbs(dir) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return &Store{err: fmt.Errorf("no trust store: %v; set XDG_CONFIG_HOME or HOME", err)}
+		}
+		dir = filepath.Join(home, ".config")
+	}
+	return NewStore(filepath.Join(dir, "vegtam", "trust.json"))
+}
+
+// Path returns the file the store is kept in.
+func (s *Store) Path() string { return s.path }
+
+// Sum returns the SHA-256 of b in hex, as the store records it.
+func Sum(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// Canonical returns the absolute path of file with the symbolic links of
+// its directory resolved, so that one file has one entry however its
+// directory is reached. The name itself stays as it is: a symbolic link
+// named like a command file is an entry of its own, so that a link to a
+// trusted file elsewhere does not borrow its trust.
+func Canonical(file string) (string, error) {
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return "", err
+	}
+	dir, name := filepath.Split(abs)
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		return filepath.Join(real, name), nil
+	}
+	return abs, nil
+}
+
+// Check returns what the store says of the command file at file, a
+// canonical path, whose commands have the SHA-256 sum.
+func (s *Store) Check(file, sum string) (Status, error) {
+	m, err := s.load()
+	if err != nil {
+		return Untrusted, err
+	}
+	switch recorded, ok := m[file]; {
+	case !ok:
+		return Untrusted, nil
+	case recorded != sum:
+		return Changed, nil
+	}
+	return Trusted, nil
+}
+
+// Trust records the command file at file, a canonical path, as trusted
+// with the SHA-256 sum of its commands.
+func (s *Store) Trust(file, sum string) error {
+	m, err := s.load()
+	if err != nil {
+		return err
+	}
+	m[file] = sum
+	return s.save(m)
+}
+
+// Revoke removes the command file at file, a canonical path, from the
+// store, and reports whether it was there.
+func (s *Store) Revoke(file string) (bool, error) {
+	m, err := s.load()
+	if err != nil {
+		return false, err
+	}
+	if _, ok := m[file]; !ok {
+		return false, nil
+	}
+	delete(m, file)
+	return true, s.save(m)
+}
+
+// List returns the recorded files with their SHA-256 sums.
+func (s *Store) List() (map[string]string, error) { return s.load() }
+
+// record is the layout of the store's file.
+type record struct {
+	Trusted map[string]string `json:"trusted"` // canonical path -> SHA-256, hex
+}
+
+func (s *Store) load() (map[string]string, error) {
+	if s.err != nil {
+		return nil, core.Errorf(core.KindPolicy, core.Source{}, "%v", s.err)
+	}
+	fail := func(format string, args ...any) error {
+		return core.Errorf(core.KindPolicy, core.Source{File: s.path}, format, args...)
+	}
+	f, err := os.Open(s.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return map[string]string{}, nil
+	} else if err != nil {
+		return nil, fail("%v", err)
+	}
+	defer f.Close()
+	// Whoever can write the store, or replace it in its directory, can
+	// trust any command.
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, fail("%v", err)
+	}
+	di, err := os.Stat(filepath.Dir(s.path))
+	switch {
+	case err != nil:
+		return nil, fail("%v", err)
+	case !ownedByUser(fi) || !ownedByUser(di):
+		return nil, fail("it or its directory belongs to another user, so it trusts nothing")
+	case fi.Mode().Perm()&0o022 != 0:
+		return nil, fail("others can write it, so it trusts nothing; make it private: chmod 600 %s", s.path)
+	case di.Mode().Perm()&0o022 != 0:
+		return nil, fail("others can write its directory, so it trusts nothing; make it private: chmod 700 %s", filepath.Dir(s.path))
+	}
+	var r record
+	dec := json.NewDecoder(f)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&r); err != nil {
+		return nil, fail("%v", err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fail("data after the record")
+	}
+	if r.Trusted == nil {
+		r.Trusted = map[string]string{}
+	}
+	return r.Trusted, nil
+}
+
+// save writes m to the store's file: to a new file, renamed over the old
+// one, so that a reader never sees half of it.
+func (s *Store) save(m map[string]string) error {
+	fail := func(err error) error { return core.Errorf(core.KindPolicy, core.Source{File: s.path}, "%v", err) }
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(record{m}) // a map of strings always encodes
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fail(err)
+	}
+	tmp, err := os.CreateTemp(dir, ".trust-*.json") // mode 0600
+	if err != nil {
+		return fail(err)
+	}
+	_, err = tmp.Write(b.Bytes())
+	if err2 := tmp.Close(); err == nil {
+		err = err2
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), s.path)
+	}
+	if err != nil {
+		os.Remove(tmp.Name())
+		return fail(err)
+	}
+	return nil
+}
