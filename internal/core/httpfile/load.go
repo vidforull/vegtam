@@ -17,7 +17,7 @@ func Load(paths ...string) (*core.Collection, []error) {
 	c := &core.Collection{}
 	var errs []error
 	for _, path := range paths {
-		files, err := find(path)
+		files, err := Files(path)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -43,7 +43,9 @@ func ParseFile(path string) (*core.File, error) {
 	return Parse(path, src)
 }
 
-func find(root string) ([]string, error) {
+// Files returns the .http files at root, in the order Load parses them:
+// root itself if it is a file.
+func Files(root string) ([]string, error) {
 	fi, err := os.Stat(root)
 	if err != nil {
 		return nil, core.Errorf(core.KindUsage, core.Source{}, "%v", err)

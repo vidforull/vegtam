@@ -13,6 +13,7 @@ const (
 	KindRequest  Kind = "request"  // the resolved request is invalid: URL, header, body file
 	KindNetwork  Kind = "network"  // DNS, connection, TLS, redirects
 	KindTimeout  Kind = "timeout"  // no complete response within the timeout
+	KindStatus   Kind = "status"   // the response status is 400 or above, and the caller counts that as failure
 )
 
 // Error is an error of a known kind, tied to a place in a file when there

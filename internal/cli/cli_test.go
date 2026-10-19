@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"runtime"
 	"strings"
 	"testing"
@@ -60,11 +61,13 @@ func TestUsageErrors(t *testing.T) {
 		{[]string{"version", "extra"}, `vegtam: unknown command "extra" for "vegtam version"`},
 	}
 	for _, tt := range tests {
-		for _, tty := range []bool{true, false} {
+		// Not on a terminal, the error is also a JSON document on stdout.
+		msg, _ := json.Marshal(strings.TrimPrefix(tt.want, "vegtam: "))
+		for tty, wantOut := range map[bool]string{true: "", false: `{"schema_version":1,"error":{"kind":"usage","message":` + string(msg) + "}}\n"} {
 			code, stdout, stderr := runCLI(t, tty, tt.args...)
-			if code != exitUsage || stdout != "" || !strings.HasPrefix(stderr, tt.want+"\n") {
-				t.Errorf("%q (tty %v) = %d, %q, %q; want %d, empty stdout, stderr starting with %q",
-					tt.args, tty, code, stdout, stderr, exitUsage, tt.want)
+			if code != exitUsage || stdout != wantOut || !strings.HasPrefix(stderr, tt.want+"\n") {
+				t.Errorf("%q (tty %v) = %d, %q, %q; want %d, stdout %q, stderr starting with %q",
+					tt.args, tty, code, stdout, stderr, exitUsage, wantOut, tt.want)
 			}
 		}
 	}

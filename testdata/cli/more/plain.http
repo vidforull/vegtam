@@ -1,0 +1,4 @@
+# A request without secrets or a name, in a subdirectory.
+
+GET {{host}}/plain
+Accept: text/plain

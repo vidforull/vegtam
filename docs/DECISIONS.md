@@ -57,3 +57,42 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
 - **Requests by position.** `file.http#2` addresses the second request, so
   requests without `# @name` can be run alone. Names may not be numbers,
   which keeps the two forms apart.
+
+## 2026-10-19: output, exit codes, masking in layers
+
+- **One document, shaped by the argument.** `run file#ref` prints one
+  result; `run file` and `run dir` print `results`, even for a single
+  request. A script knows the shape before running anything, rather than
+  finding out from how many requests matched.
+- **Additive stability.** Every document carries `schema_version`; fields
+  are only added. The JSON Schema is written by hand, with descriptions
+  meant for whoever reads it, and a test checks it against the Go types
+  both ways. Generating it would need either a dependency or a generator
+  that loses the descriptions. Error kinds are open strings, not an enum,
+  so that a new kind does not break validation against an older schema.
+- **Headers as lists, bodies as strings.** Headers are `{name, value}`
+  pairs, as in HAR: they keep order and repeats, which a map loses. A
+  body is a string; one that is not UTF-8 is base64 with `encoding`, so
+  that no byte is lost or replaced.
+- **Errors in the document too.** With JSON output every error is also in
+  stdout, usage errors included, so that a program reads one stream. An
+  error stops only its own request, as one failing package does not stop
+  `go test ./...`; the exit code is the highest among the requests. A
+  file that does not parse is one result, so that `run --dry-run` over a
+  whole collection reports every problem at once.
+- **Masking in three layers.** (1) `exec` errors never hold a secret
+  value: net/http quotes the URL it was sending to, so it is replaced with
+  the masked URL and any value left is masked. (2) `output` builds every
+  document masked. This layer is required, not a convenience: a base64
+  body and a value cut off by `--max-body` cannot be recognised later.
+  (3) Everything the CLI prints, text and JSON, stdout and stderr, goes
+  through the masker of the environment loader once more, so that a
+  missed path still cannot print a value. JSON is masked in its decoded
+  string values, which keeps the document valid; a JSON response body is
+  masked that way too, which catches any escaping a server uses. Every request of a run
+  is resolved before the first is sent, so the masker knows every secret
+  before anything is printed. Masking by value over-masks short values;
+  that is the price of never printing one.
+- **Text for terminals only.** Text output shows control characters in
+  responses and error messages as `\xNN`: what a server sends is
+  untrusted and must not drive the terminal.

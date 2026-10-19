@@ -5,6 +5,7 @@ package httpfile
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/vidforull/vegtam/internal/core"
@@ -22,7 +23,6 @@ var directives = map[string]bool{"assert": true, "capture": true, "tag": true}
 
 var (
 	nameRE     = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-	digitsRE   = regexp.MustCompile(`^[0-9]+$`)
 	bodyFileRE = regexp.MustCompile(`^<\s+(\S.*)$`)
 	handlerRE  = regexp.MustCompile(`^(>|>>|>>!|<>)\s`)
 )
@@ -140,7 +140,7 @@ func (p *parser) setName(n int, name string) error {
 	switch {
 	case !nameRE.MatchString(name):
 		return p.errorf(n, "invalid request name %q: use letters, digits, '.', '_' and '-'", name)
-	case digitsRE.MatchString(name):
+	case isNumber(name):
 		return p.errorf(n, "request name %q is a number; numbers refer to requests by position", name)
 	case p.req != nil && p.req.Name != "":
 		return p.errorf(n, "request already named %q", p.req.Name)
@@ -246,6 +246,13 @@ func (p *parser) checkBody(lines []string, at int) error {
 		}
 	}
 	return nil
+}
+
+// isNumber reports whether name would be taken for a position, as
+// core.File.Find reads it.
+func isNumber(name string) bool {
+	_, err := strconv.Atoi(name)
+	return err == nil
 }
 
 // splitWord splits s at its first run of spaces or tabs.

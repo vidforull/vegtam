@@ -115,6 +115,7 @@ func TestParseErrors(t *testing.T) {
 		{"directive without value", "# @assert\nGET https://example.com", 1, "@assert needs a value"},
 		{"orphan directive", "GET https://example.com\n###\n# @name lost\n", 3, "not followed by a request line"},
 		{"numeric name", "# @name 2\nGET https://example.com", 1, "is a number"},
+		{"negative numeric name", "# @name -1\nGET https://example.com", 1, "is a number"},
 		{"bad name", "# @name a b\nGET https://example.com", 1, "invalid request name"},
 		{"two names", "# @name a\n# @name b\nGET https://example.com", 2, `request already named "a"`},
 		{"body file and more", "POST https://example.com\n\n< ./a.json\nmore", 4, "must be the whole body"},

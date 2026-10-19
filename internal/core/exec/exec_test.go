@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -76,7 +78,7 @@ func TestMaxBody(t *testing.T) {
 		max       int64
 		size      int
 		truncated bool
-	}{{10, 10, true}, {99, 99, true}, {100, 100, false}, {1 << 20, 100, false}} {
+	}{{10, 10, true}, {99, 99, true}, {100, 100, false}, {1 << 20, 100, false}, {math.MaxInt64, 100, false}} {
 		r, err := do(t, Options{MaxBody: tt.max}, prepared("GET", lit(srv.URL), nil))
 		if err != nil || len(r.Body) != tt.size || r.Truncated != tt.truncated {
 			t.Errorf("MaxBody %d: %d bytes, truncated %v, %v; want %d, %v", tt.max, len(r.Body), r.Truncated, err, tt.size, tt.truncated)
@@ -188,6 +190,10 @@ func TestErrors(t *testing.T) {
 			core.KindRequest, `invalid URL http://a b/{{token}}: invalid character " " in host name`},
 		{"line break", prepared("GET", lit("http://example.com"), nil, header("X", lit("a\r\nb"))),
 			core.KindRequest, "header X: the value contains a line break"},
+		{"control character", prepared("GET", lit("http://example.com"), nil, header("X", lit("a\x01b"))),
+			core.KindRequest, "header X: the value contains a line break or another control character"},
+		{"Host", prepared("GET", lit("http://example.com"), nil, header("Host", lit("a/b"))),
+			core.KindRequest, `header Host: invalid host "a/b"`},
 		{"missing secret", prepared("GET", secret("nope"), nil), core.KindVariable, "no secret nope"},
 	}
 	for _, tt := range tests {
@@ -196,6 +202,71 @@ func TestErrors(t *testing.T) {
 			if e, ok := err.(*core.Error); !ok || e.Kind != tt.kind || !strings.Contains(e.Error(), "t.http:1: ") ||
 				!strings.Contains(e.Msg, tt.want) {
 				t.Errorf("error = %v; want %s error with %q", err, tt.kind, tt.want)
+			}
+			// Check finds the same errors, short of sending.
+			wantCheck := tt.kind != core.KindNetwork && tt.kind != core.KindTimeout
+			if err := New(Options{}).Check(tt.p, testSecrets); (err != nil) != wantCheck {
+				t.Errorf("Check = %v, want an error: %v", err, wantCheck)
+			}
+		})
+	}
+}
+
+// net/http quotes the URL in its errors; no secret value may reach a
+// core.Error through it, through a redirect URL or through a host or port.
+func TestErrorsHideSecrets(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer slow.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, closed.URL+"/next?"+r.URL.RawQuery, http.StatusFound)
+	}))
+	defer redirect.Close()
+	query := core.Text{{Text: "/?key="}, {Secret: &core.Secret{Name: "token"}}, {Text: "&k="}, {Secret: &core.Secret{Name: "$env KEY"}}}
+	at := func(base string) core.Text { return append(lit(base), query...) }
+	port := func(v string) secrets { return secrets{"port": v} }
+	base := func(v string) secrets { return secrets{"base": v} }
+	withPort := core.Text{{Text: "http://127.0.0.1:"}, {Secret: &core.Secret{Name: "port"}}}
+	tests := []struct {
+		name    string
+		p       *core.Prepared
+		secrets secrets
+		kind    core.Kind
+		want    string
+	}{
+		{"connection refused", prepared("GET", at(closed.URL), nil), testSecrets, core.KindNetwork,
+			`Get "` + closed.URL + `/?key={{token}}&k={{$env KEY}}": dial tcp`},
+		{"timeout", prepared("GET", at(slow.URL), nil), testSecrets, core.KindTimeout,
+			`Get "` + slow.URL + `/?key={{token}}&k={{$env KEY}}": `},
+		{"redirect", prepared("GET", at(redirect.URL), nil), testSecrets, core.KindNetwork,
+			`Get "` + closed.URL + `/next?key=***&k=***": dial tcp`},
+		{"port when dialling", prepared("GET", withPort, nil), port("99999"), core.KindNetwork, "address ***: invalid port"},
+		{"port in the URL", prepared("GET", withPort, nil), port("8o8o"), core.KindRequest,
+			`invalid URL http://127.0.0.1:{{port}}: invalid port "***" after host`},
+		// A secret base URL: the host and port alone must not show either.
+		{"base URL refused", prepared("GET", append(secret("base"), lit("/v1")...), nil),
+			base(closed.URL), core.KindNetwork, `Get "{{base}}/v1": dial tcp ***: connect: connection refused`},
+		{"base URL with a bad port", prepared("GET", append(secret("base"), lit("/v1")...), nil),
+			base("http://int.example.test:12ab"), core.KindRequest, `invalid URL {{base}}/v1: invalid port "***" after host`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(Options{Timeout: 100 * time.Millisecond, MaxBody: 1}).Do(context.Background(), tt.p, tt.secrets)
+			e, ok := err.(*core.Error)
+			if !ok || e.Kind != tt.kind || !strings.Contains(e.Msg, tt.want) {
+				t.Fatalf("error = %v; want %s error with %q", err, tt.kind, tt.want)
+			}
+			for _, v := range tt.secrets {
+				parts := []string{v}
+				if u, err := url.Parse(v); err == nil && u.Host != "" {
+					parts = append(parts, u.Host, u.Port())
+				}
+				for _, part := range parts {
+					if strings.Contains(e.Error(), part) {
+						t.Errorf("error %q holds %q from the secret value %q", e, part, v)
+					}
+				}
 			}
 		})
 	}

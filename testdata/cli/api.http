@@ -1,0 +1,41 @@
+# Requests for the CLI tests. The tests copy this directory and write the
+# environment files next to it: host is an httptest server, closed the
+# address of one that has been shut down. Each request carries both kinds
+# of secret: {{token}} from the private environment file and
+# {{$env VEGTAM_TEST_KEY}} from the process environment.
+
+### The server echoes the request back
+# @name echo
+# @assert status == 200
+# @tag smoke
+POST {{host}}/echo?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
+Authorization: Bearer {{token}}
+X-Api-Key: {{$env VEGTAM_TEST_KEY}}
+Content-Type: application/json
+
+{"token": "{{token}}", "key": "{{$env VEGTAM_TEST_KEY}}"}
+
+### The same, with status 500
+# @name fail
+GET {{host}}/fail?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
+Authorization: Bearer {{token}}
+
+### Nothing listens there
+# @name refused
+GET {{closed}}/?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
+
+### No response before the timeout
+# @name slow
+GET {{host}}/slow?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
+
+### A body that is not UTF-8, with the secrets in it
+# @name binary
+GET {{host}}/binary?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
+
+### A long body with the secrets at its end
+# @name big
+GET {{host}}/big?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
+
+### A host from the private environment file, where nothing listens
+# @name hidden
+GET {{base}}/?key={{token}}

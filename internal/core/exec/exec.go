@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -66,12 +67,16 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 	start := time.Now()
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, c.netError(p, err)
+		return nil, c.netError(p, s, req.URL.String(), err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, c.opts.MaxBody+1))
+	limit := c.opts.MaxBody
+	if limit < math.MaxInt64 {
+		limit++ // one byte more tells whether the body is longer
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
-		return nil, c.netError(p, err)
+		return nil, c.netError(p, s, req.URL.String(), err)
 	}
 	r := &Response{
 		Proto:    resp.Proto,
@@ -87,11 +92,21 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 	return r, nil
 }
 
+// Check reports the error Do would give p before sending anything: an
+// invalid URL or header, or a secret that cannot be found.
+func (c *Client) Check(p *core.Prepared, s core.Secrets) error {
+	_, _, err := c.build(context.Background(), p, s)
+	return err
+}
+
 // build makes the request that goes on the wire. It also returns the
 // headers that must not follow a redirect to another origin.
 func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets) (*http.Request, []string, error) {
 	src := p.Request.Source
-	fail := func(format string, args ...any) error { return core.Errorf(core.KindRequest, src, format, args...) }
+	var raw string
+	fail := func(format string, args ...any) error {
+		return core.Errorf(core.KindRequest, src, "%s", hide(p, s, raw, fmt.Sprintf(format, args...)))
+	}
 	reveal := func(t core.Text) (string, error) {
 		v, err := t.Reveal(s)
 		if err != nil {
@@ -103,15 +118,15 @@ func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets) (*
 	if err != nil {
 		return nil, nil, err
 	}
-	// Errors name the masked URL: the revealed one may hold secrets.
+	// Messages name raw; fail shows it masked.
 	u, err := url.Parse(raw)
 	switch {
 	case err != nil:
-		return nil, nil, fail("invalid URL %s: %v", p.URL.Masked(), errors.Unwrap(err))
+		return nil, nil, fail("invalid URL %s: %v", raw, errors.Unwrap(err))
 	case u.Scheme != "http" && u.Scheme != "https":
-		return nil, nil, fail("URL %s: want an http or https URL", p.URL.Masked())
+		return nil, nil, fail("URL %s: want an http or https URL", raw)
 	case u.Host == "":
-		return nil, nil, fail("URL %s has no host", p.URL.Masked())
+		return nil, nil, fail("URL %s has no host", raw)
 	}
 	body, err := reveal(p.Body)
 	if err != nil {
@@ -134,8 +149,13 @@ func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets) (*
 		if err != nil {
 			return nil, nil, err
 		}
-		if strings.ContainsAny(v, "\r\n\x00") {
-			return nil, nil, fail("header %s: the value contains a line break or NUL", h.Name)
+		// What net/http would refuse when sending, refused here, so that a
+		// dry run finds it too.
+		if strings.ContainsFunc(v, func(r rune) bool { return r < ' ' && r != '\t' || r == 0x7f }) {
+			return nil, nil, fail("header %s: the value contains a line break or another control character", h.Name)
+		}
+		if strings.EqualFold(h.Name, "Host") && strings.ContainsFunc(v, func(r rune) bool { return !validHost(r) }) {
+			return nil, nil, fail("header Host: invalid host %q", v)
 		}
 		if h.Value.HasSecret() {
 			sensitive = append(sensitive, h.Name)
@@ -183,9 +203,69 @@ func origin(u *url.URL) string {
 	return u.Scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
 }
 
-func (c *Client) netError(p *core.Prepared, err error) error {
+// netError classifies err, an error from sending p to the URL wire.
+func (c *Client) netError(p *core.Prepared, s core.Secrets, wire string, err error) error {
+	msg := hide(p, s, wire, err.Error())
 	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
-		return core.Errorf(core.KindTimeout, p.Request.Source, "no complete response within %s: %v", c.opts.Timeout, err)
+		return core.Errorf(core.KindTimeout, p.Request.Source, "no complete response within %s: %s", c.opts.Timeout, msg)
 	}
-	return core.Errorf(core.KindNetwork, p.Request.Source, "%v", err)
+	return core.Errorf(core.KindNetwork, p.Request.Source, "%s", msg)
+}
+
+// validHost reports whether r may appear in a Host header, as net/http
+// checks it.
+func validHost(r rune) bool {
+	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || strings.ContainsRune("!$%&'()*+,-.:;=[]_~", r)
+}
+
+// hide keeps the secret values of p out of msg, an error message. net/http
+// quotes the URL it was sending to, wire, and may name a host, port or
+// redirect URL taken from a secret: the URL is replaced with p's masked
+// URL, and any value left is masked. If a secret is part of the host, the
+// host and port are masked wherever they appear on their own.
+func hide(p *core.Prepared, s core.Secrets, wire, msg string) string {
+	// The masked URL goes in last, so that masking the host leaves it be.
+	const mark = "\x00url\x00"
+	masked := p.URL.Masked()
+	if wire != "" {
+		msg = strings.ReplaceAll(msg, wire, mark)
+	}
+	var values []string
+	if a := authority(wire); a != "" && a != authority(masked) {
+		values = append(values, a)
+		if i := strings.LastIndex(a, ":"); i > 0 && !strings.HasSuffix(a, "]") {
+			values = append(values, strings.Trim(a[:i], "[]"), a[i:])
+		}
+	}
+	texts := []core.Text{p.URL, p.Body}
+	for _, h := range p.Headers {
+		texts = append(texts, h.Value)
+	}
+	for _, t := range texts {
+		for _, seg := range t {
+			if seg.Secret == nil {
+				continue
+			}
+			if v, err := s.SecretValue(seg.Secret.Name); err == nil {
+				values = append(values, v)
+			}
+		}
+	}
+	return strings.ReplaceAll(core.NewMasker(values).Mask(msg), mark, masked)
+}
+
+// authority returns the host and port of the URL u, written as a string
+// that may not parse.
+func authority(u string) string {
+	_, rest, ok := strings.Cut(u, "://")
+	if !ok {
+		return ""
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		rest = rest[i+1:]
+	}
+	return rest
 }

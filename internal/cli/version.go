@@ -34,7 +34,7 @@ OS and architecture.`,
 				cfg.writeJSON(info)
 				return nil
 			}
-			fmt.Fprintf(cfg.Stdout, "%s %s (%s, %s/%s)\n", info.Name, info.Version, info.Go, info.OS, info.Arch)
+			fmt.Fprintf(cfg.out, "%s %s (%s, %s/%s)\n", info.Name, info.Version, info.Go, info.OS, info.Arch)
 			return nil
 		},
 	}
