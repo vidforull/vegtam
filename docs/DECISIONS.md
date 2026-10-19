@@ -96,3 +96,44 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
 - **Text for terminals only.** Text output shows control characters in
   responses and error messages as `\xNN`: what a server sends is
   untrusted and must not drive the terminal.
+
+## 2026-10-19: importing from Postman
+
+- **A .http file per folder.** A folder's own requests go to one file
+  named after it, its subfolders to a directory of the same name next to
+  it; a collection is a directory. A .http file holds several requests,
+  so a folder stays one unit (`run products.http`) in Postman's order,
+  and the tree is no deeper than the collection. A file per request
+  would give as many files as requests and lose the order within a
+  folder.
+- **Environment files per collection.** vegtam uses the nearest file of
+  each kind and does not combine it with files higher up, so a shared
+  file at the top could not hold collection variables. Each collection
+  directory gets its own two files with every Postman environment in
+  them, as any environment applies to any collection in Postman; the
+  directory runs and moves on its own. The private file is written even
+  when empty, so that one in a directory above cannot take its place. An export without environments
+  gets an empty `default`, because `-e` needs one to select.
+- **Secret by name, across the export.** A variable that Postman marks
+  as secret, that is named like a secret, or that auth refers to is
+  secret everywhere in the export, and all its values go to the private
+  file. vegtam ranks private `$shared` above the public environment, so a
+  variable split between the two files could take a collection value
+  over an environment one; kept in one file, Postman's order of globals,
+  collection and environment holds. Literal values where secrets go
+  (auth, and headers, query parameters, form fields and JSON body fields
+  named like secrets), including text around placeholders, move to new
+  variables, the same value to the same variable. Like masking, detection by name rather catches too much than
+  too little; it cannot see a secret under an ordinary name.
+- **Parsed back, else commented out.** Every request goes through the
+  parser that will read it. One that would not read back as meant stays
+  in its file as comments with the reason, so that nothing is lost, the
+  file parses, and the report counts it.
+- **Scripts are reported, not converted.** Running Postman's JavaScript
+  would take an engine and would run code from an export; translating it
+  would be guesswork. Only the status a test checks for carries over,
+  as `# @assert`.
+- **Writing.** The importer only builds files; the command writes them
+  through an `os.Root`, so neither a name from the export nor a symbolic
+  link in the output directory leads outside `-o`. Without `--force` it
+  writes nothing if any file exists, rather than half an import.

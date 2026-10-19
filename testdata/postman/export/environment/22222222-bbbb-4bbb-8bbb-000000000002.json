@@ -1,0 +1,14 @@
+{
+  "id": "22222222-bbbb-4bbb-8bbb-000000000002",
+  "name": "Prod EU",
+  "values": [
+    {"key": "base_url", "value": "https://shop.example.test/api", "type": "default", "enabled": true},
+    {"key": "token", "value": "", "type": "secret", "enabled": true},
+    {"key": "crm_url", "value": "https://crm.example.test", "type": "default", "enabled": true},
+    {"key": "crm_token", "value": "", "type": "default", "enabled": true},
+    {"key": "crm key", "value": "", "type": "default", "enabled": true},
+    {"key": "username", "value": "", "type": "default", "enabled": true},
+    {"key": "password", "value": "", "type": "secret", "enabled": true}
+  ],
+  "_postman_variable_scope": "environment"
+}

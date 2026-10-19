@@ -1,0 +1,30 @@
+### Create order
+# @name create-order
+POST {{base_url}}/orders
+Authorization: Bearer {{token}}
+Content-Type: application/x-www-form-urlencoded
+
+item=sku-1&qty=2&note=gift+wrap+%26+bow&password={{shop_api_password}}&user={{username}}
+
+### Upload receipt
+# @name upload-receipt
+# The formdata body is not imported
+POST {{base_url}}/orders/7/receipt
+Authorization: Bearer {{token}}
+
+### Search orders (GraphQL)
+# @name search-orders-graphql
+# The graphql body is not imported
+POST {{base_url}}/graphql
+Authorization: Bearer {{token}}
+
+### Log in
+# @name log-in
+POST {{base_url}}/login
+Authorization: Basic {{shop_api_basic}}
+
+### Log in as user
+# @name log-in-as-user
+# Basic auth: set shop_api_basic-2 to the base64 encoding of username:password (in Postman, from {{username}} and {{password}})
+POST {{base_url}}/login
+Authorization: Basic {{shop_api_basic-2}}

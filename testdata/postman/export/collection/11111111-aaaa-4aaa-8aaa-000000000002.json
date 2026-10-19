@@ -1,0 +1,44 @@
+{
+  "info": {
+    "_postman_id": "11111111-aaaa-4aaa-8aaa-000000000002",
+    "name": "CRM",
+    "schema": "https://schema.getpostman.com/json/collection/v2.0.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": {"token": "{{crm_token}}"}
+  },
+  "item": [
+    {
+      "name": "Contacts",
+      "item": [
+        {
+          "name": "List contacts",
+          "request": {
+            "method": "GET",
+            "header": "Accept: application/json\nX-Trace: on\n",
+            "url": "{{crm_url}}/contacts"
+          }
+        },
+        {
+          "name": "Export contacts",
+          "request": {
+            "auth": {
+              "type": "apikey",
+              "apikey": {"key": "api_key", "value": "{{crm key}}", "in": "query"}
+            },
+            "method": "GET",
+            "url": "{{crm_url}}/contacts/export?format=csv#top"
+          }
+        },
+        {
+          "name": "Find contact",
+          "request": {
+            "method": "GET",
+            "url": "{{crm_url}}/contacts/search?q=Ada Lovelace&owner={{owner_id}}"
+          }
+        }
+      ]
+    }
+  ]
+}

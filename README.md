@@ -121,10 +121,46 @@ vegtam schema                         # the JSON Schema of the JSON output
 
 `vegtam --help` lists the exit codes.
 
+## Import from Postman
+
+`import postman` turns a Postman export, one collection or the directory
+of a data export with its environments, into `.http` files, one per
+folder, and environment files. Values that look like secrets go to the
+private environment file rather than to a `.http` file:
+
+```console
+$ vegtam import postman postman-export -o api
+Imported 25 of 30 requests from 2 collections into api, with 2 environments: dev, prod-eu.
+
+request: 5 requests written commented out
+  api/shop-api/shop-api.http#properties: method PROPFIND is not supported
+  api/shop-api/shop-api.http#release-notes: a line of the body starts with ###, which would end the request
+  api/shop-api/shop-api.http#draft: the request has no URL
+...
+
+body: 3 bodies and form fields not imported
+  api/shop-api/zakazy.http#create-order: disabled form field coupon
+  api/shop-api/zakazy.http#upload-receipt: formdata body
+  api/shop-api/zakazy.http#search-orders-graphql: graphql body
+...
+
+Variables to check or set:
+  id (unset): it has no value; set it in api/shop-api/http-client.env.json
+  token (secret): check its value in api/shop-api/http-client.private.env.json
+...
+
+Keep the http-client.private.env.json files out of version control: they hold the secrets.
+
+Check the requests without sending them: vegtam run api --dry-run -e dev
+```
+
+Scripts are not imported; [docs/FORMAT.md](docs/FORMAT.md#importing-from-postman)
+lists what is and what is not.
+
 ## Documentation
 
 - [docs/FORMAT.md](docs/FORMAT.md): the supported `.http` subset,
-  environment files and secrets.
+  environment files, secrets, and importing from Postman.
 - [docs/AUTOMATION.md](docs/AUTOMATION.md): driving vegtam from scripts
   and agents: the JSON output and its stability, exit codes, dry runs,
   limits and secret masking.

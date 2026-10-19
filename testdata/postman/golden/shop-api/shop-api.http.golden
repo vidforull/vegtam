@@ -1,0 +1,77 @@
+### Health
+# @name health
+GET {{base_url}}/health
+
+### Health
+# @name health-2
+GET https://shop.example.test/health
+Authorization: Bearer {{token}}
+
+### Ping
+# @name ping
+GET {{base_url}}/ping?at={{$timestamp}}&id={{$guid}}
+X-Request-Id: {{$guid}}
+Authorization: Bearer {{token}}
+
+### Legacy token
+# @name legacy-token
+# Authorization from the Postman bearer auth is not added: the request sets its own
+GET {{base_url}}/legacy
+Authorization: Bearer {{shop_api_token}}
+
+### 123
+# @name request-123
+GET {{base_url}}/numbers/123
+Authorization: Bearer {{token}}
+
+### Properties
+# Not imported: method PROPFIND is not supported
+## # @name properties
+## PROPFIND {{base_url}}/files/
+## Authorization: Bearer {{token}}
+## Content-Type: text/plain
+##
+## @prefix ex: <http://example.test/ns#> .
+## <propfind/>
+
+### Release notes
+# Not imported: a line of the body starts with ###, which would end the request
+## # @name release-notes
+## POST {{base_url}}/notes
+## Authorization: Bearer {{token}}
+## Content-Type: text/plain
+##
+## Release 1.2
+## ### Fixed
+## - the cart
+
+### Partner
+# @name partner
+# Postman oauth2 auth is not imported: add the header it sends
+GET {{base_url}}/partner
+
+### Sign up
+# @name sign-up
+POST {{base_url}}/signup
+Content-Type: application/json; charset=utf-8
+Authorization: Bearer {{token}}
+
+{
+  "login": "ada",
+  "password": "{{shop_api_password-2}}",
+  "client_secret": "{{shop_api_client_secret}}",
+  "page": {{page_size}},
+  "profile": {"api_key": "{{shop_api_api_key}}", "tokens": ["{{shop_api_tokens}}"], "token": "{{token}}", "note": "{not json}"},
+  "remember": true
+}
+
+### Status
+# @name status
+GET http://shop.example.test:8080/status
+Authorization: Bearer {{token}}
+
+### Draft
+# Not imported: the request has no URL
+## # @name draft
+## GET
+## Authorization: Bearer {{token}}

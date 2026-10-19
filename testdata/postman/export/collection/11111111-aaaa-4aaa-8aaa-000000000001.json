@@ -1,0 +1,662 @@
+{
+  "info": {
+    "_postman_id": "11111111-aaaa-4aaa-8aaa-000000000001",
+    "name": "Shop API",
+    "description": "A made-up shop, for tests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.request.headers.add({key: 'X-Request-Id', value: pm.variables.replaceIn('{{$guid}}')});"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          ""
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://shop.example.test/api",
+      "type": "string"
+    },
+    {
+      "key": "api key",
+      "value": "fake-shop-key",
+      "type": "string"
+    },
+    {
+      "key": "page_size",
+      "value": 20,
+      "type": "number"
+    },
+    {
+      "key": "legacy",
+      "value": "x",
+      "disabled": true
+    },
+    {
+      "key": "door",
+      "value": "fake-door-value",
+      "type": "string"
+    },
+    {
+      "key": "api_root",
+      "value": "{{base_url}}/v2",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Products",
+      "item": [
+        {
+          "name": "List products",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Debug",
+                "value": "1",
+                "disabled": true
+              },
+              {
+                "key": "X-Old-Key",
+                "value": "fake-disabled-key",
+                "disabled": true
+              },
+              {
+                "key": "User-Agent",
+                "value": "{{user_agent}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products?limit={{page_size}}&access_token=fake-query-token",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "{{page_size}}"
+                },
+                {
+                  "key": "access_token",
+                  "value": "fake-query-token"
+                }
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "OK",
+              "status": "OK",
+              "code": 200,
+              "body": "[]"
+            }
+          ]
+        },
+        {
+          "name": "Get product",
+          "request": {
+            "method": "get",
+            "header": [],
+            "url": {
+              "protocol": "https",
+              "host": [
+                "shop",
+                "example",
+                "test"
+              ],
+              "path": [
+                "api",
+                "products",
+                ":id"
+              ],
+              "query": [
+                {
+                  "key": "fields",
+                  "value": "name,price"
+                },
+                {
+                  "key": "debug",
+                  "value": "1",
+                  "disabled": true
+                }
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "42"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Admin",
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "key",
+                "value": "X-Admin-Key",
+                "type": "string"
+              },
+              {
+                "key": "value",
+                "value": "fake-admin-key",
+                "type": "string"
+              },
+              {
+                "key": "in",
+                "value": "header",
+                "type": "string"
+              }
+            ]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('admin', () => pm.expect(pm.response.json().ok).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "item": [
+            {
+              "name": "Create product",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+                      "pm.environment.set('product_id', pm.response.json().id);"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "body": {
+                  "mode": "raw",
+                  "raw": "\r\n{\r\n  \"name\": \"Mug\",\r\n  \"price\": 12.5\r\n}\r\n",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": "{{base_url}}/admin/products"
+              }
+            },
+            {
+              "name": "Delete product",
+              "request": {
+                "method": "DELETE",
+                "url": {
+                  "raw": "{{base_url}}/admin/products/:id",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "products",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": ""
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Заказы",
+      "item": [
+        {
+          "name": "Create order",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "item",
+                  "value": "sku-1",
+                  "type": "text"
+                },
+                {
+                  "key": "qty",
+                  "value": "2",
+                  "type": "text"
+                },
+                {
+                  "key": "note",
+                  "value": "gift wrap & bow",
+                  "type": "text"
+                },
+                {
+                  "key": "password",
+                  "value": "fake-order-pass",
+                  "type": "text"
+                },
+                {
+                  "key": "coupon",
+                  "value": "SAVE10",
+                  "type": "text",
+                  "disabled": true
+                },
+                {
+                  "key": "user",
+                  "value": "{{username}}",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": "{{base_url}}/orders"
+          }
+        },
+        {
+          "name": "Upload receipt",
+          "request": {
+            "method": "POST",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "order",
+                  "value": "7",
+                  "type": "text"
+                },
+                {
+                  "key": "receipt",
+                  "type": "file",
+                  "src": "/tmp/receipt.pdf"
+                }
+              ]
+            },
+            "url": "{{base_url}}/orders/7/receipt"
+          }
+        },
+        {
+          "name": "Search orders (GraphQL)",
+          "request": {
+            "method": "POST",
+            "body": {
+              "mode": "graphql",
+              "graphql": {
+                "query": "{ orders { id } }",
+                "variables": ""
+              }
+            },
+            "url": "{{base_url}}/graphql"
+          }
+        },
+        {
+          "name": "Log in",
+          "request": {
+            "auth": {
+              "type": "basic",
+              "basic": [
+                {
+                  "key": "username",
+                  "value": "demo",
+                  "type": "string"
+                },
+                {
+                  "key": "password",
+                  "value": "fake-basic-pass",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "url": "{{base_url}}/login"
+          }
+        },
+        {
+          "name": "Log in as user",
+          "request": {
+            "auth": {
+              "type": "basic",
+              "basic": [
+                {
+                  "key": "username",
+                  "value": "{{username}}",
+                  "type": "string"
+                },
+                {
+                  "key": "password",
+                  "value": "{{password}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "url": "{{base_url}}/login"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "protocolProfileBehavior": {
+        "disableBodyPruning": true,
+        "followRedirects": false
+      },
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/health"
+      }
+    },
+    {
+      "name": "Health",
+      "request": "https://shop.example.test/health"
+    },
+    {
+      "name": "Ping",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Request-Id",
+            "value": "{{ $guid }}"
+          }
+        ],
+        "url": "{{base_url}}/ping?at={{$timestamp}}&id={{$guid}}"
+      }
+    },
+    {
+      "name": "Legacy token",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer fake-legacy-token"
+          }
+        ],
+        "url": "{{base_url}}/legacy"
+      }
+    },
+    {
+      "name": "123",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/numbers/123"
+      }
+    },
+    {
+      "name": "Properties",
+      "request": {
+        "method": "PROPFIND",
+        "url": "{{base_url}}/files/",
+        "body": {
+          "mode": "raw",
+          "raw": "@prefix ex: <http://example.test/ns#> .\n<propfind/>"
+        }
+      }
+    },
+    {
+      "name": "Release notes",
+      "request": {
+        "method": "POST",
+        "body": {
+          "mode": "raw",
+          "raw": "Release 1.2\n### Fixed\n- the cart"
+        },
+        "url": "{{base_url}}/notes"
+      }
+    },
+    {
+      "name": "Partner",
+      "request": {
+        "auth": {
+          "type": "oauth2",
+          "oauth2": [
+            {
+              "key": "grant_type",
+              "value": "client_credentials",
+              "type": "string"
+            },
+            {
+              "key": "accessTokenUrl",
+              "value": "https://auth.example.test/token",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "url": "{{base_url}}/partner"
+      }
+    },
+    {
+      "name": "Sign up",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"login\": \"ada\",\n  \"password\": \"fake-json-pass\",\n  \"client_secret\": \"fake-\\\"quoted\\\"-secret\",\n  \"page\": {{page_size}},\n  \"profile\": {\"api_key\": \"fake-json-key\", \"tokens\": [\"fake-token-x\"], \"token\": \"{{token}}\", \"note\": \"{not json}\"},\n  \"remember\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{base_url}}/signup"
+      }
+    },
+    {
+      "name": "Status",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "shop.example.test:8080/status",
+          "host": [
+            "shop",
+            "example",
+            "test"
+          ],
+          "port": "8080",
+          "path": [
+            "status"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Draft",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": null
+      }
+    },
+    {
+      "name": "Edge cases",
+      "item": [
+        {
+          "name": "Loose JSON",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/loose",
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  // a comment with \"quotes\"\n  \"password\": \"fake-trailing\",\n  \"api_keys\": [\"fake-arr\", 9070605040302010],\n  \"credentials\": {\"pass\": \"fake-nested\", \"pin\": 8070605040302019},\n  \"api_key\": 7060504030201908,\n  \"token\": {{unquoted_token}},\n  \"secret\": \"{{x}}fake-mixed\",\n}"
+            }
+          }
+        },
+        {
+          "name": "Mixed basic",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/mixed",
+            "auth": {
+              "type": "basic",
+              "basic": [
+                {
+                  "key": "username",
+                  "value": "{{username}}"
+                },
+                {
+                  "key": "password",
+                  "value": "fake-basic-mixed"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Digest",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/digest",
+            "auth": {
+              "type": "digest",
+              "digest": [
+                {
+                  "key": "username",
+                  "value": "ada"
+                },
+                {
+                  "key": "password",
+                  "value": "{{door}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Cookie",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/cookie?token=fake-q-{{suffix}}",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "sid=fake-cookie-sid; theme={{theme}}"
+              }
+            ]
+          }
+        },
+        {
+          "name": "Header with a line break",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/split",
+            "header": [
+              {
+                "key": "X-Note",
+                "value": "v\nDELETE https://other.example.test/everything"
+              }
+            ]
+          }
+        },
+        {
+          "name": "Header like a directive",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/tagged",
+            "header": [
+              {
+                "key": "@tag smoke",
+                "value": "x",
+                "disabled": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Archive",
+      "item": []
+    },
+    {
+      "name": "Shop API",
+      "item": [
+        {
+          "name": "Version",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Shop-Key",
+                "value": "{{api key}}"
+              }
+            ],
+            "url": "{{base_url}}/version"
+          }
+        }
+      ]
+    }
+  ]
+}

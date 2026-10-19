@@ -1,0 +1,377 @@
+{
+  "source": "../../../testdata/postman/export",
+  "output": "out",
+  "collections": 2,
+  "requests": 30,
+  "imported": 25,
+  "environments": [
+    "dev",
+    "prod-eu"
+  ],
+  "files": [
+    "out/crm/contacts.http",
+    "out/crm/http-client.env.json",
+    "out/crm/http-client.private.env.json",
+    "out/shop-api/edge-cases.http",
+    "out/shop-api/http-client.env.json",
+    "out/shop-api/http-client.private.env.json",
+    "out/shop-api/products.http",
+    "out/shop-api/products/admin.http",
+    "out/shop-api/shop-api-2.http",
+    "out/shop-api/shop-api.http",
+    "out/shop-api/zakazy.http"
+  ],
+  "skipped": [
+    {
+      "category": "file",
+      "reason": "not a Postman collection, environment or globals file",
+      "where": "../../../testdata/postman/export/archive.json"
+    },
+    {
+      "category": "variable",
+      "reason": "variable \"crm key\" is renamed crm_key",
+      "where": "out"
+    },
+    {
+      "category": "variable",
+      "reason": "variable \"api key\" is renamed api_key",
+      "where": "out"
+    },
+    {
+      "category": "script",
+      "reason": "collection pre-request script",
+      "where": "out/shop-api"
+    },
+    {
+      "category": "header",
+      "reason": "disabled header X-Debug",
+      "where": "out/shop-api/products.http#list-products"
+    },
+    {
+      "category": "header",
+      "reason": "disabled header X-Old-Key",
+      "where": "out/shop-api/products.http#list-products"
+    },
+    {
+      "category": "script",
+      "reason": "test script",
+      "where": "out/shop-api/products.http#list-products"
+    },
+    {
+      "category": "example",
+      "reason": "1 saved response(s)",
+      "where": "out/shop-api/products.http#list-products"
+    },
+    {
+      "category": "script",
+      "reason": "folder test script",
+      "where": "out/shop-api/products/admin.http"
+    },
+    {
+      "category": "script",
+      "reason": "test script",
+      "where": "out/shop-api/products/admin.http#create-product"
+    },
+    {
+      "category": "body",
+      "reason": "disabled form field coupon",
+      "where": "out/shop-api/zakazy.http#create-order"
+    },
+    {
+      "category": "body",
+      "reason": "formdata body",
+      "where": "out/shop-api/zakazy.http#upload-receipt"
+    },
+    {
+      "category": "body",
+      "reason": "graphql body",
+      "where": "out/shop-api/zakazy.http#search-orders-graphql"
+    },
+    {
+      "category": "setting",
+      "reason": "request settings: followRedirects",
+      "where": "out/shop-api/shop-api.http#health"
+    },
+    {
+      "category": "variable",
+      "reason": "Postman dynamic variable {{$timestamp}} is not supported",
+      "where": "out/shop-api/shop-api.http#ping"
+    },
+    {
+      "category": "variable",
+      "reason": "Postman dynamic variable {{$guid}} is not supported",
+      "where": "out/shop-api/shop-api.http#ping"
+    },
+    {
+      "category": "request",
+      "reason": "method PROPFIND is not supported",
+      "where": "out/shop-api/shop-api.http#properties"
+    },
+    {
+      "category": "request",
+      "reason": "a line of the body starts with ###, which would end the request",
+      "where": "out/shop-api/shop-api.http#release-notes"
+    },
+    {
+      "category": "auth",
+      "reason": "oauth2 auth",
+      "where": "out/shop-api/shop-api.http#partner"
+    },
+    {
+      "category": "request",
+      "reason": "the request has no URL",
+      "where": "out/shop-api/shop-api.http#draft"
+    },
+    {
+      "category": "auth",
+      "reason": "digest auth",
+      "where": "out/shop-api/edge-cases.http#digest"
+    },
+    {
+      "category": "request",
+      "reason": "expected a header \"Name: value\", got \"DELETE https://other.example.test/everyt...\" (a blank line must separate the body)",
+      "where": "out/shop-api/edge-cases.http#header-with-a-line-break"
+    },
+    {
+      "category": "header",
+      "reason": "disabled header @tag smoke",
+      "where": "out/shop-api/edge-cases.http#header-like-a-directive"
+    },
+    {
+      "category": "request",
+      "reason": "a comment would be read as a directive",
+      "where": "out/shop-api/edge-cases.http#header-like-a-directive"
+    },
+    {
+      "category": "variable",
+      "reason": "the value of api_root refers to {{base_url}}, but vegtam does not resolve placeholders in values",
+      "where": "out"
+    }
+  ],
+  "variables": [
+    {
+      "name": "api_key",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "crm_key",
+      "status": "secret",
+      "files": [
+        "out/crm/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "crm_token",
+      "status": "secret",
+      "files": [
+        "out/crm/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "id",
+      "status": "unset",
+      "files": [
+        "out/shop-api/http-client.env.json"
+      ]
+    },
+    {
+      "name": "owner_id",
+      "status": "unset",
+      "files": [
+        "out/crm/http-client.env.json"
+      ]
+    },
+    {
+      "name": "password",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_access_token",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_api_key",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_api_key-2",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_api_keys",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_api_keys-2",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_basic",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_basic-2",
+      "status": "unset",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_basic-3",
+      "status": "unset",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_client_secret",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_cookie",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_pass",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_password",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_password-2",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_password-3",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_pin",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_secret",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_token",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_token-2",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_tokens",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "shop_api_x_admin_key",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "suffix",
+      "status": "unset",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "theme",
+      "status": "unset",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "token",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "unquoted_token",
+      "status": "unset",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "username",
+      "status": "secret",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    },
+    {
+      "name": "x",
+      "status": "unset",
+      "files": [
+        "out/shop-api/http-client.private.env.json"
+      ]
+    }
+  ]
+}

@@ -1,5 +1,5 @@
-// Package output defines the JSON documents that run, show and list
-// print, and the JSON Schema that describes them. The documents are a
+// Package output defines the JSON documents that run, show, list and
+// import print, and the JSON Schema that describes them. The documents are a
 // contract for scripts and agents: fields are only ever added. Building a
 // document masks every secret value in it.
 package output
@@ -33,12 +33,14 @@ var Schema string
 //   - run <file>#<ref> and show: the fields of Result;
 //   - run <file> and run <dir>: Results, one per request;
 //   - list: Requests;
+//   - import: Import;
 //   - an error that ends a command before any request: Result.Error.
 type Document struct {
 	SchemaVersion int `json:"schema_version"`
 	*Result
 	Results  []*Result `json:"results,omitzero"`
 	Requests []*Listed `json:"requests,omitzero"`
+	Import   *Import   `json:"import,omitempty"`
 }
 
 // Result is the outcome of one request.
@@ -110,6 +112,36 @@ type Listed struct {
 type Directive struct {
 	Kind  string `json:"kind"`
 	Value string `json:"value"`
+}
+
+// Import is the report of an import: what was converted, what was not
+// and why, and which variables to check or set before running the
+// requests.
+type Import struct {
+	Source       string           `json:"source"`
+	Output       string           `json:"output"`
+	Collections  int              `json:"collections"`
+	Requests     int              `json:"requests"` // in the export
+	Imported     int              `json:"imported"` // written as requests; the rest are commented out
+	Environments []string         `json:"environments"`
+	Files        []string         `json:"files"`
+	Skipped      []Skipped        `json:"skipped"`
+	Variables    []ImportVariable `json:"variables"`
+}
+
+// Skipped is a part of an export that was not imported, or not as it was.
+type Skipped struct {
+	Category string `json:"category"` // file, request, body, auth, script, header, variable, example or setting
+	Reason   string `json:"reason"`
+	Where    string `json:"where"` // file#name of the request; a file or directory otherwise
+}
+
+// ImportVariable is a variable the imported requests use that needs a
+// look before they run.
+type ImportVariable struct {
+	Name   string   `json:"name"`
+	Status string   `json:"status"` // "secret": the value from the export is in the private files; "unset": no value
+	Files  []string `json:"files"`  // the environment files to check or set it in
 }
 
 // Ref returns how to refer to the i-th request of f, counting from 0:

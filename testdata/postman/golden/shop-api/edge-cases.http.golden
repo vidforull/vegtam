@@ -1,0 +1,47 @@
+### Loose JSON
+# @name loose-json
+POST {{base_url}}/loose
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  // a comment with "quotes"
+  "password": "{{shop_api_password-3}}",
+  "api_keys": ["{{shop_api_api_keys}}", {{shop_api_api_keys-2}}],
+  "credentials": {"pass": "{{shop_api_pass}}", "pin": {{shop_api_pin}}},
+  "api_key": {{shop_api_api_key-2}},
+  "token": {{unquoted_token}},
+  "secret": "{{x}}{{shop_api_secret}}",
+}
+
+### Mixed basic
+# @name mixed-basic
+# Basic auth: set shop_api_basic-3 to the base64 encoding of username:password (in Postman, from {{username}})
+GET {{base_url}}/mixed
+Authorization: Basic {{shop_api_basic-3}}
+
+### Digest
+# @name digest
+# Postman digest auth is not imported: add the header it sends
+GET {{base_url}}/digest
+
+### Cookie
+# @name cookie
+GET {{base_url}}/cookie?token={{shop_api_token-2}}{{suffix}}
+Cookie: {{shop_api_cookie}}{{theme}}
+Authorization: Bearer {{token}}
+
+### Header with a line break
+# Not imported: expected a header "Name: value", got "DELETE https://other.example.test/everyt..." (a blank line must separate the body)
+## # @name header-with-a-line-break
+## GET {{base_url}}/split
+## X-Note: v
+## DELETE https://other.example.test/everything
+## Authorization: Bearer {{token}}
+
+### Header like a directive
+# Not imported: a comment would be read as a directive
+## # @name header-like-a-directive
+## GET {{base_url}}/tagged
+## # @tag smoke: x
+## Authorization: Bearer {{token}}

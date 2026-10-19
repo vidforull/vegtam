@@ -14,8 +14,8 @@ vegtam run api/ -e dev --fail             # send everything, fail on HTTP errors
 
 ## Output
 
-When stdout is not a terminal, or with `--json`, `run`, `show` and `list`
-print one JSON document to stdout, followed by a newline. On a terminal
+When stdout is not a terminal, or with `--json`, `run`, `show`, `list`
+and `import` print one JSON document to stdout, followed by a newline. On a terminal
 the output is text for people, and `--json` prints the same document
 indented. Nothing else is written to stdout; diagnostics go to stderr.
 
@@ -29,6 +29,7 @@ command and on its argument, never on what happens at run time:
 | `run <file>`, `run <dir>` | `results`: one result per request, in file order |
 | `show <file>#<ref>` | one result with `ref` and `request` only |
 | `list <file>`, `list <dir>` | `requests` |
+| `import postman <export> -o <dir>` | `import`: the report of the import |
 | an error that ends a command before any request | `error` only |
 
 A result for `run api/users.http#list -e dev` looks like this (shortened):
@@ -84,7 +85,7 @@ by its exit code.
 |---|---|
 | 0 | success |
 | 1 | reserved: an assertion failed |
-| 2 | bad arguments, a `.http` or environment file that does not parse, an unresolved variable, or an invalid request |
+| 2 | bad arguments, a `.http` or environment file that does not parse, an unresolved variable, an invalid request, or an export that cannot be imported |
 | 3 | network or TLS error, or timeout |
 | 4 | HTTP status 400 or above, with `run --fail` |
 | 5 | reserved: the request needs confirmation |
@@ -101,6 +102,7 @@ output. With several requests, the exit code is the highest among them.
 | `parse` | 2 | a `.http` or environment file outside the supported format |
 | `variable` | 2 | a placeholder without a value |
 | `request` | 2 | a resolved request that cannot be sent: URL, header, body file |
+| `import` | 2 | an export that cannot be read: not a collection, not JSON, no collections in a directory |
 | `network` | 3 | DNS, connection, TLS, redirects |
 | `timeout` | 3 | no complete response within `--timeout` |
 | `status` | 4 | HTTP status 400 or above, with `--fail` |
@@ -125,6 +127,31 @@ to see what a request would send before sending it.
 
 `show <file>#<ref>` prints one request as written, or with `-e` as it would
 be sent.
+
+## Importing
+
+`import postman` converts a Postman export into `.http` and environment
+files (see [FORMAT.md](FORMAT.md)) and prints a report:
+
+- **`collections`**, **`requests`** and **`imported`**: the requests in
+  the export and those written as requests. The others are written
+  commented out and listed in `skipped`.
+- **`environments`**: the names to pass to `-e`.
+- **`files`**: every file written.
+- **`skipped`**: what was not imported, or not as it was, one entry per
+  occurrence: a `category` (`request`, `body`, `auth`, `script`,
+  `variable`, `header`, `example`, `setting` or `file`), a `reason`, and
+  `where`: `file#name` for a request; a folder's `.http` file, or its
+  directory if it has no requests of its own; a collection's directory;
+  the output directory for the whole export; or a file of the export.
+- **`variables`**: variables the requests use that need a look, with the
+  environment files to look in: `secret` for a value from the export
+  that is now in the private files, `unset` for a variable without any
+  value.
+
+The exit code is 0 when the files are written, whatever was skipped.
+Without `--force`, existing files make it 2 and nothing is written. Run
+`run <dir> --dry-run -e <env>` next to check every request.
 
 ## Response size and time limits
 

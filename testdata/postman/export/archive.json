@@ -1,0 +1,10 @@
+{
+  "collection": {
+    "11111111-aaaa-4aaa-8aaa-000000000001": true,
+    "11111111-aaaa-4aaa-8aaa-000000000002": true
+  },
+  "environment": {
+    "22222222-bbbb-4bbb-8bbb-000000000001": true,
+    "22222222-bbbb-4bbb-8bbb-000000000002": true
+  }
+}

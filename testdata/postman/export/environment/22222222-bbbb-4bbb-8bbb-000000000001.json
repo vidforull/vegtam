@@ -1,0 +1,17 @@
+{
+  "id": "22222222-bbbb-4bbb-8bbb-000000000001",
+  "name": "Dev",
+  "values": [
+    {"key": "base_url", "value": "https://dev.shop.example.test/api", "type": "default", "enabled": true},
+    {"key": "token", "value": "fake-dev-token", "type": "secret", "enabled": true},
+    {"key": "crm_url", "value": "https://dev.crm.example.test", "type": "default", "enabled": true},
+    {"key": "crm_token", "value": "fake-crm-dev-token", "type": "default", "enabled": true},
+    {"key": "crm key", "value": "fake-crm-dev-key", "type": "default", "enabled": true},
+    {"key": "username", "value": "demo", "type": "default", "enabled": true},
+    {"key": "password", "value": "fake-dev-password", "type": "default", "enabled": true},
+    {"key": "old_host", "value": "https://old.example.test", "type": "default", "enabled": false}
+  ],
+  "_postman_variable_scope": "environment",
+  "_postman_exported_at": "2026-10-01T09:00:00.000Z",
+  "_postman_exported_using": "Postman/11.0.0"
+}

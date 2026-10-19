@@ -1,0 +1,16 @@
+### Create product
+# @name create-product
+# The Postman test script is not imported
+POST {{base_url}}/admin/products
+X-Admin-Key: {{shop_api_x_admin_key}}
+Content-Type: application/json
+
+{
+  "name": "Mug",
+  "price": 12.5
+}
+
+### Delete product
+# @name delete-product
+DELETE {{base_url}}/admin/products/{{id}}
+X-Admin-Key: {{shop_api_x_admin_key}}

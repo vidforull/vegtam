@@ -129,9 +129,9 @@ func newSchemaCmd(cfg *Config) *cobra.Command {
 	return &cobra.Command{
 		Use:   "schema",
 		Short: "Print the JSON Schema of the JSON output",
-		Long: `Print the JSON Schema (draft 2020-12) of the JSON documents that run, show
-and list print. Fields are only ever added; schema_version changes if one
-has to change its meaning or go away.`,
+		Long: `Print the JSON Schema (draft 2020-12) of the JSON documents that run,
+show, list and import print. Fields are only ever added; schema_version
+changes if one has to change its meaning or go away.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			io.WriteString(cfg.out, output.Schema)

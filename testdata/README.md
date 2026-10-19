@@ -7,3 +7,6 @@ Synthetic only. Everything here is made up for tests:
 - no real collections, exports, hosts, paths or people.
 
 Tests never touch the network: requests go to `net/http/httptest` servers.
+
+`postman/export` is a made-up Postman export laid out as Postman's data
+export is; `postman/golden` is what importing it should give.

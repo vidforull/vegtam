@@ -1,0 +1,5 @@
+### Version
+# @name version
+GET {{base_url}}/version
+X-Shop-Key: {{api_key}}
+Authorization: Bearer {{token}}

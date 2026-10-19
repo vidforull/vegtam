@@ -1,0 +1,15 @@
+### List contacts
+# @name list-contacts
+GET {{crm_url}}/contacts
+Accept: application/json
+X-Trace: on
+Authorization: Bearer {{crm_token}}
+
+### Export contacts
+# @name export-contacts
+GET {{crm_url}}/contacts/export?format=csv&api_key={{crm_key}}#top
+
+### Find contact
+# @name find-contact
+GET {{crm_url}}/contacts/search?q=Ada%20Lovelace&owner={{owner_id}}
+Authorization: Bearer {{crm_token}}

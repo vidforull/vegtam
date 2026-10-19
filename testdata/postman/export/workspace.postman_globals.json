@@ -1,0 +1,10 @@
+{
+  "id": "33333333-cccc-4ccc-8ccc-000000000001",
+  "name": "Globals",
+  "_postman_variable_scope": "globals",
+  "values": [
+    {"key": "user_agent", "value": "shop-tests/1.0", "enabled": true},
+    {"key": "timeout_ms", "value": 5000, "enabled": true},
+    {"key": "unused_flag", "value": true, "enabled": false}
+  ]
+}

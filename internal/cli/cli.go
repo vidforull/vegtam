@@ -17,7 +17,7 @@ import (
 // Exit codes. The root command's help and docs/AUTOMATION.md list them.
 const (
 	exitOK      = 0
-	exitUsage   = 2 // bad arguments, a file that does not parse, an unresolved variable, an invalid request
+	exitUsage   = 2 // bad arguments, a file that does not parse, an unresolved variable, an invalid request, an export that cannot be read
 	exitNetwork = 3 // network or TLS error, timeout
 	exitStatus  = 4 // HTTP status 400 or above, with run --fail
 )
@@ -42,7 +42,8 @@ appear in the output.
 Exit codes:
   0  success
   2  bad arguments, a .http or environment file that does not parse, an
-     unresolved variable, or an invalid request
+     unresolved variable, an invalid request, or an export that cannot
+     be imported
   3  network or TLS error, or timeout
   4  HTTP status 400 or above, with run --fail
   1, 5 and 6 are reserved for failed assertions, requests that need
@@ -128,7 +129,8 @@ func Run(args []string, cfg Config) int {
 	root.SetOut(cfg.out)
 	root.SetErr(cfg.errOut)
 	root.PersistentFlags().BoolVar(&cfg.json, "json", false, "print JSON even on a terminal")
-	root.AddCommand(newRunCmd(&cfg), newShowCmd(&cfg), newListCmd(&cfg), newSchemaCmd(&cfg), newVersionCmd(&cfg))
+	root.AddCommand(newRunCmd(&cfg), newShowCmd(&cfg), newListCmd(&cfg), newImportCmd(&cfg), newSchemaCmd(&cfg),
+		newVersionCmd(&cfg))
 
 	cmd, err := root.ExecuteC()
 	if err == nil {

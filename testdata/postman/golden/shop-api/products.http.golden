@@ -1,0 +1,15 @@
+### List products
+# @name list-products
+# @assert status == 200
+# The Postman test script is not imported
+GET {{base_url}}/products?limit={{page_size}}&access_token={{shop_api_access_token}}
+Accept: application/json
+# X-Debug: 1
+# X-Old-Key: (secret value not imported)
+User-Agent: {{user_agent}}
+Authorization: Bearer {{token}}
+
+### Get product
+# @name get-product
+GET https://shop.example.test/api/products/42?fields=name,price
+Authorization: Bearer {{token}}

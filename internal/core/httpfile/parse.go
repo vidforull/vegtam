@@ -16,6 +16,9 @@ var methods = map[string]bool{
 	"DELETE": true, "OPTIONS": true, "TRACE": true, "CONNECT": true,
 }
 
+// IsMethod reports whether m is a method the parser accepts.
+func IsMethod(m string) bool { return methods[m] }
+
 var versions = map[string]bool{"HTTP/1.1": true, "HTTP/2": true, "HTTP/2.0": true}
 
 // directives are the comment directives kept in Request.Directives.
