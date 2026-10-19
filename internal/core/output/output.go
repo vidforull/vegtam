@@ -12,9 +12,11 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/assert"
 	"github.com/vidforull/vegtam/internal/core/exec"
 )
 
@@ -49,7 +51,26 @@ type Result struct {
 	Request  *Request  `json:"request,omitempty"`  // nil if the request could not be resolved
 	Response *Response `json:"response,omitempty"` // nil on an error and for a dry run
 	Timing   *Timing   `json:"timing,omitempty"`
+	Asserts  []Assert  `json:"asserts,omitempty"`  // nil without a response
+	Captures []Capture `json:"captures,omitempty"` // the values taken; nil without a response
 	Error    *Error    `json:"error,omitempty"`
+}
+
+// Assert is the outcome of an @assert directive.
+type Assert struct {
+	Expression string `json:"expression"`
+	Passed     bool   `json:"passed"`
+	Actual     string `json:"actual"` // masked and cut short; in parentheses if there is no value
+}
+
+// maxActual is how many bytes of an actual value a document keeps.
+const maxActual = 200
+
+// Capture is a value an @capture directive took, without the value.
+type Capture struct {
+	Name   string `json:"name"`
+	Source string `json:"source"`
+	Secret bool   `json:"secret"`
 }
 
 // Request is a request as it goes on the wire, or as written in its file.
@@ -183,10 +204,15 @@ func NewResponse(r *exec.Response, m *core.Masker) (*Response, *Timing) {
 			resp.Headers = append(resp.Headers, Header{m.Mask(name), m.Mask(v)})
 		}
 	}
-	raw := r.Body
-	var b string
+	resp.Body, resp.Encoding = body(maskBody(r.Body, r.Truncated, m))
+	return resp, &Timing{TotalMS: float64(r.Duration.Microseconds()) / 1000}
+}
+
+// maskBody returns a response body with every secret value hidden by m;
+// cut says that the body was cut off at the size limit.
+func maskBody(raw []byte, cut bool, m *core.Masker) string {
 	switch {
-	case r.Truncated:
+	case cut:
 		// The cut may have split the last character of a text.
 		for i := 1; i < utf8.UTFMax && i <= len(raw); i++ {
 			if utf8.RuneStart(raw[len(raw)-i]) {
@@ -196,16 +222,55 @@ func NewResponse(r *exec.Response, m *core.Masker) (*Response, *Timing) {
 				break
 			}
 		}
-		b = m.MaskCut(string(raw))
+		return m.MaskCut(string(raw))
 	case json.Valid(raw):
-		// Masking the decoded strings catches a value however the
-		// server escaped it: \u002B, \u0438, \/.
-		b = string(m.MaskJSON([]byte(m.Mask(string(raw)))))
-	default:
-		b = m.Mask(string(raw))
+		return maskJSON(string(raw), m)
 	}
-	resp.Body, resp.Encoding = body(b)
-	return resp, &Timing{TotalMS: float64(r.Duration.Microseconds()) / 1000}
+	return m.Mask(string(raw))
+}
+
+// maskJSON masks the JSON text s. Masking the decoded strings too
+// catches a value however it was escaped: \u002B, \u0438, \/, \u007f.
+func maskJSON(s string, m *core.Masker) string {
+	return string(m.MaskJSON([]byte(m.Mask(s))))
+}
+
+// Checked returns the outcomes of assertions with every secret value
+// hidden by m, each masked as what it is, as the response is. An actual
+// value longer than maxActual is cut short after masking, so that no
+// secret is cut in two.
+func Checked(outcomes []assert.Outcome, m *core.Masker) []Assert {
+	var list []Assert
+	for _, o := range outcomes {
+		var actual string
+		switch o.Form {
+		case assert.Body:
+			actual = maskBody([]byte(o.Actual), o.Cut, m)
+		case assert.JSON:
+			actual = maskJSON(o.Actual, m)
+		default:
+			actual = m.Mask(o.Actual)
+		}
+		actual = strings.ToValidUTF8(actual, "\uFFFD")
+		if len(actual) > maxActual {
+			i := maxActual
+			for i > 0 && !utf8.RuneStart(actual[i]) {
+				i--
+			}
+			actual = actual[:i] + "..."
+		}
+		list = append(list, Assert{o.Expr, o.Passed, actual})
+	}
+	return list
+}
+
+// Captures returns the values taken, without the values.
+func Captures(taken []assert.Captured) []Capture {
+	var list []Capture
+	for _, c := range taken {
+		list = append(list, Capture{c.Name, c.Source, c.Secret})
+	}
+	return list
 }
 
 // NewError returns err with every secret value hidden by m. An error that

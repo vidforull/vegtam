@@ -59,7 +59,7 @@ type Response struct {
 
 // Do sends p with its secrets revealed from s and reads the response.
 func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Response, error) {
-	req, sensitive, err := c.build(ctx, p, s)
+	req, sensitive, err := c.build(ctx, p, s, false)
 	if err != nil {
 		return nil, err
 	}
@@ -93,59 +93,62 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 }
 
 // Check reports the error Do would give p before sending anything: an
-// invalid URL or header, or a secret that cannot be found.
+// invalid URL or header, or a secret that cannot be found. A part that
+// holds a value s gives as core.ErrLate, one known only when the request
+// is sent, is left unchecked.
 func (c *Client) Check(p *core.Prepared, s core.Secrets) error {
-	_, _, err := c.build(context.Background(), p, s)
+	_, _, err := c.build(context.Background(), p, s, true)
 	return err
 }
 
 // build makes the request that goes on the wire. It also returns the
-// headers that must not follow a redirect to another origin.
-func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets) (*http.Request, []string, error) {
+// headers that must not follow a redirect to another origin. With check,
+// a late value is no error: build checks the rest, and returns no request
+// if the URL holds one.
+func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets, check bool) (*http.Request, []string, error) {
 	src := p.Request.Source
 	var raw string
 	fail := func(format string, args ...any) error {
 		return core.Errorf(core.KindRequest, src, "%s", hide(p, s, raw, fmt.Sprintf(format, args...)))
 	}
-	reveal := func(t core.Text) (string, error) {
-		v, err := t.Reveal(s)
-		if err != nil {
-			return "", core.Errorf(core.KindVariable, src, "%v", err)
+	// known is false for a late value in a check.
+	reveal := func(t core.Text) (v string, known bool, err error) {
+		v, err = t.Reveal(s)
+		switch {
+		case check && errors.Is(err, core.ErrLate):
+			return "", false, nil
+		case err != nil:
+			return "", false, core.Errorf(core.KindVariable, src, "%v", err)
 		}
-		return v, nil
+		return v, true, nil
 	}
-	raw, err := reveal(p.URL)
+	raw, urlKnown, err := reveal(p.URL)
 	if err != nil {
 		return nil, nil, err
 	}
-	// Messages name raw; fail shows it masked.
-	u, err := url.Parse(raw)
-	switch {
-	case err != nil:
-		return nil, nil, fail("invalid URL %s: %v", raw, errors.Unwrap(err))
-	case u.Scheme != "http" && u.Scheme != "https":
-		return nil, nil, fail("URL %s: want an http or https URL", raw)
-	case u.Host == "":
-		return nil, nil, fail("URL %s has no host", raw)
+	if urlKnown {
+		// Messages name raw; fail shows it masked.
+		u, err := url.Parse(raw)
+		switch {
+		case err != nil:
+			return nil, nil, fail("invalid URL %s: %v", raw, errors.Unwrap(err))
+		case u.Scheme != "http" && u.Scheme != "https":
+			return nil, nil, fail("URL %s: want an http or https URL", raw)
+		case u.Host == "":
+			return nil, nil, fail("URL %s has no host", raw)
+		}
 	}
-	body, err := reveal(p.Body)
+	body, _, err := reveal(p.Body)
 	if err != nil {
 		return nil, nil, err
-	}
-	var rd io.Reader
-	if body != "" {
-		rd = strings.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, p.Method, raw, rd)
-	if err != nil {
-		return nil, nil, fail("%v", err)
 	}
 	// net/http drops these on its own only when the host is not a
 	// subdomain; vegtam drops them, and every header holding a secret, on
 	// any change of origin.
 	sensitive := []string{"Authorization", "Cookie", "Proxy-Authorization", "Referer"}
+	header, host := http.Header{}, ""
 	for _, h := range p.Headers {
-		v, err := reveal(h.Value)
+		v, known, err := reveal(h.Value)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -160,11 +163,28 @@ func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets) (*
 		if h.Value.HasSecret() {
 			sensitive = append(sensitive, h.Name)
 		}
-		if strings.EqualFold(h.Name, "Host") {
-			req.Host = v
-		} else {
-			req.Header.Add(h.Name, v)
+		switch {
+		case !known:
+		case strings.EqualFold(h.Name, "Host"):
+			host = v
+		default:
+			header.Add(h.Name, v)
 		}
+	}
+	if !urlKnown {
+		return nil, nil, nil
+	}
+	var rd io.Reader
+	if body != "" {
+		rd = strings.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, p.Method, raw, rd)
+	if err != nil {
+		return nil, nil, fail("%v", err)
+	}
+	req.Header = header
+	if host != "" {
+		req.Host = host
 	}
 	if _, ok := req.Header["User-Agent"]; !ok && c.opts.UserAgent != "" {
 		req.Header.Set("User-Agent", c.opts.UserAgent)
@@ -246,7 +266,7 @@ func hide(p *core.Prepared, s core.Secrets, wire, msg string) string {
 			if seg.Secret == nil {
 				continue
 			}
-			if v, err := s.SecretValue(seg.Secret.Name); err == nil {
+			if v, err := s.SecretValue(*seg.Secret); err == nil {
 				values = append(values, v)
 			}
 		}

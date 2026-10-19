@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -81,7 +82,7 @@ plain
 [truncated: the body is longer than --max-body]
 `, ""},
 		{"errors", []string{"run", "api.http", "--fail", "--timeout", "50ms", "--max-body", "0"}, exitStatus,
-			"### api.http#echo\nHTTP/1.1 200 OK (TIME)\n[truncated: the body is longer than --max-body]\n\n" +
+			"### api.http#echo\nHTTP/1.1 200 OK (TIME)\n[truncated: the body is longer than --max-body]\n\n✓ status == 200\n\n" +
 				"### api.http#fail\nHTTP/1.1 500 Internal Server Error (TIME)\n[truncated: the body is longer than --max-body]\n\n" +
 				"### api.http#refused\n\n### api.http#slow\n\n" +
 				"### api.http#binary\nHTTP/1.1 200 OK (TIME)\n[truncated: the body is longer than --max-body]\n\n" +
@@ -160,6 +161,87 @@ func TestRunJSON(t *testing.T) {
 		`"url":"{{host}}/plain","directives":[]}]}` + "\n"
 	if got := normalize(fx, stdout); code != exitUsage || got != want || !strings.HasPrefix(stderr, "vegtam: ") {
 		t.Errorf("list = %d\n%s\nwant\n%s\nstderr: %s", code, got, want, stderr)
+	}
+}
+
+func TestRunAsserts(t *testing.T) {
+	fx := newFixture(t)
+	src := `# @name text
+# @assert status == 200
+# @assert status in 500..599
+# @assert header Content-Type == "text/plain"
+# @assert body contains "nope"
+# @assert duration < 1h
+GET {{host}}/plain
+
+###
+# @name echo
+# @assert jsonpath $.echo.key == "nope"
+# @assert jsonpath $.echo.authorization contains "Bearer"
+# @assert header X-Echo exists
+POST {{host}}/echo?key={{token}}
+Authorization: Bearer {{token}}
+
+###
+# @name fail
+# @assert status == 200
+GET {{host}}/fail
+`
+	if err := os.WriteFile(fx.path("checks.http"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(fx.dir)
+
+	// Text: the response, then a line per assertion.
+	code, stdout, stderr := runCLI(t, true, "run", "checks.http#text", "-e", "test")
+	want := `HTTP/1.1 200 OK (TIME)
+
+plain\x1b]0;title\x07 text
+
+✓ status == 200
+✗ status in 500..599 (actual: 200)
+✓ header Content-Type == "text/plain"
+✗ body contains "nope" (actual: plain\x1b]0;title\x07 text)
+✓ duration < 1h
+`
+	wantErr := `vegtam: checks.http:3: 2 of 5 assertions failed: status in 500..599; body contains "nope"` + "\n"
+	if got := normalize(fx, stdout); code != exitAssert || got != want || stderr != wantErr {
+		t.Errorf("run text = %d\n%s\nwant\n%s\nstderr: %q, want %q", code, got, want, stderr, wantErr)
+	}
+
+	// JSON: the outcomes next to the response, actual values masked.
+	for _, mode := range [][]string{nil, {"--json"}, {"--json", "-v"}} {
+		code, stdout, stderr = runCLI(t, len(mode) > 0, append([]string{"run", "checks.http#echo", "-e", "test"}, mode...)...)
+		validateJSON(t, stdout)
+		var doc output.Document
+		json.Unmarshal([]byte(stdout), &doc)
+		wantAsserts := []output.Assert{{Expression: `jsonpath $.echo.key == "nope"`, Actual: `"***"`},
+			{Expression: `jsonpath $.echo.authorization contains "Bearer"`, Passed: true, Actual: `"Bearer ***"`},
+			{Expression: "header X-Echo exists", Passed: true, Actual: "key=***"}}
+		if r := doc.Result; code != exitAssert || r == nil || r.Response == nil || r.Error == nil || r.Error.Kind != "assert" ||
+			!slices.Equal(r.Asserts, wantAsserts) {
+			t.Errorf("run %v = %d\n%s", mode, code, stdout)
+		}
+		if found := fx.leaks(stdout + stderr); len(found) > 0 {
+			t.Errorf("secret forms %q in the output\n%s\n%s", found, stdout, stderr)
+		}
+	}
+
+	// The highest code wins: 4 for the status with --fail, over 1. A dry
+	// run checks nothing.
+	for _, tt := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"run", "checks.http", "-e", "test"}, exitAssert},
+		{[]string{"run", "checks.http", "-e", "test", "--fail"}, exitStatus},
+		{[]string{"run", "checks.http", "-e", "test", "--dry-run"}, exitOK},
+	} {
+		code, stdout, _ := runCLI(t, false, tt.args...)
+		validateJSON(t, stdout)
+		if code != tt.code || tt.code == exitOK && strings.Contains(stdout, `"asserts"`) {
+			t.Errorf("%q = %d, want %d\n%s", tt.args, code, tt.code, stdout)
+		}
 	}
 }
 

@@ -1,0 +1,17 @@
+# Directives that fail.
+
+### Failed assertions: the response is still shown
+# @name wrong
+# @assert status == 201
+# @assert jsonpath $.ok == false
+# @assert duration < 1h
+POST {{host}}/login
+
+### A capture that finds nothing
+# @name nothing
+# @capture session = $.session
+POST {{host}}/login
+
+### Needs the value that was not captured
+# @name after
+GET {{host}}/users/{{session}}

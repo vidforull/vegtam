@@ -10,6 +10,8 @@
     "request": {"$ref": "#/$defs/request"},
     "response": {"$ref": "#/$defs/response"},
     "timing": {"$ref": "#/$defs/timing"},
+    "asserts": {"$ref": "#/$defs/asserts"},
+    "captures": {"$ref": "#/$defs/captures"},
     "error": {"$ref": "#/$defs/error"},
     "results": {
       "type": "array",
@@ -36,7 +38,35 @@
         "request": {"$ref": "#/$defs/request"},
         "response": {"$ref": "#/$defs/response"},
         "timing": {"$ref": "#/$defs/timing"},
+        "asserts": {"$ref": "#/$defs/asserts"},
+        "captures": {"$ref": "#/$defs/captures"},
         "error": {"$ref": "#/$defs/error"}
+      }
+    },
+    "asserts": {
+      "type": "array",
+      "description": "The outcome of each # @assert directive of the request, in order. Absent if the request has none, without a response, and with --dry-run. Any failed assertion makes the error kind assert, unless an error with a higher exit code, capture or status, takes its place.",
+      "items": {
+        "type": "object",
+        "required": ["expression", "passed", "actual"],
+        "properties": {
+          "expression": {"type": "string", "description": "As written, such as status == 200."},
+          "passed": {"type": "boolean"},
+          "actual": {"type": "string", "description": "The value checked, from the response, so untrusted: the status, the duration, a header's values joined with \", \", the body, or a path's value as JSON. Secret values in it are masked as ***, and it is cut off after 200 bytes with .... In parentheses when there is no value: (absent), or why the body has none, such as (the body is not JSON)."}
+        }
+      }
+    },
+    "captures": {
+      "type": "array",
+      "description": "The values the # @capture directives of the request took from its response, in order, for the requests after it in the same run; the values themselves are never shown. Absent if none was taken, without a response, and with --dry-run. A capture that finds no value is not listed: it makes the error kind capture, unless a status error with --fail takes its place.",
+      "items": {
+        "type": "object",
+        "required": ["name", "source", "secret"],
+        "properties": {
+          "name": {"type": "string", "description": "The variable, as in {{name}}."},
+          "source": {"type": "string", "description": "As written: a path such as $.token, header <Name>, or status."},
+          "secret": {"type": "boolean", "description": "True unless the directive says plain: the value is masked as *** wherever it appears, and shown as {{name}} in requests."}
+        }
       }
     },
     "headers": {
@@ -70,7 +100,7 @@
     },
     "response": {
       "type": "object",
-      "description": "The response. Absent on an error and with --dry-run. Secret values in it are masked as ***.",
+      "description": "The response. Absent if no response came, after an error before or while sending, and with --dry-run; errors of kind assert, capture and status come with it. Secret values in it are masked as ***.",
       "required": ["proto", "status", "reason", "headers", "body", "truncated", "untrusted"],
       "properties": {
         "proto": {"type": "string", "description": "HTTP/1.1 or HTTP/2.0."},
@@ -97,7 +127,7 @@
       "properties": {
         "kind": {
           "type": "string",
-          "description": "usage, parse, variable, request or import (exit code 2), network or timeout (3), status (4, with --fail). New kinds may be added; rely on the exit code for anything you do not know."
+          "description": "assert (exit code 1); usage, parse, variable, request, import or capture (2); network or timeout (3); status (4, with --fail). New kinds may be added; rely on the exit code for anything you do not know."
         },
         "message": {"type": "string"},
         "file": {"type": "string"},

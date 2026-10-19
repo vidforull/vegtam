@@ -1,0 +1,5 @@
+# After login.http when the directory runs, so the token is captured.
+
+### Nothing listens there: the error shows the token as its placeholder
+# @name refused
+GET {{closed}}/?t={{token}}

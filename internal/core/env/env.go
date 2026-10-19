@@ -1,12 +1,14 @@
 // Package env resolves the {{...}} placeholders of requests: variables
-// from environment files in the JetBrains format, and {{$env NAME}} from
-// the process environment. Values from the private environment file and
-// from the process environment are secrets: prepared requests refer to
-// them by name only.
+// from environment files in the JetBrains format, {{$env NAME}} from the
+// process environment, and variables that @capture directives take from
+// the responses of a run. Values from the private environment file and
+// from the process environment, and captured values not marked plain, are
+// secrets: prepared requests refer to them by name only.
 package env
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -34,32 +36,110 @@ var envVarName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // Loader finds environment files and hands out the variables for each
 // .http file. One Loader serves one command.
 type Loader struct {
-	env     string            // selected environment; "" for none
+	opts    Options
 	dirs    map[string]*Vars  // by .http file directory
 	errs    map[string]error  // by .http file directory
 	files   map[string]envMap // parsed environment files by path
 	process map[string]string // process environment values handed out
+
+	declared map[string]bool     // variables an @capture of a request prepared so far takes
+	captured map[string]captured // the values taken so far
+	lost     map[string]string   // variables whose latest capture took nothing: the request
+	taken    []string            // every secret value ever captured, for the masker
+}
+
+// Options configure a Loader.
+type Options struct {
+	Env    string // the environment to select; "" for none
+	DryRun bool   // no request is sent: a captured value is core.ErrLate
+}
+
+// captured is a value an @capture took.
+type captured struct {
+	value  string
+	secret bool
 }
 
 // envMap is a parsed environment file: environment -> name -> value.
 type envMap map[string]map[string]string
 
-// NewLoader returns a Loader for the environment named env, or for no
-// environment if env is empty: then only {{$env NAME}} resolves.
-func NewLoader(env string) *Loader {
-	return &Loader{env: env, dirs: map[string]*Vars{}, errs: map[string]error{},
-		files: map[string]envMap{}, process: map[string]string{}}
+// NewLoader returns a Loader. Without an environment, only {{$env NAME}}
+// and captured variables resolve.
+func NewLoader(opts Options) *Loader {
+	return &Loader{opts: opts, dirs: map[string]*Vars{}, errs: map[string]error{},
+		files: map[string]envMap{}, process: map[string]string{},
+		declared: map[string]bool{}, captured: map[string]captured{}, lost: map[string]string{}}
 }
 
 // Masker returns a Masker for every secret the loader has handed out or
-// read: all private values of the selected environment and the process
-// environment values that placeholders referred to.
+// read: all private values of the selected environment, the process
+// environment values that placeholders referred to, and the secret values
+// captured so far.
 func (l *Loader) Masker() *core.Masker {
-	var values []string
+	values := slices.Clone(l.taken)
 	for _, v := range l.dirs {
 		values = slices.AppendSeq(values, maps.Values(v.private))
 	}
 	return core.NewMasker(slices.AppendSeq(values, maps.Values(l.process)))
+}
+
+// Declare makes name a variable that an @capture takes from a response.
+// In every request prepared after the call, {{name}} refers to the value
+// captured last, never to the environment.
+func (l *Loader) Declare(name string) { l.declared[name] = true }
+
+// Capture sets the value of the declared variable name for the requests
+// sent from now on. A secret value is also masked from now on.
+func (l *Loader) Capture(name, value string, secret bool) {
+	l.captured[name] = captured{value, secret}
+	delete(l.lost, name)
+	if secret {
+		l.taken = append(l.taken, value)
+	}
+}
+
+// Forget drops the value of name: the latest @capture of it, in the
+// request ref, took none, and the requests after it must not use an
+// older one.
+func (l *Loader) Forget(name, ref string) {
+	delete(l.captured, name)
+	l.lost[name] = ref
+}
+
+// Fill returns p with the plain values captured so far in place of their
+// placeholders; secret ones stay placeholders, as other secrets do. A
+// captured variable without a value is an error of kind variable that
+// names them all.
+func (l *Loader) Fill(p *core.Prepared) (*core.Prepared, error) {
+	var missing, why []string
+	fill := func(t core.Text) core.Text {
+		var out core.Text
+		for _, seg := range t {
+			if s := seg.Secret; s != nil && s.Capture {
+				c, ok := l.captured[s.Name]
+				switch {
+				case !ok && !slices.Contains(missing, s.Name):
+					missing = append(missing, s.Name)
+					why = append(why, fmt.Sprintf("%s (%s took no value)", s.Name, cmp.Or(l.lost[s.Name], "an earlier request")))
+				case ok && !c.secret:
+					seg = core.Segment{Text: c.value}
+				}
+			}
+			out = append(out, seg)
+		}
+		return out
+	}
+	q := *p
+	q.URL, q.Body, q.Headers = fill(p.URL), fill(p.Body), nil
+	for _, h := range p.Headers {
+		q.Headers = append(q.Headers, core.PreparedHeader{Name: h.Name, Value: fill(h.Value)})
+	}
+	if len(missing) > 0 {
+		e := core.Errorf(core.KindVariable, p.Request.Source, "not captured: %s", strings.Join(why, ", "))
+		e.Variables = missing
+		return nil, e
+	}
+	return &q, nil
 }
 
 func (l *Loader) getenv(name string) (string, bool) {
@@ -97,11 +177,12 @@ func (l *Loader) For(path string) (*Vars, error) {
 
 func (l *Loader) load(dir string) (*Vars, error) {
 	v := &Vars{loader: l, public: map[string]string{}, private: map[string]string{}}
-	if l.env == "" {
+	env := l.opts.Env
+	if env == "" {
 		return v, nil
 	}
-	if strings.HasPrefix(l.env, "$") {
-		return nil, core.Errorf(core.KindUsage, core.Source{}, "invalid environment name %q", l.env)
+	if strings.HasPrefix(env, "$") {
+		return nil, core.Errorf(core.KindUsage, core.Source{}, "invalid environment name %q", env)
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -124,19 +205,19 @@ func (l *Loader) load(dir string) (*Vars, error) {
 		found = append(found, path)
 		defined = append(defined, slices.Collect(maps.Keys(m))...)
 		maps.Copy(f.dst, m[shared])
-		vars, ok := m[l.env]
+		vars, ok := m[env]
 		maps.Copy(f.dst, vars)
 		selected = selected || ok
 	}
 	switch {
 	case len(found) == 0:
 		return nil, core.Errorf(core.KindUsage, core.Source{},
-			"environment %q: no %s or %s in %s or above", l.env, PublicFile, PrivateFile, abs)
+			"environment %q: no %s or %s in %s or above", env, PublicFile, PrivateFile, abs)
 	case !selected:
 		defined = slices.DeleteFunc(defined, func(s string) bool { return s == shared })
 		slices.Sort(defined)
 		return nil, core.Errorf(core.KindUsage, core.Source{}, "environment %q is not defined in %s (defined: %s)",
-			l.env, strings.Join(found, ", "), strings.Join(slices.Compact(defined), ", "))
+			env, strings.Join(found, ", "), strings.Join(slices.Compact(defined), ", "))
 	}
 	return v, nil
 }
@@ -197,17 +278,27 @@ func (l *Loader) read(path string) (envMap, error) {
 }
 
 // SecretValue returns the value of a secret named in a prepared request.
-func (v *Vars) SecretValue(name string) (string, error) {
-	if n, ok := strings.CutPrefix(name, "$env "); ok {
-		if val, ok := v.loader.getenv(n); ok {
+func (v *Vars) SecretValue(s core.Secret) (string, error) {
+	l := v.loader
+	if s.Capture {
+		if c, ok := l.captured[s.Name]; ok {
+			return c.value, nil
+		}
+		if l.opts.DryRun {
+			return "", core.ErrLate
+		}
+		return "", fmt.Errorf("%s was not captured: the @capture of an earlier request took no value", s.Name)
+	}
+	if n, ok := strings.CutPrefix(s.Name, "$env "); ok {
+		if val, ok := l.getenv(n); ok {
 			return val, nil
 		}
 		return "", fmt.Errorf("environment variable %s is not set", n)
 	}
-	if val, ok := v.private[name]; ok {
+	if val, ok := v.private[s.Name]; ok {
 		return val, nil
 	}
-	return "", fmt.Errorf("no secret named %q", name)
+	return "", fmt.Errorf("no secret named %q", s.Name)
 }
 
 // Prepare resolves the placeholders of r and reads its body file. All
@@ -234,7 +325,7 @@ func (v *Vars) Prepare(r *core.Request) (*core.Prepared, error) {
 	}
 	if len(res.missing) > 0 {
 		msg := "unresolved variables: " + strings.Join(res.missing, ", ")
-		if v.loader.env == "" && slices.ContainsFunc(res.missing, func(s string) bool { return !strings.HasPrefix(s, "$") }) {
+		if v.loader.opts.Env == "" && slices.ContainsFunc(res.missing, func(s string) bool { return !strings.HasPrefix(s, "$") }) {
 			msg += " (no environment selected; use -e <name>)"
 		}
 		e := core.Errorf(core.KindVariable, r.Source, "%s", msg)
@@ -271,6 +362,9 @@ func (rs *resolver) ref(r core.Ref) core.Segment {
 	var err error
 	switch r.Func {
 	case "":
+		if rs.vars.loader.declared[r.Name] {
+			return core.Segment{Secret: &core.Secret{Name: r.Name, Capture: true}}
+		}
 		if _, ok := rs.vars.private[r.Name]; ok {
 			return secret(r.Name)
 		}

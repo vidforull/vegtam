@@ -5,10 +5,12 @@ package httpfile
 
 import (
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/assert"
 )
 
 var methods = map[string]bool{
@@ -205,6 +207,9 @@ func (p *parser) flush() error {
 	if r.Method == "" {
 		return p.errorf(p.at, "directive is not followed by a request line")
 	}
+	if _, _, err := assert.Directives(r); err != nil {
+		return err
+	}
 	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
 		lines, at = lines[1:], at+1
 	}
@@ -249,6 +254,22 @@ func (p *parser) checkBody(lines []string, at int) error {
 		}
 	}
 	return nil
+}
+
+var captureRE = regexp.MustCompile(`^\s*(?:#|//)\s*@capture\s+(?:plain\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=`)
+
+// CaptureNames returns the variables that the @capture directives in src
+// name, found line by line without parsing. A run declares them even for
+// a file that does not parse, so that the requests after it do not take
+// the environment's values in place of the captured ones.
+func CaptureNames(src []byte) []string {
+	var names []string
+	for _, line := range strings.Split(string(src), "\n") {
+		if m := captureRE.FindStringSubmatch(line); m != nil && !slices.Contains(names, m[1]) {
+			names = append(names, m[1])
+		}
+	}
+	return names
 }
 
 // isNumber reports whether name would be taken for a position, as

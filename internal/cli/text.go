@@ -44,6 +44,27 @@ func (c *Config) printResult(res *output.Result, i int, several, verbose bool) {
 		if r.Truncated {
 			b.WriteString("[truncated: the body is longer than --max-body]\n")
 		}
+		if len(res.Asserts) > 0 || len(res.Captures) > 0 {
+			b.WriteString("\n")
+		}
+		for _, a := range res.Asserts {
+			if a.Passed {
+				fmt.Fprintf(&b, "✓ %s\n", a.Expression)
+			} else {
+				fmt.Fprintf(&b, "✗ %s (actual: %s)\n", a.Expression, strings.ReplaceAll(a.Actual, "\n", `\n`))
+			}
+		}
+		if len(res.Captures) > 0 {
+			var names []string
+			for _, c := range res.Captures {
+				if c.Secret {
+					names = append(names, c.Name)
+				} else {
+					names = append(names, c.Name+" (plain)")
+				}
+			}
+			fmt.Fprintf(&b, "captured: %s\n", strings.Join(names, ", "))
+		}
 	}
 	io.WriteString(c.out, printable(b.String()))
 	if res.Error != nil {

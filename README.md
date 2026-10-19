@@ -121,6 +121,59 @@ vegtam schema                         # the JSON Schema of the JSON output
 
 `vegtam --help` lists the exit codes.
 
+## Checks and captures
+
+`# @assert` checks a response, and `# @capture` takes a value from it for
+the requests after it, such as a token from a sign-in:
+
+```http
+### Sign in
+# @name login
+# @assert status == 200
+# @capture token = $.token
+POST {{host}}/login
+Content-Type: application/json
+
+{"user": "ada", "password": "{{password}}"}
+
+### The signed-in user
+# @name me
+# @assert status == 200
+# @assert jsonpath $.name == "Ada"
+GET {{host}}/me
+Authorization: Bearer {{token}}
+```
+
+```console
+$ vegtam run session.http -e dev
+### session.http#login
+HTTP/1.1 200 OK (112ms)
+
+{
+  "token": "***"
+}
+
+✓ status == 200
+captured: token
+
+### session.http#me
+HTTP/1.1 200 OK (35ms)
+
+{
+  "id": 1,
+  "name": "Ada"
+}
+
+✓ status == 200
+✓ jsonpath $.name == "Ada"
+```
+
+A captured value is a secret unless the directive says `plain`: it is
+masked from the response it came from onwards, and requests show it as
+`{{token}}`. A failed assertion makes the exit code 1, and JSON output
+has the outcome of each in `asserts`. [docs/FORMAT.md](docs/FORMAT.md#directives)
+lists the checks and the sources.
+
 ## Import from Postman
 
 `import postman` turns a Postman export, one collection or the directory
@@ -160,7 +213,8 @@ lists what is and what is not.
 ## Documentation
 
 - [docs/FORMAT.md](docs/FORMAT.md): the supported `.http` subset,
-  environment files, secrets, and importing from Postman.
+  assertions and captures, environment files, secrets, and importing
+  from Postman.
 - [docs/AUTOMATION.md](docs/AUTOMATION.md): driving vegtam from scripts
   and agents: the JSON output and its stability, exit codes, dry runs,
   limits and secret masking.

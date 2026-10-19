@@ -20,11 +20,11 @@ import (
 
 type secrets map[string]string
 
-func (s secrets) SecretValue(name string) (string, error) {
-	if v, ok := s[name]; ok {
+func (s secrets) SecretValue(sec core.Secret) (string, error) {
+	if v, ok := s[sec.Name]; ok {
 		return v, nil
 	}
-	return "", errors.New("no secret " + name)
+	return "", errors.New("no secret " + sec.Name)
 }
 
 var testSecrets = secrets{"token": "t0ken", "$env KEY": "k3y"}
@@ -209,6 +209,46 @@ func TestErrors(t *testing.T) {
 				t.Errorf("Check = %v, want an error: %v", err, wantCheck)
 			}
 		})
+	}
+}
+
+// lateSecrets are the secrets of a dry run: "late" is known only when the
+// request is sent.
+type lateSecrets struct{ secrets }
+
+func (s lateSecrets) SecretValue(sec core.Secret) (string, error) {
+	if sec.Name == "late" {
+		return "", core.ErrLate
+	}
+	return s.secrets.SecretValue(sec)
+}
+
+func TestCheckLate(t *testing.T) {
+	late := lateSecrets{testSecrets}
+	tests := []struct {
+		name string
+		p    *core.Prepared
+		want string // "" for no error
+	}{
+		{"late URL", prepared("GET", secret("late"), nil), ""},
+		{"late host and header", prepared("GET", core.Text{{Text: "https://"}, {Secret: &core.Secret{Name: "late"}}}, secret("late"),
+			header("Authorization", core.Text{{Text: "Bearer "}, {Secret: &core.Secret{Name: "late"}}}), header("Host", secret("late"))), ""},
+		{"the rest is checked", prepared("GET", secret("late"), nil, header("X", secret("late")), header("Y", lit("a\nb"))),
+			"header Y: the value contains a line break"},
+		{"URL with a late part", prepared("GET", core.Text{{Text: "ftp://example.com/"}, {Secret: &core.Secret{Name: "late"}}}, nil), ""},
+		{"late body", prepared("POST", lit("https://example.com/"), core.Text{{Text: "t="}, {Secret: &core.Secret{Name: "late"}}}), ""},
+		{"bad URL", prepared("GET", lit("ftp://example.com/"), nil, header("X", secret("late"))), "want an http or https URL"},
+	}
+	for _, tt := range tests {
+		err := New(Options{}).Check(tt.p, late)
+		if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+			t.Errorf("%s: Check = %v, want %q", tt.name, err, tt.want)
+		}
+	}
+	// Sending needs the value.
+	_, err := New(Options{}).Do(context.Background(), prepared("GET", secret("late"), nil), late)
+	if e, ok := err.(*core.Error); !ok || e.Kind != core.KindVariable {
+		t.Errorf("Do = %v, want a variable error", err)
 	}
 }
 

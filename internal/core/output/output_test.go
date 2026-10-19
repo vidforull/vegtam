@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/assert"
 	"github.com/vidforull/vegtam/internal/core/exec"
 )
 
@@ -88,6 +89,21 @@ func TestNewError(t *testing.T) {
 	}
 	if got := NewError(errors.New("bad flag t0ken/x"), masker); got.Kind != core.KindUsage || got.Message != "bad flag ***" {
 		t.Errorf("NewError(plain error) = %+v", got)
+	}
+}
+
+func TestChecked(t *testing.T) {
+	long := strings.Repeat("я", 99) + "t0ken/x" + strings.Repeat("x", 100)
+	got := Checked([]assert.Outcome{{Expr: "status == 200", Passed: true, Actual: "200"},
+		{Expr: `body contains "y"`, Actual: long, Form: assert.Body}, {Expr: "x", Actual: "t0ken/x\xff"},
+		// Escaped as a server may escape it, in a body or a path's value.
+		{Expr: "b", Actual: `{"t": "t0ken\/x", "u": "t0ke\u006e/x"}`, Form: assert.Body},
+		{Expr: "j", Actual: `"t0ken/\u0078"`, Form: assert.JSON},
+		{Expr: "cut", Actual: `{"t": "t0k`, Form: assert.Body, Cut: true}}, masker)
+	want := []Assert{{"status == 200", true, "200"}, {`body contains "y"`, false, strings.Repeat("я", 99) + "**..."},
+		{"x", false, "***\uFFFD"}, {"b", false, `{"t": "***", "u": "***"}`}, {"j", false, `"***"`}, {"cut", false, `{"t": "***`}}
+	if !slices.Equal(got, want) {
+		t.Errorf("Checked = %+v\nwant      %+v", got, want)
 	}
 }
 

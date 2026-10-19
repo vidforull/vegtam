@@ -15,6 +15,8 @@ const (
 	KindTimeout  Kind = "timeout"  // no complete response within the timeout
 	KindStatus   Kind = "status"   // the response status is 400 or above, and the caller counts that as failure
 	KindImport   Kind = "import"   // an export from another tool cannot be read
+	KindAssert   Kind = "assert"   // an @assert check on the response failed
+	KindCapture  Kind = "capture"  // an @capture found no value in the response
 )
 
 // Error is an error of a known kind, tied to a place in a file when there

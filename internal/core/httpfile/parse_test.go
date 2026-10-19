@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -126,6 +127,8 @@ func TestParseErrors(t *testing.T) {
 		{"directive in body", "POST https://example.com\n\n{}\n# @name b", 4, "separate requests with ###"},
 		{"unclosed placeholder in body", "POST https://example.com\n\n{\"a\": \"{{x\"}", 3, "body: unclosed placeholder"},
 		{"HTTP version", "GET https://example.com HTTP/3", 1, `unsupported HTTP version "HTTP/3"`},
+		{"bad assertion", "GET https://example.com\n# @assert status is 200", 2, "@assert status is 200: want status <op> <code>"},
+		{"bad capture", "GET https://example.com\n# @capture token", 2, "@capture token: want [plain] <name> = <source>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -189,5 +192,13 @@ func TestFind(t *testing.T) {
 		if ok != (want != "") || ok && !strings.HasSuffix(r.URL, want) {
 			t.Errorf("Find(%q) = %v, %v; want %q", ref, r, ok, want)
 		}
+	}
+}
+
+func TestCaptureNames(t *testing.T) {
+	src := "# @capture token = $.token\n  // @capture plain id=$.id\n# @capture plain = $.p\n# @capture token = $.again\n" +
+		"GET x\n# @capture 1bad = $.x\n#@capture  s  =  header S\nbody # @capture no = $.x\n"
+	if got, want := CaptureNames([]byte(src)), []string{"token", "id", "plain", "s"}; !slices.Equal(got, want) {
+		t.Errorf("CaptureNames = %q, want %q", got, want)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"slices"
 	"strings"
@@ -29,12 +30,20 @@ type PreparedHeader struct {
 // value is looked up from Secrets when the request is sent.
 type Secret struct {
 	Name string // as in its placeholder: "token" or "$env TOKEN"
+	// Capture is set for a variable that an @capture of an earlier request
+	// takes from its response: the value exists only once that request
+	// has run, and it is not the one of the environment.
+	Capture bool
 }
 
-// Secrets looks up secret values by name.
+// Secrets looks up secret values.
 type Secrets interface {
-	SecretValue(name string) (string, error)
+	SecretValue(s Secret) (string, error)
 }
+
+// ErrLate is the error Secrets give in a dry run for a value that only
+// running the requests gives, such as a captured one.
+var ErrLate = errors.New("the value is known only when the request is sent")
 
 // Segment is literal text or a secret.
 type Segment struct {
@@ -67,7 +76,7 @@ func (t Text) Reveal(src Secrets) (string, error) {
 			b.WriteString(s.Text)
 			continue
 		}
-		v, err := src.SecretValue(s.Secret.Name)
+		v, err := src.SecretValue(*s.Secret)
 		if err != nil {
 			return "", err
 		}

@@ -31,7 +31,7 @@ as written. Secrets appear as their placeholders, such as {{token}}.`,
 			}
 			res := &output.Result{Ref: output.Ref(f, i), Request: output.Written(f.Requests[i])}
 			if envName != "" {
-				loader := env.NewLoader(envName)
+				loader := env.NewLoader(env.Options{Env: envName, DryRun: true})
 				j := prepare(loader, f, i)
 				cfg.masker = loader.Masker()
 				if j.err != nil {

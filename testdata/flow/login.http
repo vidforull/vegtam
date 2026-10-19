@@ -1,0 +1,28 @@
+# Requests that pass values along with @capture. The tests copy this
+# directory and write the environment file next to it: host is an
+# httptest server, closed one that has been shut down, and user, which
+# the capture overrides, is 1.
+
+### Before the sign-in, user is the environment's
+# @name before
+# @assert jsonpath $.id == 1
+GET {{host}}/users/{{user}}
+
+### Sign in: the token and the session are secrets, the user id is not
+# @name login
+# @assert status == 200
+# @capture token = $.token
+# @capture session = header X-Session
+# @capture plain user = $.user.id
+POST {{host}}/login
+Content-Type: application/json
+
+{"name": "ada"}
+
+### Uses what the sign-in returned
+# @name me
+# @assert status == 200
+# @assert jsonpath $.id == 7
+GET {{host}}/users/{{user}}
+Authorization: Bearer {{token}}
+X-Session: {{session}}

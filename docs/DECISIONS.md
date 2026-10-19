@@ -137,3 +137,59 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   through an `os.Root`, so neither a name from the export nor a symbolic
   link in the output directory leads outside `-o`. Without `--force` it
   writes nothing if any file exists, rather than half an import.
+
+## 2026-10-19: assertions and captures
+
+- **gojq for paths, plain paths only.** `github.com/itchyny/gojq`, used
+  as a library, is the one new dependency (with its `timefmt-go`). jq
+  syntax is widely known, gojq is pure Go and compares numbers exactly,
+  so a large integer in a body is not rounded. A path is written with a
+  leading `$`, as in JSONPath (`$.items[0].id`), and parsed as
+  `.items[0].id`; gojq's syntax tree must then be a plain path of names,
+  quoted keys and integer indexes, with at most a final `|length`. A full
+  jq program could turn a secret into a slice, a character, its base64
+  or its lower case, which masking by value cannot recognise. For the
+  same reason gojq only computes the keys of the path, with `path()`; the
+  value is looked up in the decoded body by vegtam, in objects and arrays
+  only, since gojq would also index into strings. gojq's error messages
+  quote part of the value they fail on, so they are replaced with
+  vegtam's own, which quote nothing.
+- **Small, strict grammar.** `@assert` knows status, header, body,
+  jsonpath and duration checks, and nothing else; a check outside it is
+  a parse error when the file is read, so `--dry-run` finds it. A
+  general expression language would be a scripting language by another
+  name, which this stage does not have.
+- **A failed assertion is a result, not a failed request.** It has its
+  own exit code, 1, the lowest after success: the request was sent, and
+  its response is in the output for whoever looks into the failure.
+  Every assertion is evaluated, so one run reports them all. Actual
+  values are masked as the response is, a body as a body and a path's
+  value as JSON, so that every escaped form is found, and only then cut
+  at 200 bytes; error messages name only the expressions, since a cut
+  body could split a secret where masking cannot see it.
+- **Captured values are secrets by default.** What one takes from a
+  response is mostly a token or a session id. A capture left unmarked
+  then masks a value that did not need it, which is visible and easy to
+  fix with `plain`; the other default would print a token in every
+  later response and error. Masking starts with the response the value
+  comes from. A secret capture takes a string, number or boolean, not an
+  object or array: masking would know the compact JSON of it, not the
+  values inside as the body writes them.
+- **Captures by position in the run.** A variable is captured for the
+  requests after its directive, in the order `run` sends them, and takes
+  precedence over the environment. Requests are still resolved before
+  the first is sent, so that the masker knows the other secrets; a
+  captured variable is then a secret segment marked as captured, and its
+  value is looked up when the request is sent. Whether `{{token}}` means
+  the environment's or the captured value is decided by where the
+  request is in the run, not by when it is sent. A capture that takes
+  nothing leaves its variable without a value: an older token, or the
+  environment's, would be sent without anyone noticing. For the same
+  reason a file that does not parse still declares the variables its
+  `@capture` lines name, found line by line, and a request captures a
+  variable once at most.
+- **Dry runs and late values.** A dry run sends nothing and so captures
+  nothing. Its captured variables are late (`core.ErrLate`): shown as
+  placeholders, and the URL or header holding one is left unchecked. A
+  stand-in value would make a URL such as `{{next}}`, captured from a
+  `Location` header, fail the check for no reason.

@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/assert"
 	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
@@ -43,9 +44,14 @@ second request of the file. -e selects the environment from
 http-client.env.json and http-client.private.env.json.
 
 On a terminal the response is printed as text: the status and the time,
-the headers with --verbose, and the body, JSON indented. Otherwise, or with
+the headers with --verbose, the body, JSON indented, the outcome of each
+"# @assert" and the variables "# @capture" took. Otherwise, or with
 --json, the output is one JSON document: a result for file#ref, a list of
-results for a file or a directory. An error stops only its own request.`,
+results for a file or a directory. An error stops only its own request.
+
+A captured value is a variable for the requests after it in the same
+run, over the environment; it is a secret unless the directive says
+plain.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return run(cmd.Context(), cfg, f, args[0])
@@ -63,10 +69,12 @@ results for a file or a directory. An error stops only its own request.`,
 
 // job is a request to send, or the error that stops it beforehand.
 type job struct {
-	ref  string
-	p    *core.Prepared
-	vars *env.Vars
-	err  error
+	ref      string
+	req      *core.Request
+	p        *core.Prepared
+	vars     *env.Vars
+	captures []string // the variables its @capture directives take
+	err      error
 }
 
 func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
@@ -74,10 +82,11 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 		return core.Errorf(core.KindUsage, core.Source{}, "--timeout must not be negative")
 	}
 	t := parseTarget(arg)
-	loader := env.NewLoader(f.env)
+	loader := env.NewLoader(env.Options{Env: f.env, DryRun: f.dryRun})
 	jobs, err := t.jobs(loader)
 	// Every request is resolved before the first is sent, so the masker
-	// knows every secret before anything is printed.
+	// knows every secret before anything is printed; captured ones join
+	// it as they are taken, before their response is printed.
 	cfg.masker = loader.Masker()
 	if err != nil {
 		return err
@@ -88,12 +97,19 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 	for i, j := range jobs {
 		res := &output.Result{Ref: j.ref}
 		err := j.err
-		if err == nil {
+		switch {
+		case err != nil:
+		case f.dryRun:
 			res.Request = output.Sent(j.p, cfg.masker)
-			if f.dryRun {
-				err = client.Check(j.p, j.vars)
-			} else {
-				err = send(ctx, client, j, f.fail, res, cfg.masker)
+			err = client.Check(j.p, j.vars)
+		default:
+			err = send(ctx, cfg, client, loader, j, f.fail, res)
+		}
+		// The requests after this one get what its captures took, and no
+		// older value of a variable that one of them did not take.
+		for _, name := range j.captures {
+			if !slices.ContainsFunc(res.Captures, func(c output.Capture) bool { return c.Name == name }) {
+				loader.Forget(name, j.ref)
 			}
 		}
 		if err != nil {
@@ -120,18 +136,33 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 	return nil
 }
 
-// send sends the request of j and sets the response of res. With fail, a
-// status of 400 or above is an error.
-func send(ctx context.Context, c *exec.Client, j job, fail bool, res *output.Result, m *core.Masker) error {
-	resp, err := c.Do(ctx, j.p, j.vars)
+// send sends the request of j with the values captured so far, evaluates
+// its directives, and sets the request, the response, the outcomes and
+// the captures of res. The error is for a status of 400 or above with
+// fail, or else for failed captures or assertions.
+func send(ctx context.Context, cfg *Config, c *exec.Client, loader *env.Loader, j job, fail bool, res *output.Result) error {
+	p, err := loader.Fill(j.p)
 	if err != nil {
 		return err
 	}
-	res.Response, res.Timing = output.NewResponse(resp, m)
-	if fail && resp.Status >= 400 {
-		return core.Errorf(core.KindStatus, j.p.Request.Source, "HTTP %d %s", resp.Status, resp.Reason)
+	res.Request = output.Sent(p, cfg.masker)
+	resp, err := c.Do(ctx, p, j.vars)
+	if err != nil {
+		return err
 	}
-	return nil
+	ev := assert.Evaluate(ctx, j.req, resp)
+	for _, v := range ev.Captured {
+		loader.Capture(v.Name, v.Value, v.Secret)
+	}
+	// A secret is masked in the very response it was captured from.
+	cfg.masker = loader.Masker()
+	res.Response, res.Timing = output.NewResponse(resp, cfg.masker)
+	res.Asserts = output.Checked(ev.Outcomes, cfg.masker)
+	res.Captures = output.Captures(ev.Captured)
+	if fail && resp.Status >= 400 {
+		return core.Errorf(core.KindStatus, j.req.Source, "HTTP %d %s", resp.Status, resp.Reason)
+	}
+	return ev.Err
 }
 
 // target is a command-line argument: a .http file or a directory, and a
@@ -200,7 +231,14 @@ func (t target) jobs(loader *env.Loader) ([]job, error) {
 	for _, path := range paths {
 		f, err := httpfile.ParseFile(path)
 		if err != nil {
-			jobs = append(jobs, job{ref: path, err: err})
+			j := job{ref: path, err: err}
+			if src, err := os.ReadFile(path); err == nil {
+				j.captures = httpfile.CaptureNames(src)
+			}
+			for _, name := range j.captures {
+				loader.Declare(name)
+			}
+			jobs = append(jobs, j)
 			continue
 		}
 		for i := range f.Requests {
@@ -210,12 +248,18 @@ func (t target) jobs(loader *env.Loader) ([]job, error) {
 	return jobs, nil
 }
 
-// prepare resolves the i-th request of f.
+// prepare resolves the i-th request of f, then declares the variables
+// its captures take for the requests prepared after it.
 func prepare(loader *env.Loader, f *core.File, i int) job {
-	j := job{ref: output.Ref(f, i)}
+	j := job{ref: output.Ref(f, i), req: f.Requests[i]}
 	j.vars, j.err = loader.For(f.Path)
 	if j.err == nil {
-		j.p, j.err = j.vars.Prepare(f.Requests[i])
+		j.p, j.err = j.vars.Prepare(j.req)
+	}
+	_, captures, _ := assert.Directives(j.req) // the file parsed, so they do
+	for _, c := range captures {
+		loader.Declare(c.Name)
+		j.captures = append(j.captures, c.Name)
 	}
 	return j
 }

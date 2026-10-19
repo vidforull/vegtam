@@ -7,11 +7,11 @@ import (
 
 type secretMap map[string]string
 
-func (m secretMap) SecretValue(name string) (string, error) {
-	if v, ok := m[name]; ok {
+func (m secretMap) SecretValue(s Secret) (string, error) {
+	if v, ok := m[s.Name]; ok {
 		return v, nil
 	}
-	return "", errors.New("no secret " + name)
+	return "", errors.New("no secret " + s.Name)
 }
 
 func TestText(t *testing.T) {

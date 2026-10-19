@@ -65,7 +65,7 @@ Authorization: Bearer {{token}}
 X-Key: {{ $env VEGTAM_TEST_KEY }}
 
 {"token": "{{token}}"}`)
-	l := NewLoader("dev")
+	l := NewLoader(Options{Env: "dev"})
 	p, err := prepare(t, l, path)
 	if err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ X-Key: {{ $env VEGTAM_TEST_KEY }}
 }
 
 func TestPrepareBodyFile(t *testing.T) {
-	p, err := prepare(t, NewLoader(""), tree(t, "POST https://example.com\n\n< ./payload.json"))
+	p, err := prepare(t, NewLoader(Options{}), tree(t, "POST https://example.com\n\n< ./payload.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestPrepareErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := prepare(t, NewLoader(tt.env), tree(t, tt.src))
+			_, err := prepare(t, NewLoader(Options{Env: tt.env}), tree(t, tt.src))
 			e, ok := err.(*core.Error)
 			if !ok || e.Kind != tt.kind || !strings.Contains(e.Error()+"\n", tt.want) || !slices.Equal(e.Variables, tt.vars) {
 				t.Errorf("error = %#v; want %s error with %q, variables %q", err, tt.kind, tt.want, tt.vars)
@@ -158,10 +158,95 @@ func TestEnvironmentFiles(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeFiles(t, dir, tt.files)
-			_, err := NewLoader("dev").For(filepath.Join(dir, "a.http"))
+			_, err := NewLoader(Options{Env: "dev"}).For(filepath.Join(dir, "a.http"))
 			if e, ok := err.(*core.Error); !ok || e.Kind != tt.kind || !strings.Contains(e.Error(), tt.want) {
 				t.Errorf("error = %v; want %s error with %q", err, tt.kind, tt.want)
 			}
 		})
 	}
+}
+
+func TestCaptures(t *testing.T) {
+	path := tree(t, `GET {{scheme}}://{{host}}/users/{{user}}
+Authorization: Bearer {{token}}
+
+{{token}}`)
+	f, err := httpfile.ParseFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := NewLoader(Options{Env: "dev"})
+	v, err := l.For(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Before an @capture declares it, token is the private one.
+	l.Declare("user")
+	before, err := v.Prepare(f.Requests[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Declare("token")
+	after, err := v.Prepare(f.Requests[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Prepared after it, the request refers to the captured values, over
+	// the environment; they are late until captured.
+	if got := after.URL.Masked() + " " + after.Headers[0].Value.Masked(); got != "https://api.example.test/users/{{user}} Bearer {{token}}" {
+		t.Errorf("masked = %q", got)
+	}
+	if _, err := after.URL.Reveal(v); err == nil || !strings.Contains(err.Error(), "user was not captured") {
+		t.Errorf("Reveal before the capture = %v", err)
+	}
+	if _, err := after.URL.Reveal(NewLoader(Options{DryRun: true}).must(t, path)); err != core.ErrLate {
+		t.Errorf("Reveal in a dry run = %v, want ErrLate", err)
+	}
+
+	if _, err := l.Fill(after); err == nil ||
+		!strings.HasSuffix(err.Error(), "not captured: user (an earlier request took no value), token (an earlier request took no value)") {
+		t.Errorf("Fill before the captures = %v", err)
+	}
+	l.Capture("token", "c4ptured-t0ken", true)
+	l.Capture("user", "7", false)
+	p, err := l.Fill(after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, _ := p.Headers[0].Value.Reveal(v)
+	old, _ := before.Headers[0].Value.Reveal(v)
+	if got := p.URL.Masked() + " " + p.Headers[0].Value.Masked(); got != "https://api.example.test/users/7 Bearer {{token}}" ||
+		p.URL.HasSecret() || auth != "Bearer c4ptured-t0ken" || old != "Bearer "+privateToken {
+		t.Errorf("filled = %q, %q; the request before the capture sends %q", got, auth, old)
+	}
+	if after.URL.Masked() != "https://api.example.test/users/{{user}}" {
+		t.Error("Fill changed its argument")
+	}
+	if got := l.Masker().Mask("c4ptured-t0ken 7"); got != "*** 7" {
+		t.Errorf("Masker().Mask = %q, want the secret capture only", got)
+	}
+
+	// A capture that took nothing leaves no older value behind, and the
+	// masker still knows the old one.
+	l.Forget("token", "a.http#login")
+	if _, err := p.Headers[0].Value.Reveal(v); err == nil {
+		t.Error("Reveal after Forget: want an error")
+	}
+	_, err = l.Fill(after)
+	if e, ok := err.(*core.Error); !ok || e.Kind != core.KindVariable || !slices.Equal(e.Variables, []string{"token"}) ||
+		!strings.HasSuffix(e.Msg, "not captured: token (a.http#login took no value)") {
+		t.Errorf("Fill after Forget = %v", err)
+	}
+	if got := l.Masker().Mask("c4ptured-t0ken"); got != "***" {
+		t.Errorf("Masker().Mask after Forget = %q", got)
+	}
+}
+
+func (l *Loader) must(t *testing.T, path string) *Vars {
+	t.Helper()
+	v, err := l.For(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
 }

@@ -73,18 +73,120 @@ vegtam's own extensions are comments, so other tools ignore them:
 | Directive | Meaning |
 |---|---|
 | `# @name <id>` | names the request |
-| `# @assert <expression>` | a check on the response, such as `status == 200` |
-| `# @capture <name> = <path>` | saves a value from the response, such as `token = $.token` |
+| `# @assert <check>` | a check on the response, such as `status == 200` |
+| `# @capture [plain] <name> = <source>` | takes a value from the response for the requests after it, such as `token = $.token` |
 | `# @tag <tags>` | labels for selecting requests |
 
-`@assert`, `@capture` and `@tag` are parsed and kept with the request; they
-are not evaluated yet. Each needs a value. Any other `# @word` is an error.
+Directives go before the request line or among the headers, and each
+needs a value. Their values are taken as written: placeholders in them
+are not resolved, so `header Authorization == "Bearer {{token}}"`
+compares with that very text. `@tag` is kept with the request but not
+used yet. Any other `# @word`, and an `@assert` or `@capture` outside the
+grammar below, is an error with the file and line, also for
+`--dry-run`, which parses directives but evaluates none.
+
+### Assertions
+
+`# @assert <check>` checks the response. A request may have any number of
+them, and every one is evaluated. If any fails, the result has an error
+of kind `assert` and the exit code is 1 (see
+[AUTOMATION.md](AUTOMATION.md#exit-codes)); the response is still shown.
+
+| Check | Passes when |
+|---|---|
+| `status == 200` | the status compares so; the operators are `==`, `!=`, `<`, `<=`, `>` and `>=` |
+| `status in 200..299` | the status is in the range, both ends included |
+| `header <Name> == "<value>"` | a value of the header is exactly `<value>`; the name is not case-sensitive |
+| `header <Name> contains "<text>"` | a value of the header contains `<text>` |
+| `header <Name> exists` | the response has the header |
+| `body contains "<text>"` | the body contains `<text>` |
+| `jsonpath <path> == <JSON>` | the value at the path equals a JSON value: `true`, `42`, `"Ada"`, `null`, `[1, 2]`, `{"id": 1}` |
+| `jsonpath <path> contains "<text>"` | the value at the path is a string that contains `<text>` |
+| `jsonpath <path> exists` | the body has a value at the path, `null` included |
+| `duration < 500ms` | the request, body included, took less; `<=` works too, with Go durations such as `2s` or `1m30s` |
+
+Quoted text is a JSON string, so `"say \"hi\""` and `"\u00e9"` work.
+
+**Paths.** A path starts with `$` and continues as a plain
+[jq](https://jqlang.org/) path, without spaces: names (`$.token`,
+`$.user.id`), quoted keys (`$["first-name"]`, `$."first-name"`) and
+array indexes (`$.items[0]`, `$.items[-1]` for the last), optionally
+ending in `|length`, the number of items, keys or characters. Nothing
+else: no functions, slices, iteration, `?` or other pipes, so a path
+only ever points at a value in the body and never computes a new one,
+such as a part or an encoding of a secret, which masking would not
+recognise. A path that goes into a value that is neither an object nor
+an array, such as `$.name[0]` on a string, does not fit the body; a
+missing key or index is absent. Numbers compare exactly:
+`12345678901234567890` keeps all its digits, and `43.0` equals `43`. A
+body that is not JSON, or that `--max-body` cut off, fails every
+`jsonpath` check; that is a failed check, not an error.
+
+Each outcome has the value checked, from the response and masked as the
+response is: the status, the duration, the header's values joined with
+`, `, the body, or the path's value as JSON; or, in parentheses, why
+there is none, such as `(absent)` or `(the body is not JSON)`.
+
+### Captures
+
+`# @capture <name> = <source>` takes a value from the response and sets
+the variable `<name>` for the requests after this one:
+
+```http
+### Sign in
+# @name login
+# @capture token = $.token
+# @capture plain user = $.user.id
+POST {{host}}/login
+Content-Type: application/json
+
+{"name": "ada", "password": "{{password}}"}
+
+### Uses what the sign-in returned
+# @name me
+GET {{host}}/users/{{user}}
+Authorization: Bearer {{token}}
+```
+
+| Source | Value |
+|---|---|
+| `$.path` | the value at the path, as for `jsonpath`: a string as it is, a number or boolean as JSON (`42`, `true`); an object or array, as compact JSON, only with `plain` |
+| `header <Name>` | the first value of the header |
+| `status` | the status code |
+
+- **Secret by default.** A captured value is a secret unless the
+  directive says `plain`: it is masked in all output from then on,
+  starting with the response it came from, and requests show it as its
+  placeholder, `{{token}}`. A plain value is inserted as it is and shown.
+- **Order.** "After this one" means the requests that `run` sends later
+  in the same run: the rest of the file and, for a directory, the files
+  after it. A captured variable takes precedence over the environment
+  and is never written to a file. `run file.http#me` sends one request,
+  with no earlier one to take values from: there `{{token}}` comes from
+  the environment, if at all.
+- **No value.** A source that finds no value is an error of kind
+  `capture` for its request, exit code 2: a body that is not JSON or that
+  `--max-body` cut off, a path that is absent or does not fit the body,
+  `null`, a missing header, or an object or array for a secret capture,
+  since masking knows the value as a whole and not as the body writes
+  it. The other captures of the request are still taken. The variable
+  then has no value, not even an older one or the environment's, and a
+  request that uses it fails with a `variable` error that names the
+  request whose capture took nothing. So does a request after a file
+  that does not parse, for each variable that file captures.
+- **One per variable.** A request captures each variable at most once.
+- **Dry runs** send nothing, so they capture nothing: a captured
+  variable stays a placeholder, and the URL or header that holds one is
+  not checked.
+
+The name follows the rules for variable names below; `plain` may itself
+be a name, as in `plain = $.plain`.
 
 ## Placeholders
 
 | Placeholder | Value |
 |---|---|
-| `{{name}}` | the variable `name` of the selected environment |
+| `{{name}}` | the variable `name`: captured by an earlier request of the run, or from the selected environment |
 | `{{$env NAME}}` | the environment variable `NAME` of the vegtam process |
 | `{{$cmd NAME}}` | reserved: the output of a command configured for the folder; an error for now |
 
@@ -126,7 +228,8 @@ from a request are reported together.
 ## Secrets
 
 Values from `http-client.private.env.json` and from `{{$env NAME}}` are
-secrets. A resolved request holds only their names; the values are inserted
+secrets, and so are captured values not marked `plain`. A resolved
+request holds only their names; the values are inserted
 when the request is sent. Wherever a request is shown, a secret appears as
 its placeholder (`Bearer {{token}}`). In other text that might contain a
 value, such as error messages and response headers and bodies, every

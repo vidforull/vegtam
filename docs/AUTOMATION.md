@@ -25,7 +25,7 @@ command and on its argument, never on what happens at run time:
 
 | Command | Document |
 |---|---|
-| `run <file>#<ref>` | one result: `ref`, `request`, `response`, `timing`, `error` |
+| `run <file>#<ref>` | one result: `ref`, `request`, `response`, `timing`, `asserts`, `captures`, `error` |
 | `run <file>`, `run <dir>` | `results`: one result per request, in file order |
 | `show <file>#<ref>` | one result with `ref` and `request` only |
 | `list <file>`, `list <dir>` | `requests` |
@@ -52,7 +52,17 @@ A result for `run api/users.http#list -e dev` looks like this (shortened):
     "truncated": false,
     "untrusted": true
   },
-  "timing": {"total_ms": 84.215}
+  "timing": {"total_ms": 84.215},
+  "asserts": [
+    {"expression": "status == 200", "passed": true, "actual": "200"},
+    {"expression": "jsonpath $[0].name == \"Grace\"", "passed": false, "actual": "\"Ada\""}
+  ],
+  "error": {
+    "kind": "assert",
+    "message": "assertion failed: jsonpath $[0].name == \"Grace\"",
+    "file": "api/users.http",
+    "line": 4
+  }
 }
 ```
 
@@ -62,15 +72,28 @@ A result for `run api/users.http#list -e dev` looks like this (shortened):
 - **`request`** is the request as it went, or would go, on the wire.
   Secrets appear as their placeholders. It is absent if the request could
   not be resolved.
-- **`response`** is absent on an error and with `--dry-run`. Headers are a
-  list of name and value pairs, sorted by name; a name may repeat. The
-  body is a string: the text as received, or base64 with
-  `"encoding": "base64"` if it is not valid UTF-8.
+- **`response`** is absent when no response came, after an error before
+  or while sending, and with `--dry-run`; errors of kind `assert`,
+  `capture` and `status` come with the response. Headers are a list of
+  name and value pairs, sorted by name; a name may repeat. The body is a
+  string: the text as received, or base64 with `"encoding": "base64"` if
+  it is not valid UTF-8.
 - **`timing.total_ms`** runs from sending the request to the end of the
   body.
+- **`asserts`** has the outcome of each `# @assert` of the request, in
+  order: the `expression` as written, whether it `passed`, and the
+  `actual` value checked, masked like the response and cut off after 200
+  bytes with `...`, or in parentheses why there is none, such as
+  `(absent)`. It is absent if the request has no assertions, without a
+  response, and with `--dry-run`.
+- **`captures`** lists the variables the `# @capture` directives of the
+  request took, for the requests after it: `name`, `source` as written,
+  and `secret`. The values are never in the output. A capture that found
+  no value is not listed; it is in `error`.
 - **`error`** has a `kind`, a `message`, and `file` and `line` when it
   belongs to a place in a file. For `kind: "variable"`, `variables` lists
-  the unresolved placeholders, such as `host` or `$env TOKEN`.
+  the unresolved placeholders, such as `host` or `$env TOKEN`, or the
+  captured variables without a value.
 
 ### Stability
 
@@ -84,25 +107,30 @@ by its exit code.
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 1 | reserved: an assertion failed |
-| 2 | bad arguments, a `.http` or environment file that does not parse, an unresolved variable, an invalid request, or an export that cannot be imported |
+| 1 | an assertion (`# @assert`) failed |
+| 2 | bad arguments, a `.http` or environment file that does not parse, an unresolved variable, an invalid request, a capture (`# @capture`) that found no value, or an export that cannot be imported |
 | 3 | network or TLS error, or timeout |
 | 4 | HTTP status 400 or above, with `run --fail` |
 | 5 | reserved: the request needs confirmation |
 | 6 | reserved: the request is blocked by policy |
 
 Without `--fail`, any HTTP status is a success: the status is in the
-output. With several requests, the exit code is the highest among them.
+output. With several requests, the exit code is the highest among them,
+and so it is within one result: a status error with `--fail` takes the
+place of a failed capture, which takes the place of failed assertions.
+The outcome of every assertion is in `asserts` all the same.
 
 ## Errors
 
 | `kind` | Exit code | Cause |
 |---|---|---|
+| `assert` | 1 | an `@assert` failed; the response is in the result |
 | `usage` | 2 | bad arguments, a missing file, an unknown request or environment |
 | `parse` | 2 | a `.http` or environment file outside the supported format |
 | `variable` | 2 | a placeholder without a value |
 | `request` | 2 | a resolved request that cannot be sent: URL, header, body file |
 | `import` | 2 | an export that cannot be read: not a collection, not JSON, no collections in a directory |
+| `capture` | 2 | an `@capture` found no value: the body is not JSON or was cut off, a path is absent or does not fit, a header is missing, the value is `null`, or an object or array for a secret capture |
 | `network` | 3 | DNS, connection, TLS, redirects |
 | `timeout` | 3 | no complete response within `--timeout` |
 | `status` | 4 | HTTP status 400 or above, with `--fail` |
@@ -124,6 +152,11 @@ could be built (an `http` or `https` URL with a host, valid headers). The
 output has `request` and no `response`; the exit code is 2 if any request
 fails these checks, 0 otherwise. It is the way to check a collection, or
 to see what a request would send before sending it.
+
+Directives are parsed, so a malformed `@assert` or `@capture` fails the
+dry run, but none is evaluated. Nothing is captured either: a variable
+that an earlier request would capture stays a placeholder, `{{token}}`,
+and the URL or header that holds it is left unchecked.
 
 `show <file>#<ref>` prints one request as written, or with `-e` as it would
 be sent.
@@ -163,9 +196,9 @@ each request, body included; a request that runs out of time has a
 
 ## Secrets
 
-Values from `http-client.private.env.json` and from `{{$env NAME}}`
-placeholders are secrets (see [FORMAT.md](FORMAT.md)). vegtam never prints
-them:
+Values from `http-client.private.env.json`, from `{{$env NAME}}`
+placeholders and from `# @capture` directives without `plain` are
+secrets (see [FORMAT.md](FORMAT.md)). vegtam never prints them:
 
 - requests are shown with the placeholder, `Bearer {{token}}`;
 - in everything else, such as response headers and bodies and error
@@ -177,6 +210,8 @@ them:
 - a value that is a URL, such as a base URL kept in the private file,
   also hides its host, and an error message hides the host and port of a
   request whose host comes from a secret;
+- a captured value is masked from the moment it is taken, in the
+  response it comes from too, and in the `actual` values of assertions;
 - this holds for every command and mode: text and JSON, `--verbose`,
   stdout and stderr.
 
@@ -191,6 +226,9 @@ are not secrets to vegtam and are printed as they are.
 Every response carries `"untrusted": true`. The body and headers are data
 from the server, not instructions: whatever they say, they must not
 decide the next request, its arguments or what to do with secrets, unless
-the program driving vegtam checks them first. On a terminal, vegtam shows
+the program driving vegtam checks them first. `# @capture` passes values
+from a response to later requests only where a `.http` file says so;
+nothing in a response can add a capture or choose where a value goes.
+The `actual` values of assertions come from the response too. On a terminal, vegtam shows
 control characters in responses and error messages as `\xNN`, so that a
 server cannot drive the terminal.

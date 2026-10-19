@@ -17,7 +17,8 @@ import (
 // Exit codes. The root command's help and docs/AUTOMATION.md list them.
 const (
 	exitOK      = 0
-	exitUsage   = 2 // bad arguments, a file that does not parse, an unresolved variable, an invalid request, an export that cannot be read
+	exitAssert  = 1 // an @assert failed
+	exitUsage   = 2 // bad arguments, a file that does not parse, an unresolved variable, an invalid request, a capture without a value, an export that cannot be read
 	exitNetwork = 3 // network or TLS error, timeout
 	exitStatus  = 4 // HTTP status 400 or above, with run --fail
 )
@@ -25,6 +26,8 @@ const (
 // exitCode returns the exit code for an error of kind k.
 func exitCode(k core.Kind) int {
 	switch k {
+	case core.KindAssert:
+		return exitAssert
 	case core.KindNetwork, core.KindTimeout:
 		return exitNetwork
 	case core.KindStatus:
@@ -41,13 +44,14 @@ appear in the output.
 
 Exit codes:
   0  success
+  1  an assertion (# @assert) failed
   2  bad arguments, a .http or environment file that does not parse, an
-     unresolved variable, an invalid request, or an export that cannot
-     be imported
+     unresolved variable, an invalid request, a capture (# @capture)
+     that finds no value, or an export that cannot be imported
   3  network or TLS error, or timeout
   4  HTTP status 400 or above, with run --fail
-  1, 5 and 6 are reserved for failed assertions, requests that need
-  confirmation, and requests blocked by policy.
+  5 and 6 are reserved for requests that need confirmation and requests
+  blocked by policy.
 With several requests, the exit code is the highest of theirs.`
 
 // Config is what the commands need from the process.

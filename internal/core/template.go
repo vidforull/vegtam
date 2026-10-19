@@ -36,6 +36,9 @@ var (
 	funcName = regexp.MustCompile(`^\$[A-Za-z][A-Za-z0-9_.]*$`)
 )
 
+// IsVarName reports whether s may name a variable, as in {{s}}.
+func IsVarName(s string) bool { return varName.MatchString(s) }
+
 // ParseTemplate splits s into literal text and placeholders. Whitespace
 // inside the braces is ignored. A "{{" without a matching "}}" and a
 // malformed placeholder are errors.
