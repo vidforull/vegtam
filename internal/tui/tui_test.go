@@ -3,10 +3,13 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +21,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/env"
 )
 
 func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
@@ -36,8 +40,9 @@ type fixture struct {
 	dir  string
 	host string
 
-	mu   sync.Mutex
-	seen []string // the paths the server was asked for
+	mu        sync.Mutex
+	seen      []string // the paths the server was asked for
+	noSession bool     // the sign-in hands out no session
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -87,7 +92,17 @@ func (fx *fixture) handler() http.Handler {
 		fmt.Fprint(w, strings.Repeat("x", 100)+r.URL.Query().Get("key"))
 	})
 	mux.HandleFunc("/slow", func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+	mux.HandleFunc("PUT /items/", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		fmt.Fprintf(w, "%s %s\n%s\n%s", r.URL.Path, r.URL.RawQuery, r.Header.Get("Authorization"), body)
+	})
 	mux.HandleFunc("POST /login", func(w http.ResponseWriter, _ *http.Request) {
+		fx.mu.Lock()
+		defer fx.mu.Unlock()
+		if fx.noSession {
+			fmt.Fprint(w, `{}`)
+			return
+		}
 		fmt.Fprintf(w, `{"session": %q}`, sessionSecret)
 	})
 	mux.HandleFunc("/me", func(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +142,7 @@ func keyMsg(k string) tea.KeyPressMsg {
 	special := map[string]tea.KeyPressMsg{
 		"enter": {Code: tea.KeyEnter}, "esc": {Code: tea.KeyEscape}, "tab": {Code: tea.KeyTab},
 		"shift+tab": {Code: tea.KeyTab, Mod: tea.ModShift}, "ctrl+c": {Code: 'c', Mod: tea.ModCtrl},
-		"up": {Code: tea.KeyUp}, "down": {Code: tea.KeyDown},
+		"up": {Code: tea.KeyUp}, "down": {Code: tea.KeyDown}, "backspace": {Code: tea.KeyBackspace},
 	}
 	if msg, ok := special[k]; ok {
 		return msg
@@ -188,7 +203,7 @@ func TestNavigation(t *testing.T) {
 	for _, k := range []string{"k", "k", "k"} {
 		press(m, k)
 	}
-	if m.cursor != 0 || !strings.HasSuffix(m.requestText(), "api.http\n\n9 requests\n") {
+	if m.cursor != 0 || !strings.HasSuffix(m.requestText(), "api.http\n\n10 requests\n") {
 		t.Errorf("at the top the file is selected and described:\n%s", view(m))
 	}
 	for _, want := range []pane{requestPane, responsePane, treePane} {
@@ -381,5 +396,380 @@ func TestPanic(t *testing.T) {
 	m = newModel(t, fx.dir, "test", 1<<20, 100, 30)
 	if _, quit := m.Update(panicMsg{fl.panic}); fl.panic == nil || m.panicked != fl.panic || quit == nil {
 		t.Error("a panic in the request's goroutine: nothing kept, or no quit")
+	}
+}
+
+// typeText presses the keys of the characters of s.
+func typeText(m *Model, s string) {
+	for _, r := range s {
+		press(m, string(r))
+	}
+}
+
+// shownLabels returns the labels of the rows the tree shows.
+func shownLabels(m *Model) []string {
+	var labels []string
+	for _, i := range m.shown {
+		labels = append(labels, m.rows[i].label)
+	}
+	return labels
+}
+
+func TestSearch(t *testing.T) {
+	fx := newFixture(t)
+	m := newModel(t, fx.dir, "test", 1<<20, 100, 30)
+	press(m, "tab", "/")
+	if m.mode != searching || m.focus != treePane {
+		t.Fatalf("/: mode %d, focus %d", m.mode, m.focus)
+	}
+	press(m, "M", "e")
+	if got := shownLabels(m); !slices.Equal(got, []string{"api.http", "GET me"}) || m.rows[m.cursor].label != "GET me" ||
+		!strings.Contains(view(m), "/Me_") || strings.Contains(view(m), "GET echo") {
+		t.Errorf("/Me: shown %q, selected %q\n%s", got, m.rows[m.cursor].label, view(m))
+	}
+	// The URL as written counts, the environment's value does not.
+	press(m, "backspace", "backspace")
+	typeText(m, "{{closed}}")
+	if got := shownLabels(m); !slices.Equal(got, []string{"api.http", "GET refused"}) {
+		t.Errorf("/{{closed}}: shown %q", got)
+	}
+	press(m, "enter")
+	if m.mode != browsing || m.query != "{{closed}}" || !strings.Contains(view(m), "/{{closed}}") || strings.Contains(view(m), "{{closed}}_") {
+		t.Errorf("enter: mode %d, query %q\n%s", m.mode, m.query, view(m))
+	}
+	// The file name counts too, and j and k move among the rows shown.
+	press(m, "/")
+	for range len("{{closed}}") {
+		press(m, "backspace")
+	}
+	typeText(m, "BROKEN")
+	press(m, "enter", "k", "k", "j")
+	if got := shownLabels(m); !slices.Equal(got, []string{"broken.http"}) || m.rows[m.cursor].label != "broken.http" {
+		t.Errorf("/BROKEN: shown %q, selected %q", got, m.rows[m.cursor].label)
+	}
+	// Nothing matches: nothing is sent.
+	press(m, "/", "z", "z", "enter")
+	if !strings.Contains(view(m), "no request matches") {
+		t.Errorf("no match:\n%s", view(m))
+	}
+	press(m, "enter")
+	if got := fx.asked(); len(got) != 0 || !strings.Contains(view(m), "no request matches the search") {
+		t.Errorf("enter with nothing shown: the server had %q\n%s", got, view(m))
+	}
+	// esc clears the search and leaves the cursor where it was.
+	press(m, "/", "esc")
+	if m.mode != browsing || m.query != "" || len(m.shown) != len(m.rows) || m.rows[m.cursor].label != "broken.http" {
+		t.Errorf("esc: mode %d, query %q, %d of %d rows shown", m.mode, m.query, len(m.shown), len(m.rows))
+	}
+	// A paste goes into the search, on one line.
+	press(m, "/")
+	m.Update(tea.PasteMsg{Content: "slo\nw"})
+	if m.query != "slo w" {
+		t.Errorf("after a paste, the search is %q", m.query)
+	}
+}
+
+// styled returns p as the request pane shows a placeholder of class c.
+func styled(c env.Class, p string) string { return placeholderStyles[c].Render(p) }
+
+// TestHighlight checks the colour of each kind of placeholder in the
+// request pane, as sent and as written, and of a capture that took no
+// value, which the preview shows as the error that sending would give.
+func TestHighlight(t *testing.T) {
+	fx := newFixture(t)
+	m := newModel(t, fx.dir, "", 1<<20, 150, 40)
+	text := m.request.GetContent()
+	for _, want := range []string{
+		"GET " + styled(env.Unresolved, "{{host}}") + "/echo?key=" + styled(env.Unresolved, "{{token}}") +
+			"&env=" + styled(env.Secret, "{{$env VEGTAM_TEST_KEY}}"),
+		"unresolved variables: host, token (no environment selected",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("without an environment, the request pane does not show %q:\n%q", want, text)
+		}
+	}
+	press(m, "e", "j", "j", "enter")
+	if text = m.request.GetContent(); !strings.Contains(text, "/echo?key="+styled(env.Secret, "{{token}}")+"&env=") {
+		t.Errorf("as sent, the secret is not coloured:\n%q", text)
+	}
+	if got := m.highlight("a *** b {{nope}} {{ host }} {{$x y z}}"); got != "a "+styled(env.Secret, "***")+" b "+
+		styled(env.Unresolved, "{{nope}}")+" "+styled(env.Plain, "{{ host }}")+" {{$x y z}}" {
+		t.Errorf("highlight = %q", got)
+	}
+
+	goTo(t, m, "me")
+	if text = m.request.GetContent(); !strings.Contains(text, "GET "+styled(env.Plain, "{{host}}")+"/me\nX-Session: "+
+		styled(env.Unresolved, "{{session}}")) || !strings.Contains(text, "unresolved variables: session") {
+		t.Errorf("before the sign-in:\n%q", text)
+	}
+	fx.mu.Lock()
+	fx.noSession = true
+	fx.mu.Unlock()
+	goTo(t, m, "login")
+	press(m, "enter", "y")
+	goTo(t, m, "me")
+	if text = m.request.GetContent(); !strings.Contains(text, "X-Session: "+styled(env.Unresolved, "{{session}}")) ||
+		!strings.Contains(text, "✗ variable: ") || !strings.Contains(text, "not captured: session (") ||
+		!strings.Contains(text, "api.http#login took no value)") {
+		t.Errorf("after a sign-in that took no session:\n%q", text)
+	}
+	press(m, "enter")
+	if m.result.Error == nil || !strings.Contains(m.result.Error.Message, "not captured: session (") {
+		t.Errorf("sending gives %+v", m.result.Error)
+	}
+	fx.mu.Lock()
+	fx.noSession = false
+	fx.mu.Unlock()
+	goTo(t, m, "login")
+	press(m, "enter", "y")
+	goTo(t, m, "me")
+	if text = m.request.GetContent(); !strings.Contains(text, "X-Session: "+styled(env.Captured, "{{session}}")) {
+		t.Errorf("after a sign-in that took the session:\n%q", text)
+	}
+}
+
+// clipboard returns what the command cmd puts on the clipboard, and
+// whether it does.
+func clipboard(cmd tea.Cmd) (string, bool) {
+	if cmd == nil {
+		return "", false
+	}
+	msg := cmd()
+	v := reflect.ValueOf(msg)
+	if v.Kind() != reflect.String || v.Type().Name() != "setClipboardMsg" {
+		return "", false
+	}
+	return v.String(), true
+}
+
+// TestCopyCurl copies requests as curl commands: the command is on the
+// clipboard and in the response pane, and in bash, with the secrets set
+// as the comment says, it gives curl the request that vegtam sends.
+func TestCopyCurl(t *testing.T) {
+	fx := newFixture(t)
+	m := newModel(t, fx.dir, "test", 1<<20, 150, 40)
+	goTo(t, m, "everywhere")
+	_, cmd := m.Update(keyMsg("y"))
+	got, ok := clipboard(cmd)
+	if !ok || got != m.curl || !strings.Contains(view(m), "curl "+fx.dir) || !strings.Contains(view(m), "Copied, if the terminal") {
+		t.Fatalf("y: clipboard %q (%v), shown %q\n%s", got, ok, m.curl, view(m))
+	}
+	if found := leaks(got); len(found) > 0 {
+		t.Errorf("the command holds %q:\n%s", found, got)
+	}
+	want := "# Set first: token for {{token}}, VEGTAM_TEST_KEY for {{$env VEGTAM_TEST_KEY}}\n" +
+		`: "${token?}" "${VEGTAM_TEST_KEY?}" && curl -X PUT --globoff --path-as-is '` + fx.host + `/items/'"$token"'?key='"$VEGTAM_TEST_KEY"'&q=it'\''s' \` + "\n" +
+		`  -H 'Authorization: Bearer '"$token" \` + "\n" +
+		`  -H 'Content-Type: application/json' \` + "\n" +
+		`  --data-raw '{"token": "'"$token"'", "key": "'"$VEGTAM_TEST_KEY"$'", "tab": "\t"}'` + "\n"
+	if got != want {
+		t.Errorf("the command:\n%s\nwant\n%s", got, want)
+	}
+	script := "curl() { printf '%s\\0' \"$@\"; }\n" + got
+	sh := exec.CommandContext(t.Context(), "bash", "--noprofile", "--norc", "-c", script)
+	sh.Env = []string{"token=" + privateSecret, "VEGTAM_TEST_KEY=" + envSecret}
+	out, err := sh.Output()
+	if err != nil {
+		t.Fatalf("bash: %v", err)
+	}
+	args := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+	if wantArgs := []string{
+		"-X", "PUT", "--globoff", "--path-as-is", fx.host + "/items/" + privateSecret + "?key=" + envSecret + "&q=it's",
+		"-H", "Authorization: Bearer " + privateSecret, "-H", "Content-Type: application/json",
+		"--data-raw", `{"token": "` + privateSecret + `", "key": "` + envSecret + "\", \"tab\": \"\t\"}",
+	}; !slices.Equal(args, wantArgs) {
+		t.Errorf("curl got\n%q\nwant\n%q", args, wantArgs)
+	}
+
+	// esc hides it, as does choosing another request.
+	press(m, "esc")
+	if m.curl != "" || strings.Contains(view(m), "Copied, if") {
+		t.Errorf("esc does not hide the command:\n%s", view(m))
+	}
+	press(m, "y", "k")
+	if m.curl != "" {
+		t.Error("the command stays after k")
+	}
+
+	// A captured value is a shell variable too.
+	goTo(t, m, "login")
+	press(m, "enter", "y")
+	goTo(t, m, "me")
+	if got, _ = yank(m); !strings.HasPrefix(got, "# Set first: session for {{session}} from an @capture\n") ||
+		!strings.HasSuffix(got, `  -H 'X-Session: '"$session"`+"\n") {
+		t.Errorf("me:\n%s", got)
+	}
+
+	// No command for a file, nor for a request that cannot be sent.
+	goTo(t, m, "echo")
+	press(m, "k")
+	if _, ok = yank(m); ok || !strings.Contains(view(m), "select a request to copy it") {
+		t.Errorf("y on a file:\n%s", view(m))
+	}
+	m = newModel(t, fx.dir, "", 1<<20, 150, 40)
+	if _, ok = yank(m); ok || !strings.Contains(view(m), "not copied: unresolved variables: host, token") {
+		t.Errorf("y without an environment:\n%s", view(m))
+	}
+
+	// Nor while a request is in flight: esc would cancel it, not hide
+	// the command.
+	m = newModel(t, fx.dir, "test", 1<<20, 150, 40)
+	goTo(t, m, "slow")
+	_, sent := m.Update(keyMsg("enter"))
+	if _, ok = yank(m); ok || m.curl != "" || !strings.Contains(view(m), "Sending ") {
+		t.Errorf("y in flight:\n%s", view(m))
+	}
+	press(m, "esc")
+	m.Update(sent())
+
+	// Nor for a request whose text holds a secret value outside a
+	// placeholder: quoted for the shell, the value could slip past the
+	// masker.
+	src := "# @name literal\nGET {{host}}/echo?q=it's\nX-Copy: " + privateSecret + "\n"
+	if err = os.WriteFile(filepath.Join(fx.dir, "literal.http"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m = newModel(t, fx.dir, "test", 1<<20, 150, 40)
+	goTo(t, m, "literal")
+	if got, ok = yank(m); ok || m.curl != "" || m.note != "not copied: a secret value is in the request outside a placeholder, in header X-Copy" {
+		t.Errorf("y with a secret in the text: %q\n%s", got, view(m))
+	}
+
+	// Nor if a secret value is in what the command adds: masked, the
+	// command would be wrong.
+	goTo(t, m, "create")
+	m.masker = m.masker.Join(core.NewMasker([]string{"raw"}))
+	if got, ok = yank(m); ok || m.curl != "" || m.note != "not copied: a secret value is in the curl command" {
+		t.Errorf("y with a secret in --data-raw: %q\n%s", got, view(m))
+	}
+}
+
+// TestPastSecrets checks that a secret that only a preview read stays
+// masked in the views and keeps a request that holds it from being
+// copied, once another environment is chosen.
+func TestPastSecrets(t *testing.T) {
+	fx := newFixture(t)
+	src := "# @name literal\nGET {{host}}/echo\nX-Copy: " + privateSecret + "\n"
+	if err := os.WriteFile(filepath.Join(fx.dir, "literal.http"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(t, fx.dir, "test", 1<<20, 150, 40) // the preview of echo reads the private file
+	press(m, "e", "k", "enter")
+	if m.env != "other" {
+		t.Fatalf("env %q", m.env)
+	}
+	goTo(t, m, "literal")
+	if found := leaks(view(m)); len(found) > 0 || !strings.Contains(sgr.ReplaceAllString(view(m), ""), "X-Copy: ***") {
+		t.Errorf("secret forms %q in\n%s", found, view(m))
+	}
+	if got, ok := yank(m); ok || m.note != "not copied: a secret value is in the request outside a placeholder, in header X-Copy" {
+		t.Errorf("y: %q\n%s", got, view(m))
+	}
+}
+
+// yank presses y and returns what the command it gives back puts on the
+// clipboard, and whether it does.
+func yank(m *Model) (string, bool) {
+	_, cmd := m.Update(keyMsg("y"))
+	return clipboard(cmd)
+}
+
+// TestFold folds the JSON body of a response with z: all of it, from
+// depth 1, from depth 2, then all of it again, for the next response too.
+func TestFold(t *testing.T) {
+	fx := newFixture(t)
+	m := newModel(t, fx.dir, "test", 1<<20, 150, 40)
+	press(m, "enter")
+	full := m.response.GetContent()
+	if !strings.Contains(full, "\"echo\": {\n    \"authorization\": \"Bearer ***\",") {
+		t.Fatalf("the body is not indented:\n%s", full)
+	}
+	for _, want := range []string{
+		"{\n  \"echo\": {… 3 keys},\n  \"php\": {… 3 keys}\n}\n",
+		"\"echo\": {\n    \"authorization\": \"Bearer ***\",",
+		full,
+	} {
+		press(m, "z")
+		if got := m.response.GetContent(); !strings.Contains(got, want) {
+			t.Errorf("fold %d: no %q in\n%s", m.fold, want, got)
+		}
+	}
+	press(m, "z")
+	if m.fold != 1 || !strings.Contains(view(m), "(folded from depth 1)") || !strings.Contains(view(m), "JSON folded from depth 1") {
+		t.Errorf("z: fold %d\n%s", m.fold, view(m))
+	}
+	press(m, "enter")
+	if got := m.response.GetContent(); !strings.Contains(got, "\"echo\": {… 3 keys}") || !strings.Contains(got, "✓ status == 200") {
+		t.Errorf("the next response is not folded as the last:\n%s", got)
+	}
+	// A body is masked whole before it is folded: a secret value cut in
+	// two by a fold would leave its end unmasked.
+	secret := `"b": 1}, "c": "S3cr3tTail`
+	m.result.Response.Body = `{"a": {"b": 1}, "c": "S3cr3tTail"}`
+	m.masker = core.NewMasker([]string{secret})
+	m.showResponse()
+	if got := m.response.GetContent(); strings.Contains(got, "S3cr3tTail") || !strings.Contains(got, `{"a": {***"}`) {
+		t.Errorf("a secret across a fold:\n%s", got)
+	}
+	// DEL and C1 characters, which JSON allows in strings, do not keep a
+	// body from being folded; they are shown escaped.
+	m.result.Response.Body = "{\"a\": {\"b\": \"x\x7f\u0080y\"}}"
+	m.showResponse()
+	if got := m.response.GetContent(); !strings.Contains(got, "\"a\": {… 1 key}") {
+		t.Errorf("a body with DEL and C1, folded:\n%s", got)
+	}
+	press(m, "z", "z")
+	if got := m.response.GetContent(); !strings.Contains(got, `"b": "x\x7f\x80y"`) {
+		t.Errorf("a body with DEL and C1:\n%s", got)
+	}
+
+	// A body that is not JSON is shown as it is.
+	goTo(t, m, "big")
+	press(m, "enter")
+	if got := m.response.GetContent(); !strings.Contains(got, strings.Repeat("x", 100)+"***") {
+		t.Errorf("a body that is not JSON, folded:\n%s", got)
+	}
+}
+
+// TestStatusLine checks that the status line fills the width exactly and
+// keeps the main keys whole, cutting the environment and the note short.
+func TestStatusLine(t *testing.T) {
+	fx := newFixture(t)
+	for _, w := range []int{12, 20, 30, 40, 60, 72, 73, 80, 100, 160} {
+		m := newModel(t, fx.dir, "test", 1<<20, w, 24)
+		m.note = "a note long enough not to fit beside the keys of any terminal this test tries"
+		line := sgr.ReplaceAllString(m.statusLine(), "")
+		if got := lipgloss.Width(line); got != w {
+			t.Errorf("%d columns: the status line is %d wide: %q", w, got, line)
+		}
+		var want []string
+		if w >= 30 {
+			want = []string{"enter send", "? help", "q quit"}
+		}
+		if w >= 80 {
+			want = append(want, "/ search", "y curl", "e env")
+		}
+		for _, k := range want {
+			if !strings.Contains(line, k) {
+				t.Errorf("%d columns: no %q in %q", w, k, line)
+			}
+		}
+		if w > 30 && w < 160 && (!strings.HasPrefix(line, " env: ") || !strings.Contains(line, "…")) {
+			t.Errorf("%d columns: the left part is not cut short: %q", w, line)
+		}
+	}
+}
+
+// TestRedraw checks that ctrl+l, in any mode, has Bubble Tea clear the
+// screen and draw it again, over what something else wrote on it.
+func TestRedraw(t *testing.T) {
+	fx := newFixture(t)
+	m := newModel(t, fx.dir, "", 1<<20, 100, 30)
+	for _, mode := range []mode{browsing, searching, helping} {
+		m.mode = mode
+		_, cmd := m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
+		if cmd == nil || reflect.TypeOf(cmd()).Name() != "clearScreenMsg" {
+			t.Errorf("ctrl+l in mode %d: no clear screen", mode)
+		}
 	}
 }

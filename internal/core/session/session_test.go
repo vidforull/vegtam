@@ -6,10 +6,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
 	"github.com/vidforull/vegtam/internal/core/output"
 )
@@ -93,5 +95,78 @@ func TestPreview(t *testing.T) {
 	}
 	if got := output.Sent(j.Prepared, preview.Masker()).Headers[0].Value; got != "Bearer {{token}}" {
 		t.Errorf("preview header = %q, want the placeholder", got)
+	}
+	if j.Class(core.Ref{Name: "token"}) != env.Captured || j.Class(core.Ref{Name: "host"}) != env.Plain {
+		t.Errorf("classes of the preview: token %v, host %v", j.Class(core.Ref{Name: "token"}), j.Class(core.Ref{Name: "host"}))
+	}
+}
+
+// TestPreviewLost checks that a preview which forgets what the session
+// lost fails as sending would, and that a dry run of a whole file, in
+// which nothing is captured, loses nothing.
+func TestPreviewLost(t *testing.T) {
+	f := newFile(t)
+	path := filepath.Join(filepath.Dir(f.Path), "lost.http")
+	src := "# @name login\n# @capture token = $.token\nGET {{host}}/me\n\n###\n# @name me\nGET {{host}}/me\nAuthorization: Bearer {{token}}\n"
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lf, err := httpfile.ParseFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(Options{Env: "test", MaxBody: 1 << 20})
+	if login := s.Run(t.Context(), s.Prepare(t.Context(), lf, 0)); len(login.Captures) != 0 {
+		t.Fatalf("login captured %+v", login.Captures)
+	}
+	if got := s.Lost(); len(got) != 1 || got["token"] != path+"#login" {
+		t.Fatalf("Lost() = %v", got)
+	}
+	sent := s.Run(t.Context(), s.Prepare(t.Context(), lf, 1))
+
+	preview := New(Options{Env: "test", DryRun: true})
+	preview.Declare(s.Declared()...)
+	for name, ref := range s.Lost() {
+		preview.Forget(name, ref)
+	}
+	res := preview.Run(t.Context(), preview.Prepare(t.Context(), lf, 1))
+	if res.Error == nil || sent.Error == nil || res.Request != nil || !reflect.DeepEqual(res.Error, sent.Error) ||
+		!strings.Contains(res.Error.Message, "not captured: token ("+path+"#login took no value)") {
+		t.Errorf("preview error %+v, request %+v; sending gave %+v", res.Error, res.Request, sent.Error)
+	}
+
+	dry := New(Options{Env: "test", DryRun: true})
+	jobs, err := dry.Jobs(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range jobs {
+		if res := dry.Run(t.Context(), j); res.Error != nil {
+			t.Errorf("dry run of %s: %+v", j.Ref, res.Error)
+		}
+	}
+	if got := dry.Lost(); len(got) != 0 {
+		t.Errorf("a dry run lost %v", got)
+	}
+}
+
+// TestCurl checks that a dry run gives a request that it can send as a
+// curl command, with what is captured as a shell variable, and the error
+// it would give for one it cannot.
+func TestCurl(t *testing.T) {
+	f := newFile(t)
+	s := New(Options{Env: "test", DryRun: true})
+	if _, err := s.Curl(t.Context(), s.Prepare(t.Context(), f, 1), nil); err == nil {
+		t.Error("Curl with token unresolved: no error")
+	}
+	s.Declare("token")
+	cmd, err := s.Curl(t.Context(), s.Prepare(t.Context(), f, 1), nil)
+	if err != nil || !strings.HasPrefix(cmd, "# Set first: token for {{token}} from an @capture\n: \"${token?}\" && curl --path-as-is 'http://") ||
+		!strings.HasSuffix(cmd, "/me' \\\n  -H 'Authorization: Bearer '\"$token\"\n") {
+		t.Errorf("Curl = %q, %v", cmd, err)
+	}
+	s.Forget("token", "api.http#login")
+	if _, err = s.Curl(t.Context(), s.Prepare(t.Context(), f, 1), nil); err == nil || !strings.Contains(err.Error(), "not captured: token") {
+		t.Errorf("Curl after the capture lost token: %v", err)
 	}
 }

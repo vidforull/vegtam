@@ -47,6 +47,7 @@ func caught(v any) *Panic { return &Panic{Value: v, Stack: debug.Stack()} }
 type row struct {
 	path  string
 	label string
+	in    string     // the label of the file, for a request
 	file  *core.File // nil if the file does not parse
 	index int        // of the request in file; -1 for the file
 	err   error      // why the file does not parse
@@ -78,10 +79,11 @@ func New(opts Options) (*Model, error) {
 			if m.cursor < 0 {
 				m.cursor = len(m.rows)
 			}
-			m.rows = append(m.rows, row{path: path, label: r.Method + " " + name, file: f, index: i})
+			m.rows = append(m.rows, row{path: path, label: r.Method + " " + name, in: label, file: f, index: i})
 		}
 	}
 	m.cursor = max(m.cursor, 0)
+	m.shown = m.match()
 	m.request, m.response = viewport.New(), viewport.New()
 	m.request.SoftWrap, m.response.SoftWrap = true, true
 	return m, nil
@@ -165,7 +167,7 @@ func (m *Model) sendSelected() tea.Cmd {
 	go fl.send(ctx, m.send, r)
 	// Once it runs, Run waits for it: a panic from here on cannot leave
 	// Run waiting for a goroutine that never started.
-	m.flight, m.result, m.note = fl, nil, ""
+	m.flight, m.result, m.note, m.curl = fl, nil, "", ""
 	m.showResponse()
 	return func() tea.Msg {
 		<-fl.done
@@ -191,7 +193,7 @@ func (fl *flight) send(ctx context.Context, s *session.Session, r row) {
 func (m *Model) answered(msg sentMsg) {
 	msg.flight.cancel()
 	m.flight, m.result, m.note = nil, msg.flight.result, ""
-	m.declared, m.sent = m.send.Declared(), m.send.Masker()
+	m.declared, m.lost, m.sent = m.send.Declared(), m.send.Lost(), m.send.Masker()
 	m.refresh()
 	m.showResponse()
 	m.response.GotoTop()

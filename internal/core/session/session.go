@@ -10,6 +10,7 @@ import (
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/assert"
+	"github.com/vidforull/vegtam/internal/core/curl"
 	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
@@ -70,6 +71,16 @@ func (s *Session) Declare(names ...string) {
 	}
 }
 
+// Lost returns the variables whose latest @capture took no value, each
+// with the request it was in.
+func (s *Session) Lost() map[string]string { return s.loader.Lost() }
+
+// Forget makes name a variable whose latest @capture, in the request ref,
+// took no value, as if that request had run: a request prepared after the
+// call that uses name is an error of kind variable, in a dry run too. A
+// preview forgets what the session it previews has lost.
+func (s *Session) Forget(name, ref string) { s.loader.Forget(name, ref) }
+
 // Reload makes the requests prepared from now on read the environment and
 // command files again and run their commands again, as a new run would,
 // with the values captured so far. Secrets read before stay masked.
@@ -82,8 +93,13 @@ type Job struct {
 	Prepared *core.Prepared // nil if Err is set
 	Err      error
 	vars     *env.Vars
-	captures []string // the variables its @capture directives take
+	captures []string             // the variables its @capture directives take
+	classes  map[string]env.Class // of its placeholders, as it was prepared
 }
+
+// Class returns what the placeholder r of the request stands for, as the
+// request was prepared: see env.Vars.Classes.
+func (j *Job) Class(r core.Ref) env.Class { return j.classes[r.String()] }
 
 // Prepare resolves the i-th request of f, then declares the variables its
 // captures take for the requests prepared after it.
@@ -91,6 +107,7 @@ func (s *Session) Prepare(ctx context.Context, f *core.File, i int) *Job {
 	j := &Job{Ref: output.Ref(f, i), Request: f.Requests[i]}
 	j.vars, j.Err = s.loader.For(f.Path)
 	if j.Err == nil {
+		j.classes = j.vars.Classes(j.Request)
 		j.Prepared, j.Err = j.vars.Prepare(ctx, j.Request)
 	}
 	_, captures, _ := assert.Directives(j.Request) // the file parsed, so they do
@@ -135,20 +152,24 @@ func (s *Session) Jobs(ctx context.Context, root string) ([]*Job, error) {
 // Run sends the request of j with the values captured so far, or checks
 // it in a dry run, and returns its result with every secret masked. The
 // requests prepared after j get what its captures took, and no older
-// value of a variable that one of them did not take.
+// value of a variable that one of them did not take. In a dry run they
+// took nothing, and lost nothing either.
 func (s *Session) Run(ctx context.Context, j *Job) *output.Result {
 	res := &output.Result{Ref: j.Ref}
 	err := j.Err
 	switch {
 	case err != nil:
 	case s.opts.DryRun:
-		res.Request = output.Sent(j.Prepared, s.Masker())
-		err = s.client.Check(ctx, j.Prepared, j.vars)
+		var p *core.Prepared
+		if p, err = s.loader.Fill(j.Prepared); err == nil {
+			res.Request = output.Sent(p, s.Masker())
+			err = s.client.Check(ctx, p, j.vars)
+		}
 	default:
 		err = s.send(ctx, j, res)
 	}
 	for _, name := range j.captures {
-		if !slices.ContainsFunc(res.Captures, func(c output.Capture) bool { return c.Name == name }) {
+		if !s.opts.DryRun && !slices.ContainsFunc(res.Captures, func(c output.Capture) bool { return c.Name == name }) {
 			s.loader.Forget(name, j.Ref)
 		}
 	}
@@ -156,6 +177,28 @@ func (s *Session) Run(ctx context.Context, j *Job) *output.Result {
 		res.Error = output.NewError(err, s.Masker())
 	}
 	return res
+}
+
+// Curl returns the request of j as a curl command line, as Run would send
+// it now: see package curl. Every secret in it is a shell variable, and
+// so is every captured value in a dry run; m, or the session's masker if
+// m is nil, finds any other secret value, which stops the command. The
+// error is otherwise the one Run would give before sending.
+func (s *Session) Curl(ctx context.Context, j *Job, m *core.Masker) (string, error) {
+	if j.Err != nil {
+		return "", j.Err
+	}
+	p, err := s.loader.Fill(j.Prepared)
+	if err == nil {
+		err = s.client.Check(ctx, p, j.vars)
+	}
+	if err != nil {
+		return "", err
+	}
+	if m == nil {
+		m = s.Masker()
+	}
+	return curl.Command(p, m)
 }
 
 // send sends the request of j, evaluates its directives, and sets the

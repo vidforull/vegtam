@@ -3,6 +3,7 @@ package env
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -370,4 +371,67 @@ func (l *Loader) must(t *testing.T, path string) *Vars {
 		t.Fatal(err)
 	}
 	return v
+}
+
+// TestClasses checks that what Classes says of each placeholder is what
+// Prepare makes of it.
+func TestClasses(t *testing.T) {
+	t.Setenv("VEGTAM_TEST_KEY", processKey)
+	path := tree(t, `POST {{scheme}}://{{host}}/{{user}}?k={{$env VEGTAM_TEST_KEY}}&u={{$env VEGTAM_UNSET}}
+Authorization: Bearer {{ token }}
+X-Command: {{$cmd login}}
+X-Bad: {{$env bad-name}} {{$uuid}}
+
+{{session}} {{missing}}`)
+	f, err := httpfile.ParseFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := NewLoader(Options{Env: "dev", DryRun: true})
+	l.Declare("session")
+	l.Declare("user")
+	got := l.must(t, path).Classes(f.Requests[0])
+	want := map[string]Class{
+		"{{scheme}}": Plain, "{{host}}": Plain, "{{user}}": Captured, "{{$env VEGTAM_TEST_KEY}}": Secret,
+		"{{$env VEGTAM_UNSET}}": Unresolved, "{{token}}": Secret, "{{$cmd login}}": Secret,
+		"{{$env bad-name}}": Unresolved, "{{$uuid}}": Unresolved, "{{session}}": Captured, "{{missing}}": Unresolved,
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("Classes = %v\nwant      %v", got, want)
+	}
+	// Without an environment, only the process environment and captures
+	// resolve.
+	none := NewLoader(Options{DryRun: true})
+	none.Declare("user")
+	got = none.must(t, path).Classes(f.Requests[0])
+	if got["{{host}}"] != Unresolved || got["{{token}}"] != Unresolved || got["{{user}}"] != Captured ||
+		got["{{$env VEGTAM_TEST_KEY}}"] != Secret {
+		t.Errorf("Classes without an environment = %v", got)
+	}
+}
+
+// TestFillDryRun checks that a dry run leaves a variable that is not
+// captured yet a placeholder, and fails on one that a capture lost.
+func TestFillDryRun(t *testing.T) {
+	path := tree(t, "GET https://{{host}}/{{user}}\nX-Token: {{token}}")
+	l := NewLoader(Options{Env: "dev", DryRun: true})
+	l.Declare("user")
+	l.Declare("token")
+	p, err := prepare(t, l, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled, err := l.Fill(p)
+	if err != nil || filled.URL.Masked() != "https://api.example.test/{{user}}" || filled.Headers[0].Value.Masked() != "{{token}}" {
+		t.Fatalf("Fill in a dry run = %v, %v", filled, err)
+	}
+	l.Forget("token", "a.http#login")
+	if got := l.Lost(); !maps.Equal(got, map[string]string{"token": "a.http#login"}) {
+		t.Errorf("Lost() = %v", got)
+	}
+	_, err = l.Fill(p)
+	if e, ok := errors.AsType[*core.Error](err); !ok || !slices.Equal(e.Variables, []string{"token"}) ||
+		!strings.HasSuffix(e.Msg, "not captured: token (a.http#login took no value)") {
+		t.Errorf("Fill in a dry run after Forget = %v", err)
+	}
 }

@@ -3,13 +3,18 @@ package tui
 import (
 	"cmp"
 	"fmt"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
 	"charm.land/bubbles/v2/help"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/output"
 )
 
@@ -70,9 +75,17 @@ func (m *Model) render() string {
 		tree = m.box(treePane, "Environment", m.treeText())
 	}
 	request := m.box(requestPane, "Request "+m.ref(), m.request.View())
-	response := m.box(responsePane, "Response "+m.resultRef(), m.response.View())
+	title := "Response "
+	if m.fold > 0 { // before the reference, which may be cut off
+		title += "(folded from depth " + strconv.Itoa(m.fold) + ") "
+	}
+	title += m.resultRef()
+	response := m.box(responsePane, title, m.response.View())
+	if m.curl != "" {
+		response = m.box(responsePane, "curl "+m.ref(), m.response.View())
+	}
 	switch m.mode {
-	case browsing, choosingEnv, helping:
+	case browsing, searching, choosingEnv, helping:
 	case confirming:
 		r := m.rows[m.cursor]
 		response = m.box(responsePane, "Send?", m.clean(fmt.Sprintf("Send %s %s?\n\ny sends it, any other key does not.",
@@ -81,7 +94,7 @@ func (m *Model) render() string {
 	var panes string
 	switch {
 	case m.mode == helping: // over all three panes, so that it fits 80x24
-		panes = m.frame(m.width, max(m.height-1, 3), true, "Keys", m.helpText())
+		panes = m.frame(m.width, max(m.height-1, 3), true, "Keys", m.helpText(m.width-2))
 	case m.width >= wideWidth:
 		panes = lipgloss.JoinHorizontal(lipgloss.Top, tree, request, response)
 	case m.width >= minWidth:
@@ -128,8 +141,9 @@ func (m *Model) resultRef() string {
 	return ""
 }
 
-// treeText lists the files and their requests, or the environments to
-// choose from, as many lines as fit around the selected one.
+// treeText lists the files and their requests that match the search, or
+// the environments to choose from, as many lines as fit around the
+// selected one. The search, if there is one, stays on the first line.
 func (m *Model) treeText() string {
 	sz := m.sizes[treePane]
 	w, h := max(sz.w-2, 1), max(sz.h-3, 1)
@@ -140,15 +154,25 @@ func (m *Model) treeText() string {
 		}
 		return st.Render(m.line(s))
 	}
+	var head string
 	var lines []string
-	at := m.cursor
+	at := 0
 	if m.mode == choosingEnv {
 		for i, name := range m.envs {
 			lines = append(lines, item(cmp.Or(name, "(none)"), i == m.choice))
 		}
 		at = m.choice
 	} else {
-		for i, r := range m.rows {
+		if m.mode == searching || m.query != "" {
+			text := "/" + m.query
+			if m.mode == searching {
+				text += "_"
+			}
+			head = lipgloss.NewStyle().Foreground(accent).MaxWidth(w).Render(m.line(text)) + "\n"
+			h = max(h-1, 1)
+		}
+		for _, i := range m.shown {
+			r := m.rows[i]
 			label := r.label
 			switch {
 			case r.index >= 0:
@@ -156,15 +180,22 @@ func (m *Model) treeText() string {
 			case r.err != nil:
 				label += " ✗"
 			}
+			if i == m.cursor {
+				at = len(lines)
+			}
 			lines = append(lines, item(label, i == m.cursor))
+		}
+		if len(lines) == 0 {
+			lines = append(lines, item("no request matches", false))
 		}
 	}
 	start := max(0, min(at-h/2, len(lines)-h))
-	return strings.Join(lines[start:min(start+h, len(lines))], "\n")
+	return head + strings.Join(lines[start:min(start+h, len(lines))], "\n")
 }
 
-// requestText is the selected request: its directives and the request
-// as written, or as it would be sent, and what stops it from being sent.
+// requestText is the selected request: its directives and the request as
+// it would be sent or, if it cannot be resolved, as written, and what
+// stops it from being sent.
 func (m *Model) requestText() string {
 	r := m.rows[m.cursor]
 	var b strings.Builder
@@ -173,30 +204,90 @@ func (m *Model) requestText() string {
 		return b.String()
 	}
 	if r.index >= 0 {
-		for _, d := range r.file.Requests[r.index].Directives {
+		req := r.file.Requests[r.index]
+		for _, d := range req.Directives {
 			fmt.Fprintf(&b, "# @%s %s\n", d.Kind, d.Value)
 		}
-	}
-	if m.preview.Request != nil {
-		output.WriteRequest(&b, m.preview.Request)
+		if m.preview.Request != nil {
+			output.WriteRequest(&b, m.preview.Request)
+		} else {
+			output.WriteRequest(&b, output.Written(req))
+		}
 	}
 	writeError(&b, m.preview.Error)
 	return b.String()
 }
 
+// The colours of placeholders in the request pane, by what they stand
+// for. Without colour, as with NO_COLOR, the text tells as much: a secret
+// shows as its placeholder or as ***, and the error under the request
+// names what is unresolved.
+var placeholderStyles = map[env.Class]lipgloss.Style{
+	env.Unresolved: lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true),
+	env.Plain:      lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
+	env.Secret:     lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
+	env.Captured:   lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
+}
+
+// placeholder matches a placeholder, and a value masked as ***.
+var placeholder = regexp.MustCompile(`\{\{[^{}\n]*\}\}|\*\*\*`)
+
+// highlight colours the placeholders in s by what they stand for, and the
+// values masked in it as secrets. s is the request pane's text as clean
+// has made it: highlight only puts styles around parts of it, so what a
+// view shows, once the styles are left out, is still s.
+func (m *Model) highlight(s string) string {
+	return placeholder.ReplaceAllStringFunc(s, func(p string) string {
+		class := env.Secret
+		if p != "***" {
+			pieces, err := core.ParseTemplate(p)
+			if err != nil || len(pieces) != 1 || pieces[0].Ref == nil {
+				return p
+			}
+			class = m.class(*pieces[0].Ref)
+		}
+		return placeholderStyles[class].Render(p)
+	})
+}
+
+// class returns what the placeholder r of the selected request stands
+// for. One that the error names is unresolved, whatever the environment
+// says: a capture that took nothing, for one.
+func (m *Model) class(r core.Ref) env.Class {
+	name := strings.TrimSpace(r.Func + " " + r.Name)
+	switch {
+	case m.job == nil, m.preview.Error != nil && slices.Contains(m.preview.Error.Variables, name):
+		return env.Unresolved
+	}
+	return m.job.Class(r)
+}
+
 // responseText is the latest response as vegtam run --verbose prints it:
 // the status and the time, the headers, the body, the outcomes of the
-// directives, and the error, if there is one.
+// directives, and the error, if there is one. A curl command just copied
+// is shown over it.
 func (m *Model) responseText() string {
 	var b strings.Builder
 	switch {
+	case m.curl != "":
+		b.WriteString("Copied, if the terminal takes OSC 52; esc hides it.\n\n" + m.curl)
 	case m.flight != nil:
 		fmt.Fprintf(&b, "Sending %s\n\nesc cancels it\n", m.flight.ref)
 	case m.result == nil:
 		b.WriteString("enter sends the selected request\n")
 	default:
-		if m.result.Response != nil {
-			output.WriteResponse(&b, m.result, true)
+		if r := m.result.Response; r != nil {
+			// Masked whole before it is folded: a fold must not cut a
+			// secret value in two and leave a part of it unmasked. The
+			// rest of clean comes after, on the whole text, as the CLI
+			// prints it: shown as \x7f, DEL and C1 characters, which JSON
+			// allows in strings, would make the body no JSON.
+			res, resp := *m.result, *r
+			if resp.Encoding == "" {
+				resp.Body = m.masker.Mask(resp.Body)
+			}
+			res.Response = &resp
+			output.WriteResponse(&b, &res, true, m.fold)
 		}
 		writeError(&b, m.result.Error)
 	}
@@ -220,30 +311,62 @@ func writeError(b *strings.Builder, e *output.Error) {
 	fmt.Fprintf(b, "✗ %s: %s%s\n", e.Kind, loc, e.Message)
 }
 
-// helpText lists the keys, one a line: in columns, as help lays them
-// out, those that do not fit a narrow pane would be cut off.
-func (m *Model) helpText() string {
-	var b strings.Builder
+// helpColumn is the width of the first column of keys in the help.
+const helpColumn = 40
+
+// helpText lists the keys, one a line, in two columns if width allows
+// (help's own columns would cut off what does not fit a narrow pane), and
+// says what the colours of the request pane mean, in those colours.
+func (m *Model) helpText(width int) string {
+	var keys []string
 	for _, group := range m.keys.FullHelp() {
 		for _, k := range group {
-			fmt.Fprintf(&b, "%-10s %s\n", k.Help().Key, k.Help().Desc)
+			keys = append(keys, fmt.Sprintf("%-10s %s", k.Help().Key, k.Help().Desc))
 		}
 	}
-	b.WriteString("\nIn the request and response panes, j/k scroll,\nf/b by a page and d/u by half of one.\n\n" +
-		"enter asks before it sends a method other than\nGET, HEAD or OPTIONS.")
-	return m.clean(b.String())
+	var b strings.Builder
+	if half := (len(keys) + 1) / 2; width >= helpColumn+30 {
+		for i, k := range keys[:half] {
+			fmt.Fprintf(&b, "%-*s", helpColumn, k)
+			if i+half < len(keys) {
+				b.WriteString(keys[i+half])
+			}
+			b.WriteString("\n")
+		}
+	} else {
+		b.WriteString(strings.Join(keys, "\n") + "\n")
+	}
+	b.WriteString("\nIn the request and response panes j/k scroll, f/b by a page and d/u by half of one.\n\n" +
+		"/ narrows the list to the requests whose label, file or URL hold what you type: enter keeps it, esc clears it.\n\n" +
+		"enter asks before it sends a method other than GET, HEAD or OPTIONS. y copies the request as curl, " +
+		"its secrets as shell variables; esc hides the command.\n\n")
+	st := func(c env.Class, s string) string { return placeholderStyles[c].Render(s) }
+	return m.clean(b.String()) + "In the request, " + st(env.Plain, "green") + " is a value, " + st(env.Secret, "magenta") +
+		" a secret, " + st(env.Captured, "yellow") + " a capture and " + st(env.Unresolved, "red") + " what does not resolve."
 }
 
-// statusLine shows the environment, what is going on and the main keys.
+// minLeft is how many columns of the status line the environment and the
+// note keep before the keys give way to the main ones.
+const minLeft = 16
+
+// statusLine shows the environment, what is going on and the keys. The
+// keys come first: on a narrow terminal, the left part is cut short, and
+// only the keys besides the main ones give way to it.
 func (m *Model) statusLine() string {
 	state := m.note
 	if m.flight != nil && state == "" {
 		state = "sending; esc cancels"
 	}
 	left := m.line(" env: " + cmp.Or(m.env, "none") + "  " + state)
-	right := help.New().ShortHelpView(m.keys.ShortHelp()) + " "
-	if gap := m.width - lipgloss.Width(left) - lipgloss.Width(right); gap > 0 {
-		return left + strings.Repeat(" ", gap) + right
+	h := help.New()
+	right := h.ShortHelpView(m.keys.ShortHelp()) + " "
+	if lipgloss.Width(right)+minLeft > m.width {
+		h.SetWidth(max(m.width-1, 1))
+		right = h.ShortHelpView(m.keys.mainHelp()) + " "
 	}
-	return lipgloss.NewStyle().MaxWidth(m.width).Render(left)
+	if room := m.width - lipgloss.Width(right); lipgloss.Width(left) > room {
+		left = ansi.Truncate(left, max(room-1, 0), "…")
+	}
+	line := left + strings.Repeat(" ", max(m.width-lipgloss.Width(left)-lipgloss.Width(right), 0)) + right
+	return ansi.Truncate(line, m.width, "")
 }

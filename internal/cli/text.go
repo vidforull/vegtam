@@ -26,7 +26,7 @@ func (c *Config) printResult(res *output.Result, i int, several, verbose bool) {
 		}
 	}
 	if res.Response != nil {
-		output.WriteResponse(&b, res, verbose)
+		output.WriteResponse(&b, res, verbose, 0)
 	}
 	fmt.Fprint(c.out, printable(b.String()))
 	if res.Error != nil {

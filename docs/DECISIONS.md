@@ -386,3 +386,104 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   looking for a fault.
 - **No files.** The interface writes nothing; the history of runs, when
   it comes, will decide what it keeps and where.
+
+## 2026-10-19: search, copy as curl, colours and folds in the interface
+
+- **Search.** `/` narrows the list as one types, ignoring case, to the
+  requests whose label, file name or URL as written contain the text,
+  and to their files. It matches the URL as written, not as resolved:
+  the list is of what is in the files, and matching resolved values
+  would match secrets. The cursor stays on a row the list shows; with
+  none, `enter` and `y` do nothing. No `n`/`N`: the list is short enough
+  to move in once it is narrowed.
+- **The preview is always a dry run.** Without an environment too, the
+  request pane shows the request as it would be sent. If it cannot be
+  resolved, the pane shows it as written over the error, so that what
+  is missing is seen where it is used; before, a request without an
+  environment was shown as written and no error said what it lacked. A
+  variable whose `@capture` took no value is an error in the preview as
+  it is when sent ("not captured"): the preview takes over from the
+  session what it has lost, as it takes over what it has declared. A dry
+  run of `run` loses nothing, since it captures nothing.
+- **Colours after cleaning.** The request pane colours each placeholder
+  by what `env.Vars.Classes` says it stands for, the same function
+  `Prepare` decides with: a plain value, a secret, a capture, or nothing,
+  and `***` as a secret. The styles go around parts of the text that
+  `clean` has already masked, so a style cannot split a secret value from
+  its mask, and the tests check the views as styled. The colours are the
+  terminal's first sixteen, which Bubble Tea fits to its profile: none
+  with `NO_COLOR` or `TERM=dumb`, where the placeholder, `***` and the
+  error under the request still say the same.
+- **The status line keeps its keys.** On a narrow terminal the
+  environment and the note are cut short, with an ellipsis; the keys are
+  named in a word each, and below about 75 columns only `enter`, `?` and
+  `q` stay. `Ctrl-L` has Bubble Tea clear the screen and draw it again,
+  for when something else, such as a server's log, wrote on the terminal.
+
+- **Copy as curl.** `y` builds the command in the core,
+  `internal/core/curl` through `Session.Curl`, from the request the dry
+  run of the preview prepared. A prepared request names its secrets and
+  holds no values, so the command cannot hold one: each secret is a
+  shell variable named after its placeholder (`{{token}}` is `"$token"`,
+  `{{$env NAME}}` and `{{$cmd NAME}}` are `"$NAME"`), a captured value
+  is one too, as a dry run has none. A name that bash or zsh use, such
+  as `path` or `UID`, gets a suffix, except for `{{$env NAME}}`, whose
+  variable is the one vegtam reads. A comment before the command names
+  the variables, and the command starts with `: "${token?}" &&`: pasted
+  at once with a variable left out, it stops before curl sends a request
+  with a secret missing. A secret value can still be in the text of a
+  request, outside a placeholder: a public variable with the value of a
+  private one, say. The masker looks for it in each piece of text before
+  the piece is quoted, since quoting changes a value with a `'` in it
+  past recognising; if it finds one, nothing is copied, and the note
+  says where it is. Nor is anything copied if the masker finds a value
+  in the command as a whole, in what curl's options add (a private value
+  `raw` in `--data-raw`): the command would be wrong.
+- **Secrets of earlier previews.** What a preview's dry run has read
+  stays masked once the preview moves on, as what earlier environments
+  read does. Before, a private value that only the preview in another
+  environment or directory had read was masked only while that preview
+  lasted.
+- **What curl sends.** The method, URL, headers and body that vegtam
+  sends, and nothing curl would add to a body of its own accord:
+  `--data-raw` for a body, so that a leading `@` names no file,
+  `--data-binary @./path` for a body file (`@-` would be stdin), an empty
+  `Content-Type`, an empty `Expect` over 1 MiB, an empty body for POST,
+  PUT and PATCH without one, as net/http sends `Content-Length: 0`,
+  `--globoff`, and always `--path-as-is`, since vegtam never rewrites a
+  path and curl would, `%2e%2e` too. curl's default headers, such as
+  `User-Agent` and `Accept`, stay curl's. It has no `-L`: curl keeps
+  custom headers such as `X-API-Key` on a redirect to another host,
+  which vegtam drops. Text with a control character is written as
+  `$'...'` with it escaped (bash, zsh, ksh and POSIX.1-2024; dash and fish
+  do not read it), so the command holds no control character, cleaning
+  it for the terminal changes nothing, and what is shown is what runs.
+  Left as they are: an inline body over 128 KiB is longer than Linux
+  takes as one argument, and a header whose value is a secret that is
+  empty when the command runs is removed by curl, not sent empty.
+- **OSC 52 is ours.** The interface removes every escape sequence from
+  what it shows: no server, file or name may drive the terminal. OSC 52,
+  which asks the terminal to set the clipboard, is a sequence of
+  vegtam's own with content of its own: the command, masked and cleaned
+  as all text is, the very string the response pane shows. Bubble Tea
+  encodes it in base64, which can neither end the sequence nor start
+  another. It holds no secret value, only the names of variables. A
+  terminal or multiplexer that does not pass OSC 52 on loses nothing:
+  the command is in the pane to select. The interface never reads the
+  clipboard.
+- **Folding JSON.** `z` folds the JSON body of the response from depth
+  1, then from depth 2, then not at all, and the next response keeps the
+  fold. One function formats JSON, `output.FormatJSON`: the CLI calls it
+  through `WriteResponse` with no fold, the interface with its depth.
+  The interface folds a body only once it has masked the whole of it:
+  the masker sees the full document, and a fold only takes text away,
+  whole objects and arrays at a time, so it cannot cut a secret value in
+  two and leave a part of it to show. The rest of the cleaning for the
+  terminal comes after, on the whole text, as the CLI prints it: it
+  works a character at a time, so its order with a fold changes nothing
+  on the screen, while before the fold it would turn DEL and C1
+  characters, which JSON allows in strings, into `\x7f` and make the
+  body no JSON. `FuzzFormatJSON`
+  checks that any input formats without a panic, that what is not JSON
+  stays as it is, and that each fold stands for a whole object or array
+  with the right count.

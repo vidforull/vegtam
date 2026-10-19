@@ -46,3 +46,11 @@ POST {{host}}/login
 # @name me
 GET {{host}}/me
 X-Session: {{session}}
+
+### Copied as curl: secrets in the path, the query, a header and a body
+# @name everywhere
+PUT {{host}}/items/{{token}}?key={{$env VEGTAM_TEST_KEY}}&q=it's
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{"token": "{{token}}", "key": "{{$env VEGTAM_TEST_KEY}}", "tab": "	"}

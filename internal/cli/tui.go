@@ -31,11 +31,12 @@ directory and below it: "." if none is named. On a terminal, vegtam with
 no command does the same.
 
 One pane lists the files and their requests, the next shows the selected
-request as written or, with an environment, as it would be sent, and the
-last the latest response. enter sends the request as
-vegtam run does, after asking unless its method is GET, HEAD or OPTIONS,
-and esc cancels it; e chooses the environment, tab moves between panes,
-? lists the keys and q quits.
+request as it would be sent, its variables coloured, and the last the
+latest response. enter sends the request as vegtam run does, after
+asking unless its method is GET, HEAD or OPTIONS, and esc cancels it;
+/ searches the list, y copies the request as a curl command, z folds the
+JSON of the response, e chooses the environment, tab moves between
+panes, ? lists the keys and q quits.
 
 A value that "# @capture" takes is a variable for the requests sent after
 it, until another environment is chosen. The interface writes no files.`,

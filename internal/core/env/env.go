@@ -140,10 +140,15 @@ func (l *Loader) Forget(name, ref string) {
 	l.lost[name] = ref
 }
 
+// Lost returns the variables whose latest @capture took no value, each
+// with the request it was in.
+func (l *Loader) Lost() map[string]string { return maps.Clone(l.lost) }
+
 // Fill returns p with the plain values captured so far in place of their
 // placeholders; secret ones stay placeholders, as other secrets do. A
 // captured variable without a value is an error of kind variable that
-// names them all.
+// names them all. In a dry run, nothing has been captured: a variable
+// stays a placeholder unless Forget has dropped it.
 func (l *Loader) Fill(p *core.Prepared) (*core.Prepared, error) {
 	var missing, why []string
 	fill := func(t core.Text) core.Text {
@@ -151,12 +156,14 @@ func (l *Loader) Fill(p *core.Prepared) (*core.Prepared, error) {
 		for _, seg := range t {
 			if s := seg.Secret; s != nil && s.Capture {
 				c, ok := l.captured[s.Name]
+				_, lost := l.lost[s.Name]
 				switch {
-				case !ok && !slices.Contains(missing, s.Name):
-					missing = append(missing, s.Name)
-					why = append(why, fmt.Sprintf("%s (%s took no value)", s.Name, cmp.Or(l.lost[s.Name], "an earlier request")))
 				case ok && !c.secret:
 					seg = core.Segment{Text: c.value}
+				case ok, l.opts.DryRun && !lost, slices.Contains(missing, s.Name):
+				default:
+					missing = append(missing, s.Name)
+					why = append(why, fmt.Sprintf("%s (%s took no value)", s.Name, cmp.Or(l.lost[s.Name], "an earlier request")))
 				}
 			}
 			out = append(out, seg)
@@ -416,6 +423,66 @@ func readBodyFile(r *core.Request) ([]byte, error) {
 	return root.ReadFile(name)
 }
 
+// Class is what a placeholder stands for.
+type Class int
+
+const (
+	Unresolved Class = iota // nothing: preparing the request fails
+	Plain                   // a value of the public environment file
+	Secret                  // a private value, a process environment variable or the output of a command
+	Captured                // the value that an @capture of an earlier request takes
+)
+
+// Classes returns what each placeholder of r stands for, by its
+// canonical form, such as "{{token}}" or "{{$env NAME}}", as Prepare
+// resolves it now. A {{$cmd NAME}} is a secret whatever its command file
+// says: what is wrong with it is an error of Prepare. A text with a
+// malformed placeholder gives none.
+func (v *Vars) Classes(r *core.Request) map[string]Class {
+	classes := map[string]Class{}
+	texts := []string{r.URL, r.Body}
+	for _, h := range r.Headers {
+		texts = append(texts, h.Value)
+	}
+	for _, s := range texts {
+		pieces, _ := core.ParseTemplate(s)
+		for _, p := range pieces {
+			if p.Ref != nil {
+				classes[p.Ref.String()] = v.class(*p.Ref)
+			}
+		}
+	}
+	return classes
+}
+
+func (v *Vars) class(r core.Ref) Class {
+	switch r.Func {
+	case "":
+		_, private := v.private[r.Name]
+		_, public := v.public[r.Name]
+		switch {
+		case v.loader.declared[r.Name]:
+			return Captured
+		case private:
+			return Secret
+		case public:
+			return Plain
+		}
+	case "$env":
+		if !envVarName.MatchString(r.Name) {
+			break
+		}
+		if _, ok := v.loader.getenv(r.Name); ok {
+			return Secret
+		}
+	case "$cmd":
+		if core.IsVarName(r.Name) {
+			return Secret
+		}
+	}
+	return Unresolved
+}
+
 type resolver struct {
 	vars    *Vars
 	src     core.Source // the request
@@ -444,16 +511,16 @@ func (rs *resolver) ref(ctx context.Context, r core.Ref) core.Segment {
 	var err error
 	switch r.Func {
 	case "":
-		if rs.vars.loader.declared[r.Name] {
+		switch rs.vars.class(r) {
+		case Captured:
 			return core.Segment{Secret: &core.Secret{Name: r.Name, Capture: true}}
-		}
-		if _, ok := rs.vars.private[r.Name]; ok {
+		case Secret:
 			return secret(r.Name)
+		case Plain:
+			return core.Segment{Text: rs.vars.public[r.Name]}
+		case Unresolved:
+			rs.miss(r.Name)
 		}
-		if val, ok := rs.vars.public[r.Name]; ok {
-			return core.Segment{Text: val}
-		}
-		rs.miss(r.Name)
 	case "$env":
 		if !envVarName.MatchString(r.Name) {
 			err = fmt.Errorf("%s: want {{$env NAME}}", r)

@@ -2,21 +2,33 @@ package tui
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/vidforull/vegtam/internal/core/env"
 )
 
 // sgr matches the styles Lip Gloss writes: the only escape sequences a
 // view may hold.
 var sgr = regexp.MustCompile(`\x1b\[[0-9;:]*m`)
+
+// secretStyle starts the colour of a secret's placeholder: the views hold
+// the text as styled, which the test checks as such.
+var secretStyle = strings.TrimSuffix(placeholderStyles[env.Secret].Render("x"), "x\x1b[m")
 
 // leaks returns the forms of the test secrets that s contains: the value,
 // its escaped forms, and its first four characters, which is what a value
@@ -48,10 +60,13 @@ func TestNoSecretInTUI(t *testing.T) {
 	for _, sz := range []size{{60, 24}, {100, 30}, {150, 40}} {
 		for _, maxBody := range []int64{1 << 20, 106} {
 			m := newModel(t, fx.dir, "", maxBody, sz.w, sz.h)
-			views := 0
+			views, styled := 0, 0
 			snap := func(state string) {
 				t.Helper()
 				views++
+				if strings.Contains(view(m), secretStyle) {
+					styled++
+				}
 				if found := leaks(view(m)); len(found) > 0 {
 					t.Errorf("%dx%d, max body %d, %s: secret forms %q in\n%s", sz.w, sz.h, maxBody, state, found, view(m))
 				}
@@ -60,7 +75,7 @@ func TestNoSecretInTUI(t *testing.T) {
 			press(m, "e")
 			snap("environments")
 			press(m, "j", "j", "enter")
-			for _, name := range []string{"echo", "create", "escapes", "binary", "big", "refused", "slow", "login", "me"} {
+			for _, name := range []string{"echo", "create", "escapes", "binary", "big", "refused", "slow", "everywhere", "login", "me"} {
 				goTo(t, m, name)
 				snap(name + " selected")
 				switch name {
@@ -69,7 +84,7 @@ func TestNoSecretInTUI(t *testing.T) {
 					snap(name + " in flight")
 					press(m, "esc")
 					m.Update(cmd())
-				case "create", "login":
+				case "create", "login", "everywhere":
 					press(m, "enter")
 					snap(name + " to confirm")
 					press(m, "y")
@@ -80,16 +95,30 @@ func TestNoSecretInTUI(t *testing.T) {
 				press(m, "tab", "tab", "j", "j", "j", "f")
 				snap(name + " scrolled")
 				press(m, "tab")
+				if cmd, ok := yank(m); !ok || len(leaks(cmd)) > 0 {
+					t.Errorf("%s copied as curl: %v, secret forms %q in\n%s", name, ok, leaks(cmd), cmd)
+				}
+				snap(name + " as curl")
+				press(m, "esc")
+				press(m, "z")
+				snap(name + " folded from depth 1")
+				press(m, "z")
+				snap(name + " folded from depth 2")
+				press(m, "z")
 			}
 			if !strings.Contains(m.responseText(), `"session": "***"`) {
 				t.Errorf("the captured session is not masked in:\n%s", m.responseText())
 			}
 			press(m, "?")
 			snap("help")
-			press(m, "esc", "e", "k", "enter")
+			press(m, "esc", "/", "e", "c")
+			snap("searching")
+			press(m, "enter")
+			snap("searched")
+			press(m, "/", "esc", "e", "k", "enter")
 			snap("another environment")
-			if views != 34 {
-				t.Errorf("%d views", views)
+			if views != 70 || styled < 10 {
+				t.Errorf("%d views, %d with a secret's placeholder coloured", views, styled)
 			}
 		}
 	}
@@ -113,11 +142,17 @@ func TestTUIEscapes(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(fx.dir, name), src, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	ctl := "# @name ctl\nPOST {{host}}/echo\n\na \x1b]0;t\x07 \u009b\t\n\n###\n# @name file\nPOST {{host}}/echo\n\n< ./b\x1b[31m.json\n"
+	for file, data := range map[string]string{"ctl.http": ctl, "b\x1b[31m.json": "{}"} {
+		if err = os.WriteFile(filepath.Join(fx.dir, file), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, sz := range []size{{60, 24}, {100, 30}, {150, 40}} {
 		m := newModel(t, fx.dir, "test", 1<<20, sz.w, sz.h)
 		goTo(t, m, "escapes")
 		press(m, "enter")
-		for _, keys := range [][]string{nil, {"tab", "tab", "j", "j"}, {"G", "f"}} {
+		for _, keys := range [][]string{nil, {"tab", "tab", "j", "j"}, {"G", "f"}, {"z"}, {"z"}} {
 			press(m, keys...)
 			v := sgr.ReplaceAllString(view(m), "")
 			if !utf8.ValidString(v) {
@@ -133,6 +168,31 @@ func TestTUIEscapes(t *testing.T) {
 				t.Errorf("%dx%d: the response does not show %q:\n%s", sz.w, sz.h, want, text)
 			}
 		}
+		// A request with control characters, copied as curl: they are
+		// escaped in the command, which the view shows as it is.
+		goTo(t, m, "ctl")
+		cmd, ok := yank(m)
+		if !ok || strings.ContainsFunc(cmd, func(r rune) bool { return r != '\n' && unicode.IsControl(r) }) ||
+			!strings.Contains(cmd, `--data-raw $'a \x1b]0;t\x07 \xc2\x9b\t'`) || !strings.Contains(view(m), `\x1b]0;t`) {
+			t.Errorf("%dx%d: ctl copied as %q\n%s", sz.w, sz.h, cmd, view(m))
+		}
+		goTo(t, m, "file")
+		if cmd, ok = yank(m); !ok || !strings.Contains(cmd, `--data-binary $'@`+fx.dir+`/b\x1b[31m.json'`) {
+			t.Errorf("%dx%d: file copied as %q", sz.w, sz.h, cmd)
+		}
+		press(m, "esc")
+		if v := sgr.ReplaceAllString(view(m), ""); strings.ContainsFunc(v, func(r rune) bool { return r != '\n' && unicode.IsControl(r) }) {
+			t.Errorf("%dx%d: a control character in the view:\n%q", sz.w, sz.h, v)
+		}
+
+		// The search shows what is typed or pasted, escaped too.
+		press(m, "/")
+		m.Update(tea.PasteMsg{Content: "\x1b]0;title\x07\x9b2J"})
+		if v := sgr.ReplaceAllString(view(m), ""); strings.ContainsFunc(v, func(r rune) bool { return r < ' ' && r != '\n' || r >= 0x7f && r < 0xa0 }) ||
+			!strings.Contains(v, `/\x1b]0;title\x07\x9b2J_`) {
+			t.Errorf("%dx%d: the search is not shown escaped:\n%q", sz.w, sz.h, v)
+		}
+		press(m, "esc")
 		if !strings.Contains(m.clean(m.rows[len(m.rows)-1].path), `evil\x1b]0;name\x07\x9b.http`) {
 			t.Errorf("the file name is not shown escaped: %q", m.clean(m.rows[len(m.rows)-1].path))
 		}
@@ -187,7 +247,7 @@ func TestRun(t *testing.T) {
 		if err != nil || (p != nil) != tt.panics {
 			t.Errorf("%s: Run = %v, panic %v", tt.name, err, p)
 		}
-		if tt.env != "" && m.flight == nil {
+		if strings.Contains(tt.keys, "\r") && m.flight == nil {
 			t.Errorf("%s: no request was in flight", tt.name)
 		}
 		if p != nil && !strings.Contains(string(p.Stack), "tui.(*Model).refresh") {
@@ -197,5 +257,67 @@ func TestRun(t *testing.T) {
 		if s := out.String(); strings.LastIndex(s, "\x1b[?1049l") < strings.LastIndex(s, "\x1b[?1049h") || !strings.Contains(s, "\x1b[?1049h") {
 			t.Errorf("%s: the terminal is not restored: %q", tt.name, s)
 		}
+	}
+}
+
+// syncBuffer is a bytes.Buffer that the program writes to while the test
+// reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestRunCopy runs the program, copies the first request with y and
+// quits once the terminal has had the command: OSC 52 carries it,
+// base64-encoded, and nothing else. Bubble Tea runs the command that
+// copies on a goroutine of its own, so a q typed at once could end the
+// program first.
+func TestRunCopy(t *testing.T) {
+	fx := newFixture(t)
+	in, keys := io.Pipe()
+	out := &syncBuffer{}
+	m, err := New(Options{Path: fx.dir, Env: "test", Timeout: time.Minute, MaxBody: 1 << 20, Input: in, Output: out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed := make(chan error, 1)
+	go func() {
+		_, werr := keys.Write([]byte("y"))
+		for deadline := time.Now().Add(10 * time.Second); werr == nil && !strings.Contains(out.String(), "\x1b]52;"); {
+			if time.Now().After(deadline) {
+				werr = errors.New("no OSC 52 within 10s")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if _, qerr := keys.Write([]byte("q")); werr == nil {
+			werr = qerr
+		}
+		typed <- werr
+	}()
+	err = m.Run(t.Context())
+	if cerr := in.Close(); cerr != nil {
+		t.Fatal(cerr)
+	}
+	if werr := <-typed; err != nil || werr != nil {
+		t.Fatalf("Run = %v; typing: %v", err, werr)
+	}
+	osc := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(m.curl)) + "\x07"
+	if m.curl == "" || strings.Count(out.String(), "\x1b]52;") != 1 || !strings.Contains(out.String(), osc) {
+		t.Errorf("no OSC 52 with the command %q in %q", m.curl, out.String())
+	}
+	if found := leaks(m.curl); len(found) > 0 {
+		t.Errorf("the command holds %q", found)
 	}
 }
