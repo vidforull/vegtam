@@ -244,6 +244,9 @@ func origin(u *url.URL) string {
 // netError classifies err, an error from sending p to the URL wire.
 func (c *Client) netError(p *core.Prepared, s core.Secrets, wire string, err error) error {
 	msg := hide(p, s, wire, err.Error())
+	if errors.Is(err, context.Canceled) {
+		return core.Errorf(core.KindCanceled, p.Request.Source, "%s", msg)
+	}
 	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 		return core.Errorf(core.KindTimeout, p.Request.Source, "no complete response within %s: %s", c.opts.Timeout, msg)
 	}

@@ -81,6 +81,24 @@ func TestMaskCut(t *testing.T) {
 	}
 }
 
+// TestJoin checks that a joined Masker masks as one made of all the values
+// would: the longer value whole, though another masker knows a part of it.
+func TestJoin(t *testing.T) {
+	short, long := NewMasker([]string{"k3y"}), NewMasker([]string{"k3y/and+more"})
+	in := "a=k3y/and+more b=k3y c=k3y%2Fand%2Bmore"
+	if got := long.Mask(short.Mask(in)); got == "a=*** b=*** c=***" {
+		t.Fatalf("masking in turn masks %q whole; the test needs a case it does not", in)
+	}
+	for _, m := range []*Masker{short.Join(long), long.Join(nil, short), (*Masker)(nil).Join(short, long)} {
+		if got := m.Mask(in); got != "a=*** b=*** c=***" {
+			t.Errorf("Mask(%q) = %q", in, got)
+		}
+	}
+	if got := (*Masker)(nil).Join().Mask("k3y"); got != "k3y" {
+		t.Errorf("empty Join: %q", got)
+	}
+}
+
 func TestMaskJSON(t *testing.T) {
 	m := NewMasker([]string{"url", `t"0k`, "n"})
 	tests := map[string]string{

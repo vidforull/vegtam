@@ -18,6 +18,7 @@ const (
 	KindAssert   Kind = "assert"   // an @assert check on the response failed
 	KindCapture  Kind = "capture"  // an @capture found no value in the response
 	KindPolicy   Kind = "policy"   // policy does not allow it: a command file that is not trusted
+	KindCanceled Kind = "canceled" // the run was interrupted before the request or its command finished
 )
 
 // Error is an error of a known kind, tied to a place in a file when there

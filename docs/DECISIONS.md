@@ -312,3 +312,77 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   targets with properties rather than examples. Their seeds are in the
   tests, and the parser's are the `.http` files in testdata; inputs that
   once failed are kept in `testdata/fuzz` and run with every `go test`.
+
+## 2026-10-19: the terminal interface
+
+- **Bubble Tea v2, Bubbles v2, Lip Gloss v2.** `charm.land/bubbletea/v2`
+  v2.1.0, `charm.land/bubbles/v2` v2.2.1 and `charm.land/lipgloss/v2`
+  v2.0.6, all MIT. v2 is the maintained line: the view is a value that
+  declares the alternate screen rather than commands that toggle it, the
+  keyboard is read correctly on more terminals, and Lip Gloss leaves
+  colours to the program, which knows its terminal. The modules are at
+  `charm.land`, not `github.com/charmbracelet`: their `go.mod` declares
+  that path, and Go refuses the other. `charmbracelet/x/term`, which Bubble
+  Tea brings along, tells `cmd/vegtam` whether stdin and stdout are
+  terminals.
+- **From Bubbles: viewport, key and help.** The request and response
+  panes are viewports, with soft wrap; the keys are `key.Binding`s, which
+  `help` lists on `?` and in the status line. The tree is a column of
+  lines of vegtam's own: Bubbles' list brings fuzzy filtering, paging and
+  a delegate API, more than it needs before there is a search. teatest is
+  not used either: its v2 is an untagged module of `x/exp`. The tests call
+  Update and View, and one runs the program on a pipe.
+- **One way to send.** The interface holds no request logic.
+  `internal/core/session` prepares and sends requests for it as for
+  `run` and `show`. A session lasts while one environment is chosen, so a
+  value an `@capture` takes is a variable for the requests sent after it,
+  in the order a person sends them; choosing another environment starts
+  a new session. The middle pane shows the selected request as written
+  without an environment, and with one as a dry run that declares what the
+  session has captured: `{{token}}` after a sign-in is a placeholder, not
+  unresolved. Before each send the session reads the environment and
+  command files again and runs its commands again, as a new run would,
+  keeping only what it captured: what goes out is what the preview showed,
+  an edited file or a new `vegtam trust` counts at once, and a command
+  that failed, was canceled or gave a token that has since expired runs
+  anew. `{{$cmd NAME}}` runs only when a request is sent.
+- **Masked before laid out.** Every string a view holds, a body as much
+  as a file or an environment name, is masked with the secrets of the
+  sessions its text comes from, joined with `Masker.Join`: the one that
+  sends, those of earlier environments, and the dry run that previews the
+  selected request. It is then shown as the CLI prints text for a
+  terminal (control characters, escape sequences and bytes that are not
+  UTF-8 as `\xNN`), and only then laid out by Lip Gloss. A line cut to
+  its pane cannot leave half a secret behind, and a server cannot drive
+  the terminal. The response is masked again when it changes, not at
+  every key: a large body would slow every key down. Bubble Tea writes to
+  the terminal itself, not through the CLI's masked writer: it draws the
+  screen in pieces, which masking each write could not follow.
+- **One request in flight, with an owner.** A request runs on a
+  goroutine that the interface starts and `Run` waits for, with a context
+  that `esc`, `q`, Ctrl-C and SIGTERM cancel; a Bubble Tea command only
+  brings back its result. Bubble Tea does not wait for the commands it
+  runs, and drops one it is handed while the program ends. While the
+  request is in flight, its goroutine alone uses the session.
+- **Panics.** Bubble Tea recovers a panic, restores the terminal and
+  prints the value and the stack itself, unmasked; with `TEA_DEBUG` set it
+  also writes them to a file in the working directory. The interface
+  recovers first, in Update, View and the request's goroutine, quits so
+  that Bubble Tea leaves the alternate screen and raw mode, and panics
+  again with the value and its stack once the program has ended:
+  `cli.Run` prints them masked, as any panic. Only a panic inside Bubble
+  Tea itself would still take Bubble Tea's way.
+- **Asking first.** `enter` sends GET, HEAD and OPTIONS at once and asks
+  before any other method, which may change something on the server: the
+  start of the confirmation that policy will ask of agents.
+- **vegtam alone.** When stdin and stdout are terminals, `vegtam` with no
+  command opens the interface on the current directory. Otherwise it
+  prints the help on stderr and exits with 2: a script or an agent that
+  runs it by mistake gets a usage error, not a program waiting for keys.
+- **Interrupts.** SIGINT and SIGTERM cancel the root context. A request
+  or a command they stop fails with kind `canceled` and exit code 130,
+  128 + SIGINT, as a shell reports a process that Ctrl-C ended: neither a
+  network error nor an unresolved variable, which would send a script
+  looking for a fault.
+- **No files.** The interface writes nothing; the history of runs, when
+  it comes, will decide what it keeps and where.

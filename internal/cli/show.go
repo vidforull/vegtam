@@ -9,10 +9,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/vidforull/vegtam/internal/core"
-	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
 	"github.com/vidforull/vegtam/internal/core/output"
 	"github.com/vidforull/vegtam/internal/core/policy"
+	"github.com/vidforull/vegtam/internal/core/session"
 )
 
 func newShowCmd(cfg *Config) *cobra.Command {
@@ -33,21 +33,21 @@ its command file is not trusted, but its command does not run.`,
 			}
 			res := &output.Result{Ref: output.Ref(f, i), Request: output.Written(f.Requests[i])}
 			if envName != "" {
-				loader := env.NewLoader(env.Options{Env: envName, DryRun: true, Trust: policy.DefaultStore()})
-				cfg.secrets = loader.Masker
-				j := prepare(cmd.Context(), loader, f, i)
-				cfg.masker = loader.Masker()
-				if j.err != nil {
-					return j.err
+				s := session.New(session.Options{Env: envName, DryRun: true, Trust: policy.DefaultStore()})
+				cfg.secrets = s.Masker
+				j := s.Prepare(cmd.Context(), f, i)
+				cfg.masker = s.Masker()
+				if j.Err != nil {
+					return j.Err
 				}
-				res.Request = output.Sent(j.p, cfg.masker)
+				res.Request = output.Sent(j.Prepared, cfg.masker)
 			}
 			if cfg.asJSON() {
 				cfg.writeJSON(output.Document{SchemaVersion: output.SchemaVersion, Result: res})
 				return nil
 			}
 			var b strings.Builder
-			writeRequest(&b, res.Request)
+			output.WriteRequest(&b, res.Request)
 			fmt.Fprint(cfg.out, printable(b.String()))
 			return nil
 		},

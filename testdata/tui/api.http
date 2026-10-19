@@ -1,0 +1,48 @@
+# Requests for the terminal interface tests. The tests copy this
+# directory and write the environment files next to it: host is an
+# httptest server, closed the address of one that has been shut down,
+# and token a secret of the private file; {{$env VEGTAM_TEST_KEY}} is
+# another secret.
+
+### The server echoes the request back, in the body and in a header
+# @name echo
+# @assert status == 200
+GET {{host}}/echo?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
+Authorization: Bearer {{token}}
+
+### The same with POST, which the interface asks about first
+# @name create
+POST {{host}}/echo?key={{token}}
+Content-Type: application/json
+
+{"token": "{{token}}"}
+
+### Escape sequences in the body and in a header
+# @name escapes
+GET {{host}}/escapes?key={{token}}
+
+### A body that is not UTF-8, with the secret in it
+# @name binary
+GET {{host}}/binary?key={{token}}
+
+### A long body with the secret at its end
+# @name big
+GET {{host}}/big?key={{token}}
+
+### Nothing listens there
+# @name refused
+GET {{closed}}/?key={{token}}
+
+### No response until the request is canceled
+# @name slow
+GET {{host}}/slow?key={{token}}
+
+### Signs in: the session it captures is a secret
+# @name login
+# @capture session = $.session
+POST {{host}}/login
+
+### Sends the session back
+# @name me
+GET {{host}}/me
+X-Session: {{session}}

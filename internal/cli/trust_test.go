@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vidforull/vegtam/internal/core/output"
 )
@@ -16,14 +17,17 @@ const cmdSecret = "Cmd-s3cr/et+v"
 
 // TestHelperProcess is not a test: the {{$cmd NAME}} tests run the test
 // binary as their command. It prints cmdSecret, or with "leak" fails with
-// cmdSecret on stderr.
+// cmdSecret on stderr, or with "sleep" waits to be killed.
 func TestHelperProcess(_ *testing.T) {
 	if os.Getenv("VEGTAM_TEST_HELPER") != "1" {
 		return
 	}
-	if os.Args[len(os.Args)-1] == "leak" {
+	switch os.Args[len(os.Args)-1] {
+	case "leak":
 		fmt.Fprintln(os.Stderr, "cannot read", cmdSecret)
 		os.Exit(1)
+	case "sleep":
+		time.Sleep(time.Minute)
 	}
 	fmt.Fprintln(os.Stdout, cmdSecret)
 	os.Exit(0)

@@ -12,6 +12,16 @@ vegtam run api/users.http#list -e dev     # send it
 vegtam run api/ -e dev --fail             # send everything, fail on HTTP errors
 ```
 
+## The terminal interface is for people
+
+`vegtam` with no command opens the terminal interface (`vegtam tui`) only
+when stdin and stdout are both terminals. Otherwise, as when a script or
+an agent runs it, it prints the help on stderr and exits with 2, a usage
+error, with the error document on stdout as for any other; it never
+waits for keys. `vegtam tui` itself refuses to start without a terminal,
+with the same exit code. Everything the interface does, `run`, `show`
+and `list` do with output a program can read.
+
 ## Output
 
 When stdout is not a terminal, or with `--json`, `run`, `show`, `list`,
@@ -115,6 +125,7 @@ by its exit code.
 | 4 | HTTP status 400 or above, with `run --fail` |
 | 5 | reserved: the request needs confirmation |
 | 6 | blocked by policy: a `{{$cmd NAME}}` whose command file is not trusted |
+| 130 | interrupted: Ctrl-C (SIGINT) or SIGTERM stopped a request or a `{{$cmd NAME}}` |
 
 Without `--fail`, any HTTP status is a success: the status is in the
 output. With several requests, the exit code is the highest among them,
@@ -137,6 +148,7 @@ The outcome of every assertion is in `asserts` all the same.
 | `timeout` | 3 | no complete response within `--timeout` |
 | `status` | 4 | HTTP status 400 or above, with `--fail` |
 | `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write |
+| `canceled` | 130 | SIGINT or SIGTERM came while a request waited for its response or a command ran; the requests after it are canceled too |
 
 Every error is printed to stderr as text, `vegtam: file:line: message`.
 With JSON output it is also in the document: in the result it belongs to,

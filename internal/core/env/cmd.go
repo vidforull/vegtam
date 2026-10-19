@@ -235,7 +235,9 @@ func (v *Vars) command(ctx context.Context, r core.Ref, src core.Source) error {
 	if v.loader.opts.DryRun {
 		return nil
 	}
-	_, err = v.loader.run(ctx, cf, r.Name)
+	if _, err = v.loader.run(ctx, cf, r.Name); errors.Is(err, context.Canceled) {
+		return core.Errorf(core.KindCanceled, src, "%v", err)
+	}
 	return err
 }
 

@@ -51,10 +51,30 @@ func TestVersion(t *testing.T) {
 }
 
 func TestHelp(t *testing.T) {
-	for _, args := range [][]string{nil, {"help"}, {"-h"}, {"--help"}, {"version", "-h"}, {"help", "version"}} {
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}, {"version", "-h"}, {"help", "version"}} {
 		code, stdout, stderr := runCLI(t, false, args...)
 		if code != exitOK || !strings.Contains(stdout, "Usage:") || stderr != "" {
 			t.Errorf("%q = %d, %q, %q; want %d, help on stdout, empty stderr", args, code, stdout, stderr, exitOK)
+		}
+	}
+}
+
+// TestNoCommand checks vegtam alone when it cannot open the terminal
+// interface, as for a program: the help, and a usage error, which is a
+// JSON document too when stdout is not a terminal.
+func TestNoCommand(t *testing.T) {
+	for _, tt := range []struct {
+		tty  bool
+		args []string
+		out  string
+	}{
+		{false, nil, `{"schema_version":1,"error":{"kind":"usage","message":"no command given"}}` + "\n"},
+		{true, nil, ""},
+		{true, []string{"--json"}, "{\n  \"schema_version\": 1,\n  \"error\": {\n    \"kind\": \"usage\",\n    \"message\": \"no command given\"\n  }\n}\n"},
+	} {
+		code, stdout, stderr := runCLI(t, tt.tty, tt.args...)
+		if code != exitUsage || stdout != tt.out || !strings.Contains(stderr, "Usage:") || !strings.HasSuffix(stderr, "vegtam: no command given\n") {
+			t.Errorf("%q (tty %v) = %d, %q, %q; want %d, %q and the help with the error on stderr", tt.args, tt.tty, code, stdout, stderr, exitUsage, tt.out)
 		}
 	}
 }
@@ -79,5 +99,16 @@ func TestUsageErrors(t *testing.T) {
 					tt.args, tty, code, stdout, stderr, exitUsage, wantOut, tt.want)
 			}
 		}
+	}
+}
+
+func TestTUINeedsTerminal(t *testing.T) {
+	code, _, stderr := runCLI(t, true, "tui")
+	if code != exitUsage || stderr != "vegtam: the terminal interface needs a terminal for its input and output\n" {
+		t.Errorf("tui without a terminal = %d, %q", code, stderr)
+	}
+	code, stdout, stderr := runCLI(t, true, "tui", "--json")
+	if code != exitUsage || !strings.Contains(stdout, `"kind": "usage"`) || !strings.HasSuffix(stderr, "prints no JSON: use run, show or list\n") {
+		t.Errorf("tui --json = %d, %q, %q", code, stdout, stderr)
 	}
 }

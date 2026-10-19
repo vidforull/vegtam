@@ -377,7 +377,8 @@ func TestCommandCanceled(t *testing.T) {
 	defer time.AfterFunc(100*time.Millisecond, cancel).Stop()
 	start := time.Now()
 	_, err = v.Prepare(ctx, f.Requests[0])
-	if err == nil || !strings.Contains(err.Error(), "{{$cmd S}}: ") || !strings.Contains(err.Error(), "context canceled") {
+	if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != core.KindCanceled ||
+		!strings.Contains(err.Error(), "{{$cmd S}}: ") || !strings.Contains(err.Error(), "context canceled") {
 		t.Errorf("Prepare = %v, want the command canceled", err)
 	}
 	if d := time.Since(start); d > 30*time.Second {

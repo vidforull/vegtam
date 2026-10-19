@@ -112,6 +112,25 @@ func NewMasker(values []string) *Masker {
 			forms = append(forms, escapes(u.Hostname())...)
 		}
 	}
+	return newMasker(forms)
+}
+
+// Join returns a Masker that hides what m and every one of others hide.
+// Masking with each in turn would not do: one that masks a short value
+// inside a longer one would leave the rest for the next, which knows the
+// longer value whole, unrecognised.
+func (m *Masker) Join(others ...*Masker) *Masker {
+	var forms []string
+	for _, x := range append([]*Masker{m}, others...) {
+		if x != nil {
+			forms = append(forms, x.forms...)
+		}
+	}
+	return newMasker(forms)
+}
+
+// newMasker returns a Masker that replaces each of forms with "***".
+func newMasker(forms []string) *Masker {
 	// Longest first, so that a value is never half-masked because a
 	// shorter one is part of it.
 	slices.SortFunc(forms, func(a, b string) int { return cmp.Or(len(b)-len(a), strings.Compare(a, b)) })

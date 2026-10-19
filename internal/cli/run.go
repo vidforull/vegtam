@@ -15,12 +15,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/vidforull/vegtam/internal/core"
-	"github.com/vidforull/vegtam/internal/core/assert"
-	"github.com/vidforull/vegtam/internal/core/env"
-	"github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
 	"github.com/vidforull/vegtam/internal/core/output"
 	"github.com/vidforull/vegtam/internal/core/policy"
+	"github.com/vidforull/vegtam/internal/core/session"
 )
 
 type runFlags struct {
@@ -70,54 +68,30 @@ trust but runs nothing.`,
 	return cmd
 }
 
-// job is a request to send, or the error that stops it beforehand.
-type job struct {
-	ref      string
-	req      *core.Request
-	p        *core.Prepared
-	vars     *env.Vars
-	captures []string // the variables its @capture directives take
-	err      error
-}
-
 func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 	if f.timeout < 0 {
 		return core.Errorf(core.KindUsage, core.Source{}, "--timeout must not be negative")
 	}
 	t := parseTarget(arg)
-	loader := env.NewLoader(env.Options{Env: f.env, DryRun: f.dryRun, Trust: policy.DefaultStore()})
-	cfg.secrets = loader.Masker
-	jobs, err := t.jobs(ctx, loader)
+	s := session.New(session.Options{
+		Env: f.env, DryRun: f.dryRun, Trust: policy.DefaultStore(),
+		Timeout: f.timeout, MaxBody: int64(f.maxBody), UserAgent: "vegtam/" + cfg.Version, Fail: f.fail,
+	})
+	cfg.secrets = s.Masker
+	jobs, err := t.jobs(ctx, s)
 	// Every request is resolved before the first is sent, so the masker
 	// knows every secret before anything is printed; captured ones join
 	// it as they are taken, before their response is printed.
-	cfg.masker = loader.Masker()
+	cfg.masker = s.Masker()
 	if err != nil {
 		return err
 	}
-	client := exec.New(exec.Options{Timeout: f.timeout, MaxBody: int64(f.maxBody), UserAgent: "vegtam/" + cfg.Version})
 	code := exitOK
 	results := []*output.Result{}
 	for i, j := range jobs {
-		res := &output.Result{Ref: j.ref}
-		err := j.err
-		switch {
-		case err != nil:
-		case f.dryRun:
-			res.Request = output.Sent(j.p, cfg.masker)
-			err = client.Check(ctx, j.p, j.vars)
-		default:
-			err = send(ctx, cfg, client, loader, j, f.fail, res)
-		}
-		// The requests after this one get what its captures took, and no
-		// older value of a variable that one of them did not take.
-		for _, name := range j.captures {
-			if !slices.ContainsFunc(res.Captures, func(c output.Capture) bool { return c.Name == name }) {
-				loader.Forget(name, j.ref)
-			}
-		}
-		if err != nil {
-			res.Error = output.NewError(err, cfg.masker)
+		res := s.Run(ctx, j)
+		cfg.masker = s.Masker()
+		if res.Error != nil {
 			code = max(code, exitCode(res.Error.Kind))
 		}
 		if !cfg.asJSON() {
@@ -138,35 +112,6 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 		return &exitError{code}
 	}
 	return nil
-}
-
-// send sends the request of j with the values captured so far, evaluates
-// its directives, and sets the request, the response, the outcomes and
-// the captures of res. The error is for a status of 400 or above with
-// fail, or else for failed captures or assertions.
-func send(ctx context.Context, cfg *Config, c *exec.Client, loader *env.Loader, j job, fail bool, res *output.Result) error {
-	p, err := loader.Fill(j.p)
-	if err != nil {
-		return err
-	}
-	res.Request = output.Sent(p, cfg.masker)
-	resp, err := c.Do(ctx, p, j.vars)
-	if err != nil {
-		return err
-	}
-	ev := assert.Evaluate(ctx, j.req, resp)
-	for _, v := range ev.Captured {
-		loader.Capture(v.Name, v.Value, v.Secret)
-	}
-	// A secret is masked in the very response it was captured from.
-	cfg.masker = loader.Masker()
-	res.Response, res.Timing = output.NewResponse(resp, cfg.masker)
-	res.Asserts = output.Checked(ev.Outcomes, cfg.masker)
-	res.Captures = output.Captures(ev.Captured)
-	if fail && resp.Status >= 400 {
-		return core.Errorf(core.KindStatus, j.req.Source, "HTTP %d %s", resp.Status, resp.Reason)
-	}
-	return ev.Err
 }
 
 // target is a command-line argument: a .http file or a directory, and a
@@ -219,54 +164,15 @@ func (t target) request() (*core.File, int, error) {
 // jobs resolves the requests t names. A file that does not parse and a
 // request that cannot be resolved become jobs with an error; the error
 // returned is for t itself.
-func (t target) jobs(ctx context.Context, loader *env.Loader) ([]job, error) {
-	if t.one {
-		f, i, err := t.request()
-		if err != nil {
-			return nil, err
-		}
-		return []job{prepare(ctx, loader, f, i)}, nil
+func (t target) jobs(ctx context.Context, s *session.Session) ([]*session.Job, error) {
+	if !t.one {
+		return s.Jobs(ctx, t.path)
 	}
-	paths, err := httpfile.Files(t.path)
+	f, i, err := t.request()
 	if err != nil {
 		return nil, err
 	}
-	var jobs []job
-	for _, path := range paths {
-		src, err := httpfile.ReadFile(path)
-		var f *core.File
-		if err == nil {
-			f, err = httpfile.Parse(path, src)
-		}
-		if err != nil {
-			j := job{ref: path, err: err, captures: httpfile.CaptureNames(src)}
-			for _, name := range j.captures {
-				loader.Declare(name)
-			}
-			jobs = append(jobs, j)
-			continue
-		}
-		for i := range f.Requests {
-			jobs = append(jobs, prepare(ctx, loader, f, i))
-		}
-	}
-	return jobs, nil
-}
-
-// prepare resolves the i-th request of f, then declares the variables
-// its captures take for the requests prepared after it.
-func prepare(ctx context.Context, loader *env.Loader, f *core.File, i int) job {
-	j := job{ref: output.Ref(f, i), req: f.Requests[i]}
-	j.vars, j.err = loader.For(f.Path)
-	if j.err == nil {
-		j.p, j.err = j.vars.Prepare(ctx, j.req)
-	}
-	_, captures, _ := assert.Directives(j.req) // the file parsed, so they do
-	for _, c := range captures {
-		loader.Declare(c.Name)
-		j.captures = append(j.captures, c.Name)
-	}
-	return j
+	return []*session.Job{s.Prepare(ctx, f, i)}, nil
 }
 
 // byteSize is a size flag: a number of bytes, optionally with a unit.

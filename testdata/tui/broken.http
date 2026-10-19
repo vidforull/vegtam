@@ -1,0 +1,4 @@
+# A file that does not parse: the tree shows it, and its error.
+
+GET {{host}}/
+X-Header without a colon

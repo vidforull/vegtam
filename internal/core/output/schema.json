@@ -140,7 +140,7 @@
       "properties": {
         "kind": {
           "type": "string",
-          "description": "assert (exit code 1); usage, parse, variable, request, import or capture (2); network or timeout (3); status (4, with --fail); policy (6). New kinds may be added; rely on the exit code for anything you do not know."
+          "description": "assert (exit code 1); usage, parse, variable, request, import or capture (2); network or timeout (3); status (4, with --fail); policy (6); canceled (130, interrupted by SIGINT or SIGTERM). New kinds may be added; rely on the exit code for anything you do not know."
         },
         "message": {"type": "string"},
         "file": {"type": "string"},

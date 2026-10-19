@@ -126,6 +126,39 @@ only once you have read the file and trusted it with `vegtam trust`.
 
 `vegtam --help` lists the exit codes.
 
+## TUI
+
+```sh
+vegtam                       # on a terminal: the .http files below the current directory
+vegtam tui api/ -e dev       # a directory or a file, starting with the dev environment
+```
+
+The terminal interface has three panes: the `.http` files and their
+requests, the selected request, and the latest response. The request is
+shown as written or, once an environment is chosen, as it would be sent,
+with secrets as their placeholders. The response is shown as `run
+--verbose` prints it: status and time, headers, the body with JSON
+indented, and the outcome of each `@assert` and `@capture`. From 80
+columns the list sits beside the other two panes, from 140 all three
+are side by side, and in a narrower terminal they stack.
+
+| Key | |
+|---|---|
+| `j`/`k`, `↓`/`↑` | move in the list; scroll the request or the response |
+| `Tab`, `Shift-Tab` | next, previous pane |
+| `Enter` | send the selected request; for a method other than GET, HEAD or OPTIONS, after a `y` (any other key leaves it unsent) |
+| `Esc` | cancel the request in flight |
+| `e` | choose the environment |
+| `?` | list the keys |
+| `q`, `Ctrl-C` | quit |
+
+In the request and response panes `f`/`b` scroll by a page and `d`/`u`
+by half of one. A value that an `@capture` takes is a variable for the
+requests sent after it, until another environment is chosen. Each send
+reads the environment files again and runs `{{$cmd NAME}}` again, so an
+edited file counts at once. Secrets are masked as in the CLI's output,
+and the interface writes no files.
+
 ## Checks and captures
 
 `# @assert` checks a response, and `# @capture` takes a value from it for

@@ -59,12 +59,13 @@ keeps the test passing and extends it to what it adds.
 | Rule | Tests |
 |---|---|
 | No secret value reaches stdout or stderr, in any form, error, panic or `--verbose` output included | `TestNoSecretInOutput`, `TestPanicIsMasked` (`internal/cli`), `TestErrorsHideSecrets` (`internal/core/exec`) |
+| No view of the terminal interface holds a secret value, in any layout or state | `TestNoSecretInTUI`, `TestTUIPanicIsMasked` |
 | A redirect to another origin drops secret headers and does not resend a secret body; a redirect from https to http is refused | `TestRedirectDropsSecrets`, `TestRedirectSecretBody`, `TestRedirectDowngrade` |
 | A path in a `.http` file does not lead outside its directory | `TestPrepareBodyFileStaysInside` |
 | A response body is read up to a limit, a request up to a timeout | `TestMaxBody`, `TestErrors` |
-| Text for a terminal holds no escape sequence | `FuzzPrintable`, `TestPrintErrorEscapes` |
+| Text for a terminal holds no escape sequence | `FuzzPrintable`, `TestPrintErrorEscapes`, `TestTUIEscapes` |
 | Files are written whole, secrets readable by their owner only | `TestImportPostmanExisting`, `TestStore` |
-| Every goroutine has an owner that stops it and waits for it | vegtam starts none yet; a package that does adds `goleak.VerifyTestMain` |
+| Every goroutine has an owner that stops it and waits for it | `goleak.VerifyTestMain` in `internal/tui`, the one package that starts one; `TestCancel`, `TestRun` |
 
 Secrets are not taken from command-line flags: they come from the
 private environment file, the process environment or a command.

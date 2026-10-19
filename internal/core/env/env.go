@@ -50,6 +50,7 @@ type Loader struct {
 	captured map[string]captured // the values taken so far
 	lost     map[string]string   // variables whose latest capture took nothing: the request
 	taken    []string            // every secret value ever captured, for the masker
+	old      []string            // the secrets read before the last Reload, for the masker
 
 	cmdFiles map[string]*commands // command files read, by path
 	ran      map[string]ran       // what each command gave, by command file path and name
@@ -89,7 +90,7 @@ func NewLoader(opts Options) *Loader {
 // environment values that placeholders referred to, the output of the
 // commands run, and the secret values captured so far.
 func (l *Loader) Masker() *core.Masker {
-	values := slices.Clone(l.taken)
+	values := slices.Concat(l.taken, l.old)
 	for _, v := range l.dirs {
 		values = slices.AppendSeq(values, maps.Values(v.private))
 	}
@@ -97,6 +98,23 @@ func (l *Loader) Masker() *core.Masker {
 		values = append(values, r.value)
 	}
 	return core.NewMasker(slices.AppendSeq(values, maps.Values(l.process)))
+}
+
+// Reload drops the environment files and command files read so far, and
+// what the commands gave, so that the requests prepared from now on see
+// the files as they are then and run their commands again. Captured
+// values stay, and the masker keeps every secret it knew.
+func (l *Loader) Reload() {
+	for _, v := range l.dirs {
+		l.old = slices.AppendSeq(l.old, maps.Values(v.private))
+	}
+	for _, r := range l.ran {
+		l.old = append(l.old, r.value)
+	}
+	slices.Sort(l.old)
+	l.old = slices.Compact(l.old)
+	l.dirs, l.errs, l.files = map[string]*Vars{}, map[string]error{}, map[string]envMap{}
+	l.cmdFiles, l.ran = map[string]*commands{}, map[string]ran{}
 }
 
 // Declare makes name a variable that an @capture takes from a response.
@@ -239,6 +257,30 @@ func (l *Loader) load(dir string) (*Vars, error) {
 			env, strings.Join(found, ", "), strings.Join(slices.Compact(defined), ", "))
 	}
 	return v, nil
+}
+
+// Names returns the environments that the environment files for the
+// .http file at path define, sorted, without $shared and other names
+// that start with "$": what Options.Env can select for its requests.
+func Names(path string) ([]string, error) {
+	abs, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return nil, core.Errorf(core.KindUsage, core.Source{}, "%v", err)
+	}
+	l := NewLoader(Options{})
+	var names []string
+	for _, name := range []string{PublicFile, PrivateFile} {
+		if p := nearest(abs, name); p != "" {
+			m, err := l.read(p)
+			if err != nil {
+				return nil, err
+			}
+			names = slices.AppendSeq(names, maps.Keys(m))
+		}
+	}
+	names = slices.DeleteFunc(names, func(s string) bool { return strings.HasPrefix(s, "$") })
+	slices.Sort(names)
+	return slices.Compact(names), nil
 }
 
 // nearest returns the path of the file named name in dir or the closest

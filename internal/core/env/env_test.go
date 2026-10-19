@@ -242,6 +242,51 @@ func TestEnvironmentFiles(t *testing.T) {
 	}
 }
 
+func TestNames(t *testing.T) {
+	path := tree(t, "GET https://{{host}}/")
+	writeFiles(t, filepath.Dir(path), map[string]string{PrivateFile: `{"$shared": {}, "$other": {}, "staging": {}, "dev": {}}`})
+	if got, err := Names(path); err != nil || !slices.Equal(got, []string{"dev", "prod", "staging"}) {
+		t.Errorf("Names = %q, %v; want dev, prod, staging", got, err)
+	}
+	if got, err := Names(filepath.Join(t.TempDir(), "a.http")); err != nil || len(got) != 0 {
+		t.Errorf("Names without files = %q, %v", got, err)
+	}
+	broken := t.TempDir()
+	writeFiles(t, broken, map[string]string{PublicFile: "{"})
+	if _, err := Names(filepath.Join(broken, "a.http")); !isKind(err, core.KindParse) {
+		t.Errorf("Names of a broken file: %v, want a parse error", err)
+	}
+}
+
+// TestReload checks that a reloaded loader reads the environment files
+// again, keeps what was captured, and still masks the secrets it had.
+func TestReload(t *testing.T) {
+	path := tree(t, "GET https://{{host}}/{{user}}?t={{token}}")
+	l := NewLoader(Options{Env: "dev"})
+	l.Declare("user")
+	l.Capture("user", "7", false)
+	if p, err := prepare(t, l, path); err != nil || p.URL.Masked() != "https://api.example.test/{{user}}?t={{token}}" {
+		t.Fatalf("before = %v, %v", p, err)
+	}
+	writeFiles(t, filepath.Dir(path), map[string]string{
+		PrivateFile: `{"dev": {"token": "n3w-t0ken", "host": "new.example.test"}}`,
+	})
+	if p, _ := prepare(t, l, path); p.URL.Masked() != "https://api.example.test/{{user}}?t={{token}}" {
+		t.Errorf("without Reload the files are read again: %s", p.URL.Masked())
+	}
+	l.Reload()
+	p, err := prepare(t, l, path)
+	if err != nil || p.URL.Masked() != "https://{{host}}/{{user}}?t={{token}}" {
+		t.Fatalf("after Reload = %v, %v", p, err)
+	}
+	if p, err = l.Fill(p); err != nil || p.URL.Masked() != "https://{{host}}/7?t={{token}}" {
+		t.Errorf("the captured value is gone: %v, %v", p, err)
+	}
+	if got := l.Masker().Mask(privateToken + " n3w-t0ken"); got != "*** ***" {
+		t.Errorf("masker after Reload: %q", got)
+	}
+}
+
 func TestCaptures(t *testing.T) {
 	path := tree(t, `GET {{scheme}}://{{host}}/users/{{user}}
 Authorization: Bearer {{token}}

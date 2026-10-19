@@ -10,6 +10,7 @@ import (
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/env"
+	"github.com/vidforull/vegtam/internal/tui"
 )
 
 // leaks returns the forms of the test secrets that s contains: the value,
@@ -177,6 +178,21 @@ func TestPanicBeforeOutputIsMasked(t *testing.T) {
 	cfg.errOut = masked{&stderr, cfg}
 	cfg.internalError("cannot resolve "+privateSecret+" \x1b]0;title\x07", []byte("goroutine 1 [running]:\n"))
 	want := `vegtam: internal error: cannot resolve *** \x1b]0;title\x07` + "\ngoroutine 1 [running]:\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+// TestTUIPanicIsMasked checks a panic that the terminal interface caught
+// and raised again once the terminal was restored: its own value and
+// stack are printed, masked.
+func TestTUIPanicIsMasked(t *testing.T) {
+	var stderr strings.Builder
+	cfg := &Config{Stderr: &stderr, secrets: func() *core.Masker { return core.NewMasker([]string{privateSecret}) }}
+	cfg.errOut = masked{&stderr, cfg}
+	p := &tui.Panic{Value: "cannot show " + privateSecret, Stack: []byte("goroutine 7 [running]:\ntui.(*Model).View\n")}
+	cfg.internalError(p, []byte("goroutine 1 [running]:\ncli.Run\n"))
+	want := "vegtam: internal error: cannot show ***\ngoroutine 7 [running]:\ntui.(*Model).View\n"
 	if stderr.String() != want {
 		t.Errorf("stderr = %q, want %q", stderr.String(), want)
 	}

@@ -14,17 +14,19 @@ import (
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/output"
+	"github.com/vidforull/vegtam/internal/tui"
 )
 
 // Exit codes. The root command's help and docs/AUTOMATION.md list them.
 const (
-	exitOK      = 0
-	exitAssert  = 1 // an @assert failed
-	exitUsage   = 2 // bad arguments, a file that does not parse, an unresolved variable, an invalid request, a capture without a value, an export that cannot be read
-	exitNetwork = 3 // network or TLS error, timeout
-	exitStatus  = 4 // HTTP status 400 or above, with run --fail
-	exitPolicy  = 6 // not allowed by policy: a command file that is not trusted
-	exitPanic   = 2 // a bug in vegtam: the code Go exits with on a panic
+	exitOK       = 0
+	exitAssert   = 1   // an @assert failed
+	exitUsage    = 2   // bad arguments, a file that does not parse, an unresolved variable, an invalid request, a capture without a value, an export that cannot be read
+	exitNetwork  = 3   // network or TLS error, timeout
+	exitStatus   = 4   // HTTP status 400 or above, with run --fail
+	exitPolicy   = 6   // not allowed by policy: a command file that is not trusted
+	exitCanceled = 130 // interrupted by Ctrl-C or SIGTERM: 128 + SIGINT, as a shell reports it
+	exitPanic    = 2   // a bug in vegtam: the code Go exits with on a panic
 )
 
 // exitCode returns the exit code for an error of kind k.
@@ -38,6 +40,8 @@ func exitCode(k core.Kind) int {
 		return exitStatus
 	case core.KindPolicy:
 		return exitPolicy
+	case core.KindCanceled:
+		return exitCanceled
 	case core.KindUsage, core.KindParse, core.KindVariable, core.KindRequest, core.KindImport, core.KindCapture:
 		return exitUsage
 	}
@@ -48,7 +52,9 @@ const rootHelp = `vegtam is a local-first API client for .http files.
 
 On a terminal vegtam prints text. Otherwise, or with --json, it prints JSON
 documents; "vegtam schema" prints their JSON Schema. Secret values never
-appear in the output.
+appear in the output. With no command, when stdin and stdout are
+terminals, vegtam opens the terminal interface on the current directory,
+as "vegtam tui" does.
 
 Exit codes:
   0  success
@@ -61,14 +67,19 @@ Exit codes:
   5  reserved for requests that need confirmation
   6  blocked by policy: a {{$cmd NAME}} whose command file is not
      trusted (see vegtam trust --help)
+  130  interrupted by Ctrl-C (SIGINT) or SIGTERM
 With several requests, the exit code is the highest of theirs.`
 
 // Config is what the commands need from the process.
 type Config struct {
-	Stdout  io.Writer
-	Stderr  io.Writer
-	TTY     bool // stdout is a terminal: print text rather than JSON
-	Version string
+	Stdin  io.Reader // read by the terminal interface only
+	Stdout io.Writer
+	Stderr io.Writer
+	TTY    bool // stdout is a terminal: print text rather than JSON
+	// Interactive is set when stdin and stdout are both terminals: vegtam
+	// alone then opens the terminal interface.
+	Interactive bool
+	Version     string
 
 	json   bool         // --json
 	masker *core.Masker // the secrets the command has read
@@ -117,6 +128,11 @@ func (c *Config) printError(e *output.Error) {
 // character that Go would print as is: it is masked with every secret
 // read so far, and shown as text for a terminal.
 func (c *Config) internalError(v any, stack []byte) {
+	// The terminal interface catches a panic to restore the terminal, and
+	// panics again with it; its own stack is the one that tells.
+	if p, ok := v.(*tui.Panic); ok {
+		v, stack = p.Value, p.Stack
+	}
 	if c.secrets != nil {
 		c.masker = c.secrets()
 	}
@@ -159,13 +175,25 @@ func Run(ctx context.Context, args []string, cfg Config) (code int) {
 		Long:          rootHelp,
 		SilenceErrors: true,
 		SilenceUsage:  true,
+		// A person at a terminal gets the terminal interface; a program,
+		// which needs none, gets the help and a usage error.
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cfg.Interactive && !cfg.json {
+				return runTUI(cmd.Context(), &cfg, newTUIFlags(), ".")
+			}
+			cmd.SetOut(cfg.errOut)
+			if err := cmd.Help(); err != nil {
+				return err
+			}
+			return core.Errorf(core.KindUsage, core.Source{}, "no command given")
+		},
 	}
 	root.SetArgs(args)
 	root.SetOut(cfg.out)
 	root.SetErr(cfg.errOut)
 	root.PersistentFlags().BoolVar(&cfg.json, "json", false, "print JSON even on a terminal")
-	root.AddCommand(newRunCmd(&cfg), newShowCmd(&cfg), newListCmd(&cfg), newImportCmd(&cfg), newTrustCmd(&cfg),
-		newSchemaCmd(&cfg), newVersionCmd(&cfg))
+	root.AddCommand(newRunCmd(&cfg), newShowCmd(&cfg), newListCmd(&cfg), newTUICmd(&cfg), newImportCmd(&cfg),
+		newTrustCmd(&cfg), newSchemaCmd(&cfg), newVersionCmd(&cfg))
 
 	cmd, err := root.ExecuteContextC(ctx)
 	if err == nil {
