@@ -45,13 +45,13 @@ func TestHistoryNoSecrets(t *testing.T) {
 		{"run", api + "#echo"},
 		{"run", api + "#fail", "--fail"},
 		{"run", api + "#refused"},
-		{"run", api + "#slow", "--timeout", "100ms"},
+		{"run", api + "#slow", "--max-time", "100ms"},
 		{"run", api + "#binary", "--json"},
 		{"run", api + "#big", "--max-body", "106"},
 		{"run", api + "#hidden"},
 		{"run", api + "#hops"},
 		{"run", fx.path("quiet.http") + "#quiet"},
-		{"run", fx.dir, "--timeout", "100ms", "--max-body", "106"},
+		{"run", fx.dir, "--max-time", "100ms", "--max-body", "106"},
 	}
 	for _, args := range runs {
 		if _, _, stderr := runCLI(t, true, append(args, "-e", "test")...); strings.Contains(stderr, "history") {
@@ -118,7 +118,7 @@ func TestRunNoHistory(t *testing.T) {
 	if err := os.WriteFile(filepath.Dir(file), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, _, stderr := runCLI(t, true, "run", fx.path("api.http"), "-e", "test", "--timeout", "100ms")
+	code, _, stderr := runCLI(t, true, "run", fx.path("api.http"), "-e", "test", "--max-time", "100ms")
 	if code != exitNetwork || strings.Count(stderr, "vegtam: history: ") != 1 || !strings.Contains(stderr, "VEGTAM_NO_HISTORY=1 turns it off") {
 		t.Errorf("exit code %d\n%s", code, stderr)
 	}

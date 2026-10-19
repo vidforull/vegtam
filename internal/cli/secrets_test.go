@@ -61,7 +61,7 @@ func bodies(v any) []string {
 // checks that neither secret reaches stdout or stderr in any form.
 func TestNoSecretInOutput(t *testing.T) {
 	fx := newFixture(t)
-	api := fx.path("api.http")
+	api, transport := fx.path("api.http"), fx.transportFile(t)
 	scenarios := []struct {
 		name string
 		args []string
@@ -72,13 +72,17 @@ func TestNoSecretInOutput(t *testing.T) {
 		{"HTTP 500", []string{"run", api + "#fail"}, exitOK, "***"},
 		{"HTTP 500 with --fail", []string{"run", api + "#fail", "--fail"}, exitStatus, "***"},
 		{"network error", []string{"run", api + "#refused"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}"},
-		{"timeout", []string{"run", api + "#slow", "--timeout", "100ms"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}"},
+		{"timeout", []string{"run", api + "#slow", "--max-time", "100ms"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}"},
+		{"read timeout", []string{"run", api + "#slow", "--read-timeout", "100ms"}, exitNetwork, "(read timeout)"},
+		{"connect timeout", []string{"run", transport + "#silent", "--connect-timeout", "100ms"}, exitNetwork, "(connect timeout)"},
 		{"dry run", []string{"run", api + "#echo", "--dry-run"}, exitOK, "Bearer {{token}}"},
 		{"binary body", []string{"run", api + "#binary"}, exitOK, ""},
 		{"truncated body", []string{"run", api + "#big", "--max-body", "106"}, exitOK, "xx***"},
 		{"secret host", []string{"run", api + "#hidden"}, exitNetwork, "{{base}}/?key={{token}}"},
 		{"redirect error", []string{"run", api + "#hops"}, exitNetwork, "stopped after 10 redirects"},
-		{"directory", []string{"run", fx.dir, "--timeout", "100ms", "--max-body", "106", "--fail"}, exitStatus, "***"},
+		{"unknown CA", []string{"run", transport + "#untrusted"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}"},
+		{"no client certificate", []string{"run", transport + "#mtls", "--cacert", fx.ca}, exitNetwork, "pass --cert and --key"},
+		{"directory", []string{"run", fx.dir, "--max-time", "100ms", "--max-body", "106", "--fail"}, exitStatus, "***"},
 		{"show", []string{"show", api + "#echo"}, exitOK, "Bearer {{token}}"},
 	}
 	modes := []struct {

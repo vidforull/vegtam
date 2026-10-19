@@ -3,16 +3,20 @@ package exec
 
 import (
 	"context"
-	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/vidforull/vegtam/internal/core"
@@ -23,32 +27,26 @@ const MaxRedirects = 10
 
 // Options configure a Client.
 type Options struct {
-	Timeout   time.Duration // for the whole exchange, body included; 0 means none
-	MaxBody   int64         // response body bytes kept; the rest is not read
-	UserAgent string        // sent when the request has no User-Agent header
-	TLS       *tls.Config   // nil means the system defaults
+	MaxBody   int64  // response body bytes kept; the rest is not read
+	UserAgent string // sent when the request has no User-Agent header
+	Transport Transport
 }
 
 // Client sends requests. It speaks HTTP/2 when the server offers it over
 // TLS and HTTP/1.1 otherwise, and takes its proxy from the environment
-// (HTTPS_PROXY, HTTP_PROXY, NO_PROXY).
+// (HTTPS_PROXY, HTTP_PROXY, NO_PROXY). It keeps a transport, with its
+// pool of connections, for each configuration it sends with.
 type Client struct {
-	opts      Options
-	transport *http.Transport
+	opts Options
+	mu   sync.Mutex
+	pool map[transportKey]*http.Transport
+	// control is the dialer's: tests make a connection hang with it.
+	control func(ctx context.Context, network, address string, c syscall.RawConn) error
 }
 
 // New returns a Client.
 func New(opts Options) *Client {
-	// A clone keeps the defaults: the proxy from the environment, HTTP/2.
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok { // replaced by the program; vegtam does not
-		base = &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true}
-	}
-	t := base.Clone()
-	if opts.TLS != nil {
-		t.TLSClientConfig = opts.TLS.Clone()
-	}
-	return &Client{opts: opts, transport: t}
+	return &Client{opts: opts, pool: map[transportKey]*http.Transport{}}
 }
 
 // Response is a received response.
@@ -60,28 +58,46 @@ type Response struct {
 	Body      []byte
 	Truncated bool // the body was longer than MaxBody
 	Duration  time.Duration
+	// TLSVerified is set when every hop of the request, redirects
+	// included, went over TLS with the server's certificate checked: not
+	// if one went over http, nor with TLS.Insecure. A plain hop on the way
+	// could have led anywhere.
+	TLSVerified bool
 }
 
 // Do sends p with its secrets revealed from s and reads the response.
 func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Response, error) {
-	req, sensitive, err := c.build(ctx, p, s, false)
+	st, _ := c.Settings(p.Request)
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	if st.Total > 0 {
+		var stop context.CancelFunc
+		ctx, stop = context.WithTimeoutCause(ctx, st.Total, errMaxTime)
+		defer stop()
+	}
+	w := &watch{connect: st.Connect, read: st.Read, cancel: cancel}
+	defer w.stop()
+	ctx = httptrace.WithClientTrace(ctx, w.trace())
+	req, sensitive, err := c.build(ctx, p, s, false, st.Version)
 	if err != nil {
 		return nil, err
 	}
-	hc := &http.Client{Transport: c.transport, Timeout: c.opts.Timeout, CheckRedirect: redirectPolicy(sensitive, p.Body.HasSecret())}
+	h := &hops{c: c, st: st, first: origin(req.URL)}
+	hc := &http.Client{Transport: h, CheckRedirect: redirectPolicy(sensitive, p.Body.HasSecret())}
 	start := time.Now()
 	resp, err := hc.Do(req)
+	w.idle() // the headers are in
 	if err != nil {
-		return nil, c.netError(p, s, req.URL.String(), err)
+		return nil, c.netError(ctx, p, s, req.URL.String(), err, st, w)
 	}
 	defer resp.Body.Close()
 	limit := c.opts.MaxBody
 	if limit < math.MaxInt64 {
 		limit++ // one byte more tells whether the body is longer
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	body, err := io.ReadAll(io.LimitReader(watched{resp.Body, w}, limit))
 	if err != nil {
-		return nil, c.netError(p, s, req.URL.String(), err)
+		return nil, c.netError(ctx, p, s, req.URL.String(), err, st, w)
 	}
 	r := &Response{
 		Proto:    resp.Proto,
@@ -90,6 +106,8 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 		Header:   resp.Header,
 		Body:     body,
 		Duration: time.Since(start),
+
+		TLSVerified: !h.plain && !c.opts.Transport.TLS.Insecure,
 	}
 	if int64(len(body)) > c.opts.MaxBody {
 		r.Body, r.Truncated = body[:c.opts.MaxBody], true
@@ -102,15 +120,16 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 // holds a value s gives as core.ErrLate, one known only when the request
 // is sent, is left unchecked.
 func (c *Client) Check(ctx context.Context, p *core.Prepared, s core.Secrets) error {
-	_, _, err := c.build(ctx, p, s, true)
+	st, _ := c.Settings(p.Request)
+	_, _, err := c.build(ctx, p, s, true, st.Version)
 	return err
 }
 
-// build makes the request that goes on the wire. It also returns the
-// headers that must not follow a redirect to another origin. With check,
-// a late value is no error: build checks the rest, and returns no request
-// if the URL holds one.
-func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets, check bool) (*http.Request, []string, error) {
+// build makes the request that goes on the wire with the HTTP version
+// version. It also returns the headers that must not follow a redirect to
+// another origin. With check, a late value is no error: build checks the
+// rest, and returns no request if the URL holds one.
+func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets, check bool, version string) (*http.Request, []string, error) {
 	src := p.Request.Source
 	var raw string
 	fail := func(format string, args ...any) error {
@@ -142,6 +161,9 @@ func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets, ch
 			return nil, nil, fail("URL %s: want an http or https URL", raw)
 		case u.Host == "":
 			return nil, nil, fail("URL %s has no host", raw)
+		// net/http would send HTTP/1.1 without a word.
+		case version == core.HTTP2 && u.Scheme == "http":
+			return nil, nil, fail("HTTP/2 over http needs HTTP/2 (Prior Knowledge), or --http2-prior-knowledge: vegtam does not upgrade a connection")
 		}
 	}
 	body, _, err := reveal(p.Body)
@@ -248,16 +270,62 @@ func origin(u *url.URL) string {
 	return u.Scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
 }
 
-// netError classifies err, an error from sending p to the URL wire.
-func (c *Client) netError(p *core.Prepared, s core.Secrets, wire string, err error) error {
+// netError classifies err, an error from sending p, with settings st, to
+// the URL wire, in the context ctx that w watched. A timeout names its
+// phase: the context says if a limit of vegtam's ended the request, and w
+// if a connection was being made.
+func (c *Client) netError(ctx context.Context, p *core.Prepared, s core.Secrets, wire string, err error, st Settings, w *watch) error {
 	msg := hide(p, s, wire, err.Error())
-	if errors.Is(err, context.Canceled) {
+	// What net/http says after the URL is that it canceled the request.
+	// An error that reading the body gives is the bare cause.
+	where := hide(p, s, wire, "reading the body of "+strconv.Quote(wire))
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		where = hide(p, s, wire, ue.Op+" "+strconv.Quote(ue.URL))
+	}
+	timeout := func(phase, format string, args ...any) error {
+		e := core.Errorf(core.KindTimeout, p.Request.Source, format, args...)
+		e.Phase = phase
+		return e
+	}
+	switch cause := context.Cause(ctx); {
+	case errors.Is(cause, errMaxTime):
+		return timeout(core.PhaseTotal, "%s: no complete response within %s (max time)", where, core.FormatTimeout(st.Total))
+	case errors.Is(cause, errReadTimeout):
+		return timeout(core.PhaseRead, "%s: no data from the server for %s (read timeout)", where, core.FormatTimeout(st.Read))
+	case errors.Is(cause, errConnectTimeout):
+		return timeout(core.PhaseConnect, "%s: no connection within %s (connect timeout)", where, core.FormatTimeout(st.Connect))
+	case errors.Is(err, context.Canceled):
 		return core.Errorf(core.KindCanceled, p.Request.Source, "%s", msg)
 	}
 	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
-		return core.Errorf(core.KindTimeout, p.Request.Source, "no complete response within %s: %s", c.opts.Timeout, msg)
+		if w.isConnecting() {
+			return timeout(core.PhaseConnect, "%s: no connection within %s (connect timeout)", msg, core.FormatTimeout(st.Connect))
+		}
+		return core.Errorf(core.KindTimeout, p.Request.Source, "%s", msg)
+	}
+	if h := c.hint(err); h != "" {
+		msg += ": " + h
 	}
 	return core.Errorf(core.KindNetwork, p.Request.Source, "%s", msg)
+}
+
+// hint says what to do about err, a TLS error, if anything.
+func (c *Client) hint(err error) string {
+	msg := err.Error()
+	_, unknownCA := errors.AsType[x509.UnknownAuthorityError](err)
+	switch {
+	case unknownCA:
+		return "add the CA that signed it with --cacert"
+	case strings.Contains(msg, "tls: certificate required") && c.opts.Transport.TLS.Cert != nil:
+		return "the server asks for a client certificate, which vegtam offers to the origin of the request as written only, not after a redirect"
+	case strings.Contains(msg, "tls: certificate required"):
+		return "the server asks for a client certificate: pass --cert and --key"
+	case strings.Contains(msg, "tls: no application protocol"):
+		return "the server does not speak HTTP/2 over TLS"
+	case strings.Contains(msg, "looked like an HTTP/1.1 header"):
+		return "the server does not speak HTTP/2 with prior knowledge"
+	}
+	return ""
 }
 
 // validHost reports whether r may appear in a Host header, as net/http
@@ -280,6 +348,8 @@ func hide(p *core.Prepared, s core.Secrets, wire, msg string) string {
 	}
 	var values []string
 	if a := authority(wire); a != "" && a != authority(masked) {
+		// The addresses the host resolves to, which net names, tell it too.
+		msg = ipRE.ReplaceAllString(msg, "***")
 		values = append(values, a)
 		if i := strings.LastIndex(a, ":"); i > 0 && !strings.HasSuffix(a, "]") {
 			values = append(values, strings.Trim(a[:i], "[]"), a[i:])
@@ -301,6 +371,9 @@ func hide(p *core.Prepared, s core.Secrets, wire, msg string) string {
 	}
 	return strings.ReplaceAll(core.NewMasker(values).Mask(msg), mark, masked)
 }
+
+// ipRE matches an IP address, with a port or not, as net writes them.
+var ipRE = regexp.MustCompile(`\[[0-9A-Fa-f:.]+(%[^\]]*)?\](:[0-9]+)?|\b[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?\b`)
 
 // authority returns the host and port of the URL u, written as a string
 // that may not parse.

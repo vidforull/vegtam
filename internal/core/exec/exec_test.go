@@ -1,7 +1,6 @@
 package exec
 
 import (
-	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -191,7 +190,7 @@ func TestRedirectDowngrade(t *testing.T) {
 	defer secure.Close()
 	roots := x509.NewCertPool()
 	roots.AddCert(secure.Certificate())
-	opts := Options{TLS: &tls.Config{RootCAs: roots}}
+	opts := Options{Transport: Transport{TLS: TLS{Roots: roots}}}
 	for _, p := range []*core.Prepared{
 		prepared(http.MethodGet, lit(secure.URL+"/start"), nil),
 		prepared(http.MethodGet, lit(secure.URL+"/start"), nil, header("Authorization", secret("token"))),
@@ -265,7 +264,7 @@ func TestHTTP2(t *testing.T) {
 	defer srv.Close()
 	roots := x509.NewCertPool()
 	roots.AddCert(srv.Certificate())
-	r, err := do(t, Options{TLS: &tls.Config{RootCAs: roots}}, prepared("GET", lit(srv.URL), nil))
+	r, err := do(t, Options{Transport: Transport{TLS: TLS{Roots: roots}}}, prepared("GET", lit(srv.URL), nil))
 	if err != nil || r.Proto != "HTTP/2.0" {
 		t.Errorf("Do = %+v, %v; want HTTP/2.0", r, err)
 	}
@@ -311,7 +310,7 @@ func TestErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := do(t, Options{Timeout: 50 * time.Millisecond}, tt.p)
+			_, err := do(t, Options{Transport: Transport{Total: 50 * time.Millisecond}}, tt.p)
 			if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != tt.kind || !strings.Contains(e.Error(), "t.http:1: ") ||
 				!strings.Contains(e.Msg, tt.want) {
 				t.Errorf("error = %v; want %s error with %q", err, tt.kind, tt.want)
@@ -412,6 +411,11 @@ func TestErrorsHideSecrets(t *testing.T) {
 			"base URL refused", prepared("GET", append(secret("base"), lit("/v1")...), nil),
 			base(closed.URL), core.KindNetwork, `Get "{{base}}/v1": dial tcp ***: connect: connection refused`,
 		},
+		// By name: net names the address it resolved to, which tells it.
+		{
+			"base URL by name refused", prepared("GET", append(secret("base"), lit("/v1")...), nil),
+			base(strings.Replace(closed.URL, "127.0.0.1", "localhost", 1)), core.KindNetwork, `Get "{{base}}/v1": dial tcp ***: connect: connection refused`,
+		},
 		{
 			"base URL with a bad port", prepared("GET", append(secret("base"), lit("/v1")...), nil),
 			base("http://int.example.test:12ab"), core.KindRequest, `invalid URL {{base}}/v1: invalid port "***" after host`,
@@ -419,7 +423,7 @@ func TestErrorsHideSecrets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(Options{Timeout: 100 * time.Millisecond, MaxBody: 1}).Do(t.Context(), tt.p, tt.secrets)
+			_, err := New(Options{MaxBody: 1, Transport: Transport{Total: 100 * time.Millisecond}}).Do(t.Context(), tt.p, tt.secrets)
 			e, ok := errors.AsType[*core.Error](err)
 			if !ok || e.Kind != tt.kind || !strings.Contains(e.Msg, tt.want) {
 				t.Fatalf("error = %v; want %s error with %q", err, tt.kind, tt.want)
@@ -428,6 +432,9 @@ func TestErrorsHideSecrets(t *testing.T) {
 				parts := []string{v}
 				if u, err := url.Parse(v); err == nil && u.Host != "" {
 					parts = append(parts, u.Host, u.Port())
+				}
+				if strings.HasPrefix(tt.name, "base URL") { // and where it resolves to
+					parts = append(parts, "127.0.0.1", "::1")
 				}
 				for _, part := range parts {
 					if strings.Contains(e.Error(), part) {

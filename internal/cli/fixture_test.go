@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"crypto/tls"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -28,6 +32,7 @@ type fixture struct {
 	dir    string
 	host   string
 	hidden string // the base URL in the private file, as localhost:port
+	ca     string // a PEM file with the certificate of the TLS servers
 
 	mu   sync.Mutex
 	seen []string // the raw queries the server received
@@ -47,8 +52,51 @@ func newFixture(t *testing.T) *fixture {
 	if err := os.CopyFS(fx.dir, os.DirFS("../../testdata/cli")); err != nil {
 		t.Fatal(err)
 	}
+	// TLS servers, one of which wants a client certificate, any one. Their
+	// failed handshakes are logged by net/http unless told otherwise.
+	secure, mtls := httptest.NewUnstartedServer(fx.handler()), httptest.NewUnstartedServer(fx.handler())
+	mtls.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert}
+	for _, s := range []*httptest.Server{secure, mtls} {
+		s.Config.ErrorLog = log.New(io.Discard, "", 0)
+		s.StartTLS()
+		t.Cleanup(s.Close)
+	}
+	// A server that takes connections and says nothing: no TLS handshake.
+	silent, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	quiet := make(chan struct{})
+	t.Cleanup(func() {
+		close(quiet)
+		if err := silent.Close(); err != nil {
+			t.Error(err)
+		}
+		wg.Wait()
+	})
+	wg.Go(func() {
+		for {
+			c, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			wg.Go(func() {
+				<-quiet
+				if err := c.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+		}
+	})
+	fx.ca = filepath.Join(fx.dir, "ca.pem")
+	if err := os.WriteFile(fx.ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: secure.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	envs := map[string]map[string]map[string]string{
-		"http-client.env.json":         {"test": {"host": srv.URL, "closed": closed.URL}},
+		"http-client.env.json": {"test": {
+			"host": srv.URL, "closed": closed.URL, "tls": secure.URL, "mtls": mtls.URL, "silent": silent.Addr().String(),
+		}},
 		"http-client.private.env.json": {"test": {"token": privateSecret, "base": "http://" + fx.hidden}},
 	}
 	for name, v := range envs {

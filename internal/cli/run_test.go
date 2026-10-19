@@ -58,7 +58,8 @@ func TestRunText(t *testing.T) {
   }
 }
 `, ""},
-		{"--verbose and control characters", []string{"run", "more/plain.http#1", "-v"}, exitOK, `GET HOST/plain
+		{"--verbose and control characters", []string{"run", "more/plain.http#1", "-v"}, exitOK, `# timeouts: connect 10s, read 30s, max time 2m
+GET HOST/plain
 Accept: text/plain
 
 HTTP/1.1 200 OK (TIME)
@@ -68,7 +69,8 @@ Date: Mon, 19 Oct 2026 00:00:00 GMT
 
 plain\x1b]0;title\x07 \u202etext\u200b
 `, ""},
-		{"dry run", []string{"run", "api.http#echo", "--dry-run"}, exitOK, `POST HOST/echo?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
+		{"dry run", []string{"run", "api.http#echo", "--dry-run"}, exitOK, `# timeouts: connect 10s, read 30s, max time 2m
+POST HOST/echo?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
 Authorization: Bearer {{token}}
 X-Api-Key: {{$env VEGTAM_TEST_KEY}}
 Content-Type: application/json
@@ -83,7 +85,7 @@ plain
 `, ""},
 		{
 			"errors",
-			[]string{"run", "api.http", "--fail", "--timeout", "50ms", "--max-body", "0"},
+			[]string{"run", "api.http", "--fail", "--max-time", "50ms", "--max-body", "0"},
 			exitStatus,
 			"### api.http#echo\nHTTP/1.1 200 OK (TIME)\n[truncated: the body is longer than --max-body]\n\n✓ status == 200\n\n" +
 				"### api.http#fail\nHTTP/1.1 500 Internal Server Error (TIME)\n[truncated: the body is longer than --max-body]\n\n" +
@@ -93,11 +95,12 @@ plain
 				"### api.http#hidden\n\n### api.http#hops\n",
 			"vegtam: api.http:20: HTTP 500 Internal Server Error\n" +
 				`vegtam: api.http:25: Get "http://127.0.0.1:PORT/?key={{token}}&env={{$env VEGTAM_TEST_KEY}}": dial tcp 127.0.0.1:PORT: connect: connection refused` + "\n" +
-				`vegtam: api.http:29: no complete response within 50ms: Get "HOST/slow?key={{token}}&env={{$env VEGTAM_TEST_KEY}}": context deadline exceeded (Client.Timeout exceeded while awaiting headers)` + "\n" +
-				`vegtam: api.http:41: Get "{{base}}/?key={{token}}": dial tcp LOCALHOST***: connect: connection refused` + "\n" +
+				`vegtam: api.http:29: Get "HOST/slow?key={{token}}&env={{$env VEGTAM_TEST_KEY}}": no complete response within 50ms (max time)` + "\n" +
+				`vegtam: api.http:41: Get "{{base}}/?key={{token}}": dial tcp ***: connect: connection refused` + "\n" +
 				`vegtam: api.http:45: Get "/hops/xxxxxxxxxxx?key=***&env=***": stopped after 10 redirects` + "\n",
 		},
-		{"show as written", []string{"show", "api.http#2"}, exitOK, `GET {{host}}/fail?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
+		{"show as written", []string{"show", "api.http#2"}, exitOK, `# timeouts: connect 10s, read 30s, max time 2m
+GET {{host}}/fail?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
 Authorization: Bearer {{token}}
 `, ""},
 		{"list", []string{"list", "."}, exitOK, `REF                METHOD  URL                                                         DIRECTIVES
@@ -113,8 +116,7 @@ more/plain.http#1  GET     {{host}}/plain
 `, ""},
 	}
 	t.Chdir(fx.dir)
-	// localhost may resolve to either address.
-	port, localhost := regexp.MustCompile(`127\.0\.0\.1:\d+`), regexp.MustCompile(`(\[::1\]|127\.0\.0\.1)\*\*\*`)
+	port := regexp.MustCompile(`127\.0\.0\.1:\d+`)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			args := tt.args
@@ -122,7 +124,7 @@ more/plain.http#1  GET     {{host}}/plain
 				args = append(args, "-e", "test")
 			}
 			code, stdout, stderr := runCLI(t, true, args...)
-			stderr = localhost.ReplaceAllString(port.ReplaceAllString(normalize(fx, stderr), "127.0.0.1:PORT"), "LOCALHOST***")
+			stderr = port.ReplaceAllString(normalize(fx, stderr), "127.0.0.1:PORT")
 			stdout = normalize(fx, stdout)
 			if code != tt.code || stdout != tt.stdout || stderr != tt.stderr {
 				t.Errorf("exit code %d, want %d\nstdout:\n%s\nwant:\n%s\nstderr:\n%s\nwant:\n%s",
@@ -152,7 +154,8 @@ func TestRunJSON(t *testing.T) {
 	code, stdout, stderr := runCLI(t, false, "run", fx.path("more"))
 	validateJSON(t, stdout)
 	want := `{"schema_version":1,"results":[{"ref":"DIR/more/broken.http","error":{"kind":"parse","message":"GET needs a URL",` +
-		`"file":"DIR/more/broken.http","line":1}},{"ref":"DIR/more/plain.http#1","error":{"kind":"variable",` +
+		`"file":"DIR/more/broken.http","line":1}},{"ref":"DIR/more/plain.http#1",` +
+		`"transport":{"connect_timeout_ms":10000,"read_timeout_ms":30000,"max_time_ms":120000},"error":{"kind":"variable",` +
 		`"message":"unresolved variables: host (no environment selected; use -e <name>)","file":"DIR/more/plain.http",` +
 		`"line":3,"variables":["host"]}}]}` + "\n"
 	if got := normalize(fx, stdout); code != exitUsage || got != want || strings.Count(stderr, "vegtam: ") != 2 {
@@ -271,7 +274,7 @@ func TestRunUsageErrors(t *testing.T) {
 		{[]string{"run", fx.path("a#b.http#zzz")}, `a#b.http: no request "zzz" (requests: one)`},
 		{[]string{"run", fx.path("more#1")}, "more: is a directory; #1 needs a .http file"},
 		{[]string{"run", fx.path("none.http")}, "no such file or directory"},
-		{[]string{"run", fx.dir, "--timeout", "-1s"}, "--timeout must not be negative"},
+		{[]string{"run", fx.dir, "--max-time", "-1s"}, `invalid argument "-1s" for "--max-time" flag: want a time such as 30 (seconds)`},
 		{[]string{"run", fx.dir, "--max-body", "1KB2"}, "want bytes or a size such as 512KiB or 10MB"},
 		{[]string{"run", fx.path("api.http#1"), "-e", "prod"}, `environment "prod" is not defined`},
 		{[]string{"show", fx.path("api.http")}, "name a request: "},

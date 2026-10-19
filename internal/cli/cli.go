@@ -143,6 +143,20 @@ func (c *Config) printError(e *output.Error) {
 	fmt.Fprintf(c.errOut, "vegtam: %s%s\n", c.text(loc), c.text(e.Message))
 }
 
+// printWarnings prints ws on stderr.
+func (c *Config) printWarnings(ws []output.Warning) {
+	for _, w := range ws {
+		loc := w.File
+		if loc != "" && w.Line > 0 {
+			loc += ":" + strconv.Itoa(w.Line)
+		}
+		if loc != "" {
+			loc += ": "
+		}
+		fmt.Fprintf(c.errOut, "vegtam: %swarning: %s\n", c.text(loc), c.text(w.Message))
+	}
+}
+
 // internalError prints v, the value of a panic, and stack on stderr. A
 // panic is a bug in vegtam, and its value may hold a secret or a control
 // character that Go would print as is: it is masked with every secret

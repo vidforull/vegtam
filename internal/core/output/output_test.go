@@ -60,7 +60,7 @@ func TestNewResponse(t *testing.T) {
 	got, _ := json.Marshal(Document{SchemaVersion: 1, Result: &Result{Response: resp, Timing: timing}})
 	want := `{"schema_version":1,"response":{"proto":"HTTP/1.1","status":200,"reason":"OK","headers":` +
 		`[{"name":"X-A","value":"1"},{"name":"X-B","value":"2"},{"name":"X-B","value":"***"}],` +
-		`"body":"{\"echo\": \"***\", \"raw\": \"***\"}","truncated":false,"untrusted":true},"timing":{"total_ms":1.234}}`
+		`"body":"{\"echo\": \"***\", \"raw\": \"***\"}","truncated":false,"untrusted":true,"tls_verified":false},"timing":{"total_ms":1.234}}`
 	if string(got) != want {
 		t.Errorf("NewResponse = %s\nwant          %s", got, want)
 	}

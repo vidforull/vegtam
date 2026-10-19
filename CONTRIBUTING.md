@@ -63,7 +63,9 @@ keeps the test passing and extends it to what it adds.
 | The history of runs holds no secret value, in any form, and nothing of a dry run or a request with `@no-log` | `TestHistoryNoSecrets`, `TestRunNoHistory` (`internal/cli`), `TestHistory` (`internal/core/session`) |
 | A redirect to another origin drops secret headers and does not resend a secret body; no redirect sends the URL it came from as the Referer; a redirect from https to http is refused | `TestRedirectDropsSecrets`, `TestRedirectSecretBody`, `TestRedirectDowngrade` |
 | A path in a `.http` file does not lead outside its directory, and a body file is a regular file of 16 MiB at most, checked before it is opened | `TestPrepareBodyFileStaysInside`, `TestPrepareBodyFileKind`, `TestPrepareBodyFileFIFO`, `TestPreviewFIFO` |
-| A response body is read up to a limit, a request up to a timeout | `TestMaxBody`, `TestErrors` |
+| A response body is read up to a limit, a request up to its time limits, and a timeout names the one that ran out | `TestMaxBody`, `TestErrors`, `TestTimeoutPhases` |
+| A connection made with one TLS identity carries no request meant for another; the client certificate goes to the origin of the request as written only | `TestNoReuseAcrossIdentities`, `TestTLS` (`internal/core/exec`) |
+| A transport error holds no secret value, a host name from a secret included | `TestTLSErrorsHideSecrets`, `TestNoSecretInOutput` |
 | Text for a terminal holds no escape sequence and no invisible character, and is masked before it is escaped | `FuzzPrintable`, `TestPrintable`, `TestPrintErrorEscapes`, `TestTUIEscapes`, `TestInvisibleSecretIsMasked` |
 | Files are written whole, secrets readable by their owner only; the history is added to a line at a time, readable by its owner only | `TestImportPostmanExisting`, `TestStore`, `TestAdd`, `TestRotate`, `TestStaysInside` (`internal/core/history`) |
 | A `{{$cmd NAME}}` gets no input and no terminal, and one that asks for either fails at once | `TestCommandNoInput` |

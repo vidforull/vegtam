@@ -20,6 +20,9 @@ func (c *Config) printResult(res *output.Result, i int, several, verbose bool) {
 	}
 	dryRun := res.Response == nil && res.Error == nil
 	if res.Request != nil && (verbose || dryRun) {
+		if res.Transport != nil {
+			output.WriteTransport(&b, res.Transport)
+		}
 		output.WriteRequest(&b, res.Request)
 		if res.Response != nil {
 			b.WriteString("\n")

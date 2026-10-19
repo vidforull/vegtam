@@ -36,9 +36,9 @@ command and on its argument, never on what happens at run time:
 
 | Command | Document |
 |---|---|
-| `run <file>#<ref>` | one result: `ref`, `request`, `response`, `timing`, `asserts`, `captures`, `error` |
+| `run <file>#<ref>` | one result: `ref`, `request`, `transport`, `response`, `timing`, `asserts`, `captures`, `warnings`, `error` |
 | `run <file>`, `run <dir>` | `results`: one result per request, in file order |
-| `show <file>#<ref>` | one result with `ref` and `request` only |
+| `show <file>#<ref>` | one result with `ref`, `request`, `transport` and `warnings` only |
 | `list <file>`, `list <dir>` | `requests` |
 | `import postman <export> -o <dir>` | `import`: the report of the import |
 | `trust <dir>`, `trust --revoke <dir>`, `trust --list` | `trust`: the command files and their status |
@@ -55,6 +55,7 @@ A result for `run api/users.http#list -e dev` looks like this (shortened):
     "url": "https://api.example.test/users?limit=2",
     "headers": [{"name": "Authorization", "value": "Bearer {{token}}"}]
   },
+  "transport": {"connect_timeout_ms": 10000, "read_timeout_ms": 30000, "max_time_ms": 120000},
   "response": {
     "proto": "HTTP/1.1",
     "status": 200,
@@ -62,7 +63,8 @@ A result for `run api/users.http#list -e dev` looks like this (shortened):
     "headers": [{"name": "Content-Type", "value": "application/json"}],
     "body": "[{\"id\":1,\"name\":\"Ada\"}]",
     "truncated": false,
-    "untrusted": true
+    "untrusted": true,
+    "tls_verified": true
   },
   "timing": {"total_ms": 84.215},
   "asserts": [
@@ -90,6 +92,16 @@ A result for `run api/users.http#list -e dev` looks like this (shortened):
   name and value pairs, sorted by name; a name may repeat. The body is a
   string: the text as received, or base64 with `"encoding": "base64"` if
   it is not valid UTF-8.
+  `tls_verified` is `true` when every hop of the request, redirects
+  included, went over TLS with the server's certificate checked, `false`
+  if one went over plain `http`, and with `--insecure`: only when it is
+  `true` could nothing on the way have read or changed the exchange. `proto` is the version spoken, `HTTP/2.0` for
+  HTTP/2.
+- **`transport`** is what the request was, or would be, sent with: the
+  `version` asked for by a flag or the request line (absent if none),
+  and the limits in milliseconds, `0` for none: `connect_timeout_ms`,
+  `read_timeout_ms` and `max_time_ms`, each the flag's or lower, if the
+  request's directive says so.
 - **`timing.total_ms`** runs from sending the request to the end of the
   body.
 - **`asserts`** has the outcome of each `# @assert` of the request, in
@@ -102,10 +114,17 @@ A result for `run api/users.http#list -e dev` looks like this (shortened):
   request took, for the requests after it: `name`, `source` as written,
   and `secret`. The values are never in the output. A capture that found
   no value is not listed; it is in `error`.
+- **`warnings`** says what vegtam ignored and why, the request running
+  all the same: a directive of another client, a limit above the flag's,
+  the `SSLConfiguration` of an environment file. Each has a `message`,
+  and `file` and `line` when there are any; each is also printed on
+  stderr as `vegtam: file:line: warning: ...`.
 - **`error`** has a `kind`, a `message`, and `file` and `line` when it
   belongs to a place in a file. For `kind: "variable"`, `variables` lists
   the unresolved placeholders, such as `host` or `$env TOKEN`, or the
-  captured variables without a value.
+  captured variables without a value. For `kind: "timeout"`,
+  `timeout_phase` says which limit ran out: `connect`, `read` or
+  `total`.
 
 ### Stability
 
@@ -145,7 +164,7 @@ The outcome of every assertion is in `asserts` all the same.
 | `import` | 2 | an export that cannot be read: not a collection, not JSON, no collections in a directory |
 | `capture` | 2 | an `@capture` found no value: the body is not JSON or was cut off, a path is absent or does not fit, a header is missing, the value is `null`, or an object or array for a secret capture |
 | `network` | 3 | DNS, connection, TLS, redirects |
-| `timeout` | 3 | no complete response within `--timeout` |
+| `timeout` | 3 | a time limit ran out; `timeout_phase` says which: `connect`, `read` or `total` |
 | `status` | 4 | HTTP status 400 or above, with `--fail` |
 | `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write |
 | `canceled` | 130 | SIGINT or SIGTERM came while a request waited for its response or a command ran; the requests after it are canceled too |
@@ -246,9 +265,31 @@ exit code 5 and more of code 6, are still to come.
 
 `--max-body` limits how much of a response body is kept: 1 MiB by default,
 given in bytes or with a unit (`64KiB`, `10MB`). The rest is not read, and
-`truncated` is `true`. `--timeout` (30s by default, `0` for none) limits
-each request, body included; a request that runs out of time has a
-`timeout` error.
+`truncated` is `true`. Three limits bound the time of each request, given
+in seconds (`5`) or with a unit (`500ms`, `2m`, `1m30s`), `0` or `none` for none:
+
+| Flag | Default | Limits |
+|---|---|---|
+| `--connect-timeout` | 10s | getting a connection: DNS, TCP, a proxy's CONNECT and the TLS handshake, all of it |
+| `--read-timeout` | 30s | each wait for data from the server once the request is sent: the headers, then each part of the body |
+| `--max-time` | 2m | the whole exchange, redirects and body included; `--timeout` is its old name |
+
+The directives `# @connection-timeout`, `# @timeout` and `# @max-time`
+may lower them for a request, never raise them.
+
+## TLS and the HTTP version
+
+`--cacert <file>` trusts the CA certificates of a PEM file as well as
+the system's. `--cert <file>` and `--key <file>` give a PEM client
+certificate and its unencrypted key, which is offered to the origin of
+each request as written, not after a redirect elsewhere. `--http1.1`,
+`--http2` and `--http2-prior-knowledge` set the HTTP version of every
+request. None of this comes from a `.http` or environment file.
+
+`--insecure` turns off the check of server certificates, and works only
+for a person at a terminal: when stdin or stdout is not a terminal, or
+with `--json`, it is a `usage` error, exit code 2. A program that has to
+reach a server with a private CA passes `--cacert`.
 
 ## Secrets
 

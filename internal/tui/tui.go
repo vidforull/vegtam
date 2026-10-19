@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/history"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
 	"github.com/vidforull/vegtam/internal/core/output"
@@ -25,7 +26,7 @@ type Options struct {
 	Path      string // a .http file, or a directory of them
 	Env       string // the environment at the start; "" for none
 	Trust     *policy.Store
-	Timeout   time.Duration
+	Transport exec.Transport
 	MaxBody   int64
 	UserAgent string
 	History   *history.Log // what the requests sent go into, and h lists; nil for none
@@ -142,7 +143,7 @@ func (m *Model) start(ctx context.Context, stop context.CancelFunc) {
 func (m *Model) sessionOptions(dryRun bool) session.Options {
 	o := m.opts
 	return session.Options{
-		Env: m.env, DryRun: dryRun, Trust: o.Trust, Timeout: o.Timeout, MaxBody: o.MaxBody, UserAgent: o.UserAgent, History: o.History,
+		Env: m.env, DryRun: dryRun, Trust: o.Trust, Transport: o.Transport, MaxBody: o.MaxBody, UserAgent: o.UserAgent, History: o.History,
 		EnvHint: "e chooses one",
 	}
 }

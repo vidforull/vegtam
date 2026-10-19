@@ -28,11 +28,26 @@ type Error struct {
 	Source    Source
 	Msg       string
 	Variables []string // unresolved names, for KindVariable
+	Phase     string   // what a KindTimeout ended: PhaseConnect, PhaseRead or PhaseTotal; "" if not known
 }
 
 // Errorf returns an *Error of kind k at src.
 func Errorf(k Kind, src Source, format string, args ...any) *Error {
 	return &Error{Kind: k, Source: src, Msg: fmt.Sprintf(format, args...)}
+}
+
+// Warning is something to know of a request or a file, which does not
+// stop it.
+type Warning struct {
+	Source Source
+	Msg    string
+}
+
+func (w Warning) String() string {
+	if w.Source.File == "" {
+		return w.Msg
+	}
+	return w.Source.String() + ": " + w.Msg
 }
 
 func (e *Error) Error() string {

@@ -179,7 +179,15 @@ func (s *Store) load() (map[string]string, error) {
 	} else if err != nil {
 		return nil, fail("%v", err)
 	}
-	defer f.Close() //nolint:errcheck // open for reading: a failed Close loses nothing
+	m, err := s.read(root, f, fail)
+	if cerr := f.Close(); err == nil && cerr != nil {
+		return nil, fail("%v", cerr)
+	}
+	return m, err
+}
+
+// read reads the store from f, opened in root, its directory.
+func (s *Store) read(root *os.Root, f *os.File, fail func(string, ...any) error) (map[string]string, error) {
 	// Whoever can write the store, or replace it in its directory, can
 	// trust any command.
 	fi, err := f.Stat()

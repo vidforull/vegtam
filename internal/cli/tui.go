@@ -2,7 +2,7 @@ package cli
 
 import (
 	"context"
-	"time"
+	"fmt"
 
 	"github.com/spf13/cobra"
 
@@ -13,14 +13,14 @@ import (
 
 type tuiFlags struct {
 	env       string
-	timeout   time.Duration
 	maxBody   byteSize
 	noHistory bool
+	net       netFlags
 }
 
 // newTUIFlags returns the flags of tui as they are when not given, which
 // are also what vegtam alone uses.
-func newTUIFlags() tuiFlags { return tuiFlags{timeout: 30 * time.Second, maxBody: 1 << 20} }
+func newTUIFlags() tuiFlags { return tuiFlags{maxBody: 1 << 20, net: newNetFlags()} }
 
 func newTUICmd(cfg *Config) *cobra.Command {
 	f := newTUIFlags()
@@ -55,9 +55,9 @@ history of runs, as with vegtam run (see vegtam run --help), unless
 	}
 	fl := cmd.Flags()
 	fl.StringVarP(&f.env, "env", "e", "", "the environment to start with")
-	fl.DurationVar(&f.timeout, "timeout", f.timeout, "time limit for each request, body included; 0 for none")
 	fl.Var(&f.maxBody, "max-body", "response body bytes to keep, such as 64KiB or 10MB; the rest is not read")
 	fl.BoolVar(&f.noHistory, "no-history", false, "keep the requests sent out of the history of runs")
+	f.net.add(fl)
 	return cmd
 }
 
@@ -67,14 +67,21 @@ func runTUI(ctx context.Context, cfg *Config, f tuiFlags, path string) error {
 		return core.Errorf(core.KindUsage, core.Source{}, "the terminal interface prints no JSON: use run, show or list")
 	case !cfg.Interactive:
 		return core.Errorf(core.KindUsage, core.Source{}, "the terminal interface needs a terminal for its input and output")
-	case f.timeout < 0:
-		return core.Errorf(core.KindUsage, core.Source{}, "--timeout must not be negative")
+	}
+	tr, err := f.net.transport(cfg)
+	if err != nil {
+		return err
+	}
+	if f.net.insecure {
+		// Left on the terminal once the interface is gone; the status line
+		// says it meanwhile.
+		fmt.Fprint(cfg.errOut, insecureBanner)
 	}
 	// Bubble Tea writes to the terminal itself, not through the masked
 	// writer: it draws the screen in pieces, which masking each write could
 	// not follow. The interface masks everything it shows before drawing.
 	m, err := tui.New(tui.Options{
-		Path: path, Env: f.env, Trust: policy.DefaultStore(), Timeout: f.timeout, MaxBody: int64(f.maxBody),
+		Path: path, Env: f.env, Trust: policy.DefaultStore(), Transport: tr, MaxBody: int64(f.maxBody),
 		UserAgent: "vegtam/" + cfg.Version, History: cfg.history(f.noHistory), Input: cfg.Stdin, Output: cfg.Stdout,
 	})
 	if err != nil {

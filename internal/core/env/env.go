@@ -56,6 +56,8 @@ type Loader struct {
 
 	cmdFiles map[string]*commands // command files read, by path
 	ran      map[string]ran       // what each command gave, by command file path and name
+
+	ssl map[string]envMap // the SSLConfiguration of each environment, by environment file path
 }
 
 // Options configure a Loader.
@@ -86,7 +88,7 @@ func NewLoader(opts Options) *Loader {
 		opts: opts, dirs: map[string]*Vars{}, errs: map[string]error{},
 		files: map[string]envMap{}, process: map[string]string{},
 		declared: map[string]bool{}, captured: map[string]captured{}, lost: map[string]string{},
-		cmdFiles: map[string]*commands{}, ran: map[string]ran{},
+		cmdFiles: map[string]*commands{}, ran: map[string]ran{}, ssl: map[string]envMap{},
 	}
 }
 
@@ -198,13 +200,18 @@ func (l *Loader) getenv(name string) (string, bool) {
 
 // Vars are the variables visible to the requests of one directory.
 type Vars struct {
-	loader  *Loader
-	dir     string
-	public  map[string]string
-	private map[string]string
-	cmd     *commands // the command file, once a request needs it
-	cmdErr  error
+	loader   *Loader
+	dir      string
+	public   map[string]string
+	private  map[string]string
+	cmd      *commands // the command file, once a request needs it
+	cmdErr   error
+	warnings []core.Warning
 }
+
+// Warnings returns what the environment files of v say that vegtam does
+// not apply.
+func (v *Vars) Warnings() []core.Warning { return v.warnings }
 
 // For returns the variables for the requests of the .http file at path.
 func (l *Loader) For(path string) (*Vars, error) {
@@ -252,6 +259,7 @@ func (l *Loader) load(dir string) (*Vars, error) {
 			return nil, err
 		}
 		found = append(found, path)
+		v.warnings = append(v.warnings, sslWarnings(path, l.ssl[path], env)...)
 		defined = append(defined, slices.Collect(maps.Keys(m))...)
 		maps.Copy(f.dst, m[shared])
 		vars, ok := m[env]
@@ -330,10 +338,17 @@ func (l *Loader) read(path string) (envMap, error) {
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fail("%v", err)
 	}
-	m := envMap{}
+	m, ssl := envMap{}, envMap{}
 	for env, vars := range raw {
 		m[env] = map[string]string{}
 		for name, val := range vars {
+			if cfg, ok := val.(map[string]any); ok && name == sslConfiguration {
+				ssl[env] = map[string]string{}
+				for k, v := range cfg {
+					ssl[env][k] = fmt.Sprint(v)
+				}
+				continue
+			}
 			switch val := val.(type) {
 			case string:
 				m[env][name] = val
@@ -346,8 +361,37 @@ func (l *Loader) read(path string) (envMap, error) {
 			}
 		}
 	}
-	l.files[path] = m
+	l.files[path], l.ssl[path] = m, ssl
 	return m, nil
+}
+
+// sslConfiguration is the setting of JetBrains' environment files for
+// TLS: whether to check the server's certificate, and the client's.
+const sslConfiguration = "SSLConfiguration"
+
+// sslWarnings says what is not applied of the SSLConfiguration that the
+// environment file at path gives $shared and env: none of it. The file
+// comes with the requests, and what weakens a check or belongs to the
+// machine comes from flags.
+func sslWarnings(path string, ssl envMap, env string) []core.Warning {
+	var ws []core.Warning
+	for _, e := range []string{shared, env} {
+		for _, key := range slices.Sorted(maps.Keys(ssl[e])) {
+			msg := "is not supported: ignored"
+			switch key {
+			case "verifyHostCertificate":
+				if ssl[e][key] != "false" {
+					continue
+				}
+				msg = "is ignored: an environment file may not turn off the check of server certificates; " +
+					"trust the server's CA with --cacert, or use --insecure at a terminal"
+			case "clientCertificate", "clientCertificateKey", "hasCertificatePassphrase":
+				msg = "is not used: an environment file comes with the requests and does not choose a client certificate; pass --cert and --key"
+			}
+			ws = append(ws, core.Warning{Source: core.Source{File: path}, Msg: fmt.Sprintf("%s.%s.%s %s", e, sslConfiguration, key, msg)})
+		}
+	}
+	return ws
 }
 
 // SecretValue returns the value of a secret named in a prepared request.

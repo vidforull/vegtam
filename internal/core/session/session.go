@@ -27,9 +27,9 @@ type Options struct {
 	// DryRun resolves and checks requests without sending them; commands
 	// are checked against the trust store but do not run.
 	DryRun    bool
-	Trust     *policy.Store // the command files allowed to run; nil allows none
-	Timeout   time.Duration // for each request, body included; 0 means none
-	MaxBody   int64         // response body bytes kept
+	Trust     *policy.Store  // the command files allowed to run; nil allows none
+	Transport exec.Transport // from the flags
+	MaxBody   int64          // response body bytes kept
 	UserAgent string
 	Fail      bool   // a response status of 400 or above is an error of kind status
 	EnvHint   string // see env.Options
@@ -46,16 +46,18 @@ type Session struct {
 	opts       Options
 	loader     *env.Loader
 	client     *exec.Client
-	declared   []string // the variables @capture directives take, in order
-	historyErr error    // why the entry of the latest run was not kept
+	declared   []string        // the variables @capture directives take, in order
+	historyErr error           // why the entry of the latest run was not kept
+	warned     map[string]bool // the warnings of environment files a job has had
 }
 
 // New returns a Session.
 func New(opts Options) *Session {
 	return &Session{
 		opts:   opts,
+		warned: map[string]bool{},
 		loader: env.NewLoader(env.Options{Env: opts.Env, DryRun: opts.DryRun, Trust: opts.Trust, EnvHint: opts.EnvHint}),
-		client: exec.New(exec.Options{Timeout: opts.Timeout, MaxBody: opts.MaxBody, UserAgent: opts.UserAgent}),
+		client: exec.New(exec.Options{MaxBody: opts.MaxBody, UserAgent: opts.UserAgent, Transport: opts.Transport}),
 	}
 }
 
@@ -100,6 +102,8 @@ type Job struct {
 	Request  *core.Request  // nil for a file that does not parse
 	Prepared *core.Prepared // nil if Err is set
 	Err      error
+	Warnings []core.Warning
+	settings exec.Settings
 	vars     *env.Vars
 	captures []string             // the variables its @capture directives take
 	classes  map[string]env.Class // of its placeholders, as it was prepared
@@ -113,7 +117,21 @@ func (j *Job) Class(r core.Ref) env.Class { return j.classes[r.String()] }
 // captures take for the requests prepared after it.
 func (s *Session) Prepare(ctx context.Context, f *core.File, i int) *Job {
 	j := &Job{Ref: output.Ref(f, i), Request: f.Requests[i]}
+	var warnings []core.Warning
+	j.settings, warnings = s.client.Settings(j.Request)
 	j.vars, j.Err = s.loader.For(f.Path)
+	// Those of the environment files once, with the first of their
+	// requests, whichever directory it is in, and however often the files
+	// are read again.
+	if j.vars != nil {
+		for _, w := range j.vars.Warnings() {
+			if !s.warned[w.String()] {
+				s.warned[w.String()] = true
+				j.Warnings = append(j.Warnings, w)
+			}
+		}
+	}
+	j.Warnings = slices.Concat(j.Warnings, j.Request.Warnings, warnings)
 	if j.Err == nil {
 		j.classes = j.vars.Classes(j.Request)
 		j.Prepared, j.Err = j.vars.Prepare(ctx, j.Request)
@@ -164,7 +182,10 @@ func (s *Session) Jobs(ctx context.Context, root string) ([]*Job, error) {
 // took nothing, and lost nothing either.
 func (s *Session) Run(ctx context.Context, j *Job) *output.Result {
 	start := time.Now()
-	res := &output.Result{Ref: j.Ref}
+	res := &output.Result{Ref: j.Ref, Warnings: output.Warnings(j.Warnings, s.Masker())}
+	if j.Request != nil {
+		res.Transport = output.NewTransport(j.settings)
+	}
 	err := j.Err
 	switch {
 	case err != nil:

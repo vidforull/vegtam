@@ -4,6 +4,7 @@
 package httpfile
 
 import (
+	"fmt"
 	"regexp"
 	"slices"
 	"strconv"
@@ -21,10 +22,18 @@ var methods = map[string]bool{
 // IsMethod reports whether m is a method the parser accepts.
 func IsMethod(m string) bool { return methods[m] }
 
-var versions = map[string]bool{"HTTP/1.1": true, "HTTP/2": true, "HTTP/2.0": true}
+// versions are the HTTP versions of request lines; httpyac writes HTTP/2.0.
+var versions = map[string]string{"HTTP/1.1": core.HTTP11, "HTTP/2": core.HTTP2, "HTTP/2.0": core.HTTP2}
+
+const priorKnowledge = "(Prior Knowledge)"
+
+var priorKnowledgeRE = regexp.MustCompile(`(?i)[ \t]*\([ \t]*prior[ \t]+knowledge[ \t]*\)$`)
 
 // directives are the comment directives kept in Request.Directives.
-var directives = map[string]bool{"assert": true, "capture": true, "tag": true}
+var directives = map[string]bool{
+	"assert": true, "capture": true, "tag": true,
+	core.Timeout: true, core.ConnectionTimeout: true, core.MaxTime: true,
+}
 
 var (
 	nameRE     = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
@@ -129,6 +138,14 @@ func (p *parser) comment(n int, t string) error {
 		return nil
 	}
 	kind, value := splitWord(d)
+	if msg, refused, ok := foreign(kind, value); ok && !directives[kind] {
+		if refused {
+			return p.errorf(n, "%s", msg)
+		}
+		r := p.cur(n)
+		r.Warnings = append(r.Warnings, core.Warning{Source: core.Source{File: p.file.Path, Line: n}, Msg: msg})
+		return nil
+	}
 	switch {
 	case kind == "name":
 		return p.setName(n, value)
@@ -137,11 +154,20 @@ func (p *parser) comment(n int, t string) error {
 			return p.errorf(n, "@%s takes no value", kind)
 		}
 	case !directives[kind]:
-		return p.errorf(n, "unknown directive @%s (supported: @name, @assert, @capture, @tag, @no-log)", kind)
+		return p.errorf(n, "unknown directive @%s (supported: @name, @assert, @capture, @tag, @no-log, "+
+			"@timeout, @connection-timeout, @max-time)", kind)
 	case value == "":
 		return p.errorf(n, "@%s needs a value", kind)
 	}
 	r := p.cur(n)
+	if kind == core.Timeout || kind == core.ConnectionTimeout || kind == core.MaxTime {
+		if _, err := core.ParseTimeout(value); err != nil {
+			return p.errorf(n, "@%s %s: %v", kind, value, err)
+		}
+		if slices.ContainsFunc(r.Directives, func(d core.Directive) bool { return d.Kind == kind }) {
+			return p.errorf(n, "@%s given twice", kind)
+		}
+	}
 	r.Directives = append(r.Directives, core.Directive{Kind: kind, Value: value, Line: n})
 	return nil
 }
@@ -175,11 +201,25 @@ func (p *parser) requestLine(n int, t string) error {
 	}
 	r := p.cur(n)
 	r.Method, r.Source = method, core.Source{File: p.file.Path, Line: n}
+	pk := false
+	if i := priorKnowledgeRE.FindStringIndex(rest); i != nil {
+		rest, pk = rest[:i[0]], true
+	}
 	if i := strings.LastIndexAny(rest, " \t"); i >= 0 && strings.HasPrefix(rest[i+1:], "HTTP/") {
-		if r.Version = rest[i+1:]; !versions[r.Version] {
-			return p.errorf(n, "unsupported HTTP version %q (supported: HTTP/1.1, HTTP/2)", r.Version)
+		v := rest[i+1:]
+		switch r.Version = versions[v]; {
+		case strings.HasPrefix(v, "HTTP/3"):
+			return p.errorf(n, "%s is not supported: vegtam speaks HTTP/1.1 and HTTP/2", v)
+		case r.Version == "":
+			return p.errorf(n, "unsupported HTTP version %q (supported: HTTP/1.1, HTTP/2, HTTP/2 %s)", v, priorKnowledge)
+		case pk && r.Version != core.HTTP2:
+			return p.errorf(n, "%s goes with HTTP/2 only", priorKnowledge)
+		case pk:
+			r.Version = core.HTTP2PriorKnowledge
 		}
 		rest = strings.TrimSpace(rest[:i])
+	} else if pk {
+		return p.errorf(n, "%s goes after HTTP/2", priorKnowledge)
 	}
 	if _, err := core.ParseTemplate(rest); err != nil {
 		return p.errorf(n, "URL: %v", err)
@@ -259,6 +299,41 @@ func (p *parser) checkBody(lines []string, at int) error {
 		}
 	}
 	return nil
+}
+
+// foreign says what to do with the directive kind of another client, if
+// vegtam knows it: a transport setting is refused, since a file may only
+// tighten the transport, with the flag to use instead; the rest change
+// nothing on the wire, and are ignored with a warning.
+func foreign(kind, value string) (msg string, refused, ok bool) {
+	refuse := func(client, what, instead string) (string, bool, bool) {
+		return fmt.Sprintf("@%s (%s) %s, which a file may not do: %s", kind, client, what, instead), true, true
+	}
+	insecure := "--insecure does it, for a person at a terminal"
+	proxy := "vegtam takes HTTPS_PROXY, HTTP_PROXY and NO_PROXY from the environment"
+	switch kind {
+	case "no-reject-unauthorized":
+		return refuse("httpyac", "turns off the check of server certificates", insecure)
+	case "proxy", "no-proxy":
+		return refuse("httpyac", "chooses a proxy", proxy)
+	case "setting":
+		name, _ := splitWord(value)
+		if instead, ok := map[string]string{
+			"insecure": insecure, "proxy": proxy, "http-root-cas": "pass --cacert",
+			"http-client-cert": "pass --cert and --key", "http-client-key": "pass --cert and --key",
+		}[name]; ok {
+			return refuse("resterm", "sets "+name, instead)
+		}
+		return fmt.Sprintf("@setting %s (resterm) is not supported: ignored", name), false, true
+	case "note", "sleep", "ratelimit":
+		return fmt.Sprintf("@%s (httpyac) is not supported: ignored", kind), false, true
+	case "prompt":
+		return "@prompt (JetBrains, httpyac) is not supported: ignored", false, true
+	}
+	if strings.HasPrefix(kind, "kulala-curl-") || strings.HasPrefix(kind, "curl-") { // since v6, and before
+		return refuse("kulala", "passes an option to curl", "use the flags of vegtam run, such as --cacert or --insecure")
+	}
+	return "", false, false
 }
 
 var captureRE = regexp.MustCompile(`^\s*(?:#|//)\s*@capture\s+(?:plain\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=`)

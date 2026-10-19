@@ -1,0 +1,26 @@
+# Requests with the transport directives, for the parser's fuzzing and
+# for trying the transport by hand: host is an echo server, slow one
+# that answers late.
+
+### Lower limits than the flags give
+# @name limits
+# @timeout 2 s
+# @connection-timeout 500 ms
+# @max-time 5
+GET {{host}}/limits
+
+### A limit above the flag's: a warning, and the flag's holds
+# @name above
+# @max-time 10 m
+GET {{host}}/above
+
+### The server answers after the read timeout
+# @name slow
+# @timeout 1
+GET {{slow}}/
+
+### Directives of other clients: a warning, and the request runs
+# @name foreign
+# @note are you sure?
+# @sleep 100
+GET {{host}}/foreign HTTP/2 (Prior Knowledge)

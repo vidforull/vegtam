@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/vidforull/vegtam/internal/core"
@@ -49,13 +50,46 @@ type Document struct {
 
 // Result is the outcome of one request.
 type Result struct {
-	Ref      string    `json:"ref,omitempty"`      // file#name or file#N; the file alone if it does not parse
-	Request  *Request  `json:"request,omitempty"`  // nil if the request could not be resolved
-	Response *Response `json:"response,omitempty"` // nil on an error and for a dry run
-	Timing   *Timing   `json:"timing,omitempty"`
-	Asserts  []Assert  `json:"asserts,omitempty"`  // nil without a response
-	Captures []Capture `json:"captures,omitempty"` // the values taken; nil without a response
-	Error    *Error    `json:"error,omitempty"`
+	Ref       string     `json:"ref,omitempty"`       // file#name or file#N; the file alone if it does not parse
+	Request   *Request   `json:"request,omitempty"`   // nil if the request could not be resolved
+	Transport *Transport `json:"transport,omitempty"` // nil if the file does not parse
+	Response  *Response  `json:"response,omitempty"`  // nil on an error and for a dry run
+	Timing    *Timing    `json:"timing,omitempty"`
+	Asserts   []Assert   `json:"asserts,omitempty"`  // nil without a response
+	Captures  []Capture  `json:"captures,omitempty"` // the values taken; nil without a response
+	Warnings  []Warning  `json:"warnings,omitempty"`
+	Error     *Error     `json:"error,omitempty"`
+}
+
+// Transport is what a request is sent with: its HTTP version, and its
+// limits, in milliseconds, 0 for none.
+type Transport struct {
+	Version          string  `json:"version,omitempty"` // HTTP/1.1, HTTP/2 or HTTP/2 (Prior Knowledge); none to negotiate
+	ConnectTimeoutMS float64 `json:"connect_timeout_ms"`
+	ReadTimeoutMS    float64 `json:"read_timeout_ms"`
+	MaxTimeMS        float64 `json:"max_time_ms"`
+}
+
+// NewTransport returns the settings st.
+func NewTransport(st exec.Settings) *Transport {
+	ms := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+	return &Transport{Version: st.Version, ConnectTimeoutMS: ms(st.Connect), ReadTimeoutMS: ms(st.Read), MaxTimeMS: ms(st.Total)}
+}
+
+// Warning is something to know of a request, which still runs.
+type Warning struct {
+	Message string `json:"message"`
+	File    string `json:"file,omitempty"`
+	Line    int    `json:"line,omitempty"`
+}
+
+// Warnings returns ws with every secret value hidden by m.
+func Warnings(ws []core.Warning, m *core.Masker) []Warning {
+	var list []Warning
+	for _, w := range ws {
+		list = append(list, Warning{m.Mask(w.Msg), w.Source.File, w.Source.Line})
+	}
+	return list
 }
 
 // Assert is the outcome of an @assert directive.
@@ -103,6 +137,10 @@ type Response struct {
 	Encoding  string   `json:"encoding,omitempty"` // "base64" if the body is not UTF-8 text
 	Truncated bool     `json:"truncated"`
 	Untrusted bool     `json:"untrusted"`
+	// TLSVerified is true when every hop of the request came over TLS
+	// with the server's certificate checked: false if one came over http,
+	// and with --insecure.
+	TLSVerified bool `json:"tls_verified"`
 }
 
 // Timing is how long a request took.
@@ -116,7 +154,8 @@ type Error struct {
 	Message   string    `json:"message"`
 	File      string    `json:"file,omitempty"`
 	Line      int       `json:"line,omitempty"`
-	Variables []string  `json:"variables,omitempty"` // unresolved names, for kind "variable"
+	Variables []string  `json:"variables,omitempty"`     // unresolved names, for kind "variable"
+	Phase     string    `json:"timeout_phase,omitempty"` // for kind "timeout": connect, read or total
 }
 
 // Listed is a request in a listing, as written.
@@ -131,7 +170,7 @@ type Listed struct {
 	Directives []Directive `json:"directives"`
 }
 
-// Directive is an @assert, @capture or @tag directive, as written.
+// Directive is a directive of a request, as written.
 type Directive struct {
 	Kind  string `json:"kind"`
 	Value string `json:"value"`
@@ -208,7 +247,7 @@ func Written(r *core.Request) *Request {
 func NewResponse(r *exec.Response, m *core.Masker) (*Response, *Timing) {
 	resp := &Response{
 		Proto: r.Proto, Status: r.Status, Reason: m.Mask(r.Reason), Headers: []Header{},
-		Truncated: r.Truncated, Untrusted: true,
+		Truncated: r.Truncated, Untrusted: true, TLSVerified: r.TLSVerified,
 	}
 	for _, name := range slices.Sorted(maps.Keys(r.Header)) {
 		for _, v := range r.Header[name] {
@@ -291,7 +330,7 @@ func NewError(err error, m *core.Masker) *Error {
 	if !ok {
 		return &Error{Kind: core.KindUsage, Message: m.Mask(err.Error())}
 	}
-	return &Error{Kind: e.Kind, Message: m.Mask(e.Msg), File: e.Source.File, Line: e.Source.Line, Variables: e.Variables}
+	return &Error{Kind: e.Kind, Message: m.Mask(e.Msg), File: e.Source.File, Line: e.Source.Line, Variables: e.Variables, Phase: e.Phase}
 }
 
 // List returns the requests of f.

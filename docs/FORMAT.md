@@ -37,13 +37,21 @@ after `###` is a comment. The first request needs no separator.
 **Comments.** Lines starting with `#` or `//`, before the request line or
 among the headers. In a body they are body text.
 
-**Request line.** `METHOD URL`, optionally followed by `HTTP/1.1` or
-`HTTP/2`. The method is one of `GET`, `HEAD`, `POST`, `PUT`, `PATCH`,
-`DELETE`, `OPTIONS`, `TRACE`, `CONNECT`, in upper case. The version is
-recorded but does not force a protocol: vegtam uses HTTP/2 when the server
-offers it over TLS and HTTP/1.1 otherwise. The URL may contain
+**Request line.** `METHOD URL`, optionally followed by an HTTP version.
+The method is one of `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`,
+`OPTIONS`, `TRACE`, `CONNECT`, in upper case. The URL may contain
 placeholders, including ones with spaces inside the braces
-(`{{$env BASE_URL}}/items`).
+(`{{$env BASE_URL}}/items`). The version is what the request speaks:
+
+| Version | Speaks |
+|---|---|
+| none | HTTP/2 when the server offers it over TLS, HTTP/1.1 otherwise |
+| `HTTP/1.1` | HTTP/1.1 only |
+| `HTTP/2`, `HTTP/2.0` | HTTP/2 over TLS only; over `http` it is an error |
+| `HTTP/2 (Prior Knowledge)` | HTTP/2 without agreeing on it first: h2c over `http`, h2 over `https` |
+
+`HTTP/3` is an error. `--http1.1`, `--http2` and `--http2-prior-knowledge`
+override the line for a whole run; the response says what was spoken.
 
 **Headers.** `Name: value`, one per line, right after the request line. The
 name is an RFC 9110 token; the value may contain placeholders. A header
@@ -82,6 +90,9 @@ vegtam's own extensions are comments, so other tools ignore them:
 | `# @capture [plain] <name> = <source>` | takes a value from the response for the requests after it, such as `token = $.token` |
 | `# @tag <tags>` | labels for selecting requests |
 | `# @no-log` | keeps the request out of the history of runs, as in JetBrains, kulala and httpyac |
+| `# @timeout <time>` | lowers the read timeout, as in JetBrains: how long to wait for data once the request is sent |
+| `# @connection-timeout <time>` | lowers the connect timeout, as in JetBrains: DNS, TCP and the TLS handshake |
+| `# @max-time <time>` | lowers the time limit of the whole exchange, as curl's `--max-time` |
 
 Directives go before the request line or among the headers, and each
 but `@no-log`, which takes none, needs a value. Their values are taken
@@ -90,7 +101,37 @@ as written: placeholders in them are not resolved, so
 text. `@tag` is kept with the request but not
 used yet. Any other `# @word`, and an `@assert` or `@capture` outside the
 grammar below, is an error with the file and line, also for
-`--dry-run`, which parses directives but evaluates none.
+`--dry-run`, which parses directives but evaluates none; the
+directives of other clients below are the exception.
+
+### Time limits
+
+A time is a number of seconds (`30`), a number with a unit, `ms`, `s` or
+`m`, with or without a space (`500 ms`, `2m`), or a Go duration
+(`1m30s`); `0` or `none` is no limit. Note that httpyac reads a bare number as
+milliseconds: vegtam reads it as JetBrains does. A directive may only
+lower the limit that the flag of the run gives (`--read-timeout`,
+`--connect-timeout`, `--max-time`): one above it, `0` included, is a
+warning, and the flag's limit holds. Each comes once per request.
+
+### Directives of other clients
+
+A `.http` file only ever makes the transport stricter: what weakens a
+check or belongs to the machine comes from the command line. The
+transport directives of other clients are errors that say what to use:
+
+| Directive | Client | Instead |
+|---|---|---|
+| `@no-reject-unauthorized` | httpyac | `--insecure`, at a terminal |
+| `@proxy`, `@no-proxy` | httpyac | `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` |
+| `@kulala-curl-...`, and `@curl-...` before kulala 6 | kulala | the flags of `vegtam run` |
+| `@setting insecure`, `proxy`, `http-root-cas`, `http-client-cert`, `http-client-key` | resterm | `--insecure`, the environment, `--cacert`, `--cert` and `--key` |
+
+`@note`, `@prompt`, `@sleep`, `@ratelimit` and resterm's other
+`@setting`s do not touch the transport: they are ignored with a warning,
+and the request runs. Note what that means for `@note`, with which
+httpyac asks before sending: vegtam does not ask, though the terminal
+interface asks before any method but GET, HEAD and OPTIONS.
 
 ### Assertions
 
@@ -227,6 +268,11 @@ environment. Its variables are, from lowest to highest precedence: public
 environment. Values are strings, numbers or booleans. Selecting an
 environment that neither file defines is an error that lists the defined
 ones.
+
+`SSLConfiguration`, which JetBrains reads from these files, is accepted
+and not applied, with a warning: `verifyHostCertificate: false` does
+not turn off the check of server certificates, and the client
+certificate comes from `--cert` and `--key`.
 
 Without `-e`, no environment file is read and only `{{$env NAME}}`
 resolves. Every unresolved placeholder is an error; all the names missing
@@ -407,7 +453,7 @@ and it overwrites no file without `--force`.
 | body file with variables (`<@ ./file`) | error |
 | multipart bodies with `< file` parts | error |
 | response handlers and output redirects (`> {% ... %}`, `> script.js`, `>> file`, `<> file`) | error |
-| JetBrains directives such as `@no-redirect`, `@no-cookie-jar`, `@timeout` | error |
+| JetBrains directives such as `@no-redirect`, `@no-cookie-jar` | error |
 | dynamic variables other than `$env` and `$cmd` (`$uuid`, `$timestamp`, `$random.*`) | error |
-| environment values that are objects (`SSLConfiguration`, `Security`) | error |
+| environment values that are objects, such as `Security`, other than `SSLConfiguration` | error |
 | WebSocket, gRPC and GraphQL requests | error (method not recognised) |

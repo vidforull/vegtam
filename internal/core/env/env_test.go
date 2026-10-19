@@ -281,6 +281,39 @@ func TestEnvironmentFiles(t *testing.T) {
 	}
 }
 
+// TestSSLConfiguration checks that the SSLConfiguration JetBrains reads
+// is accepted and not applied, with a warning for each part of it that
+// the selected environment or $shared has.
+func TestSSLConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		PublicFile: `{"dev": {"host": "https://example.test"}}`,
+		PrivateFile: `{"$shared": {"SSLConfiguration": {"verifyHostCertificate": true}},
+			"dev": {"SSLConfiguration": {"verifyHostCertificate": false, "clientCertificate": "me.pem", "other": 1}},
+			"prod": {"SSLConfiguration": {"verifyHostCertificate": false}}}`,
+	})
+	v, err := NewLoader(Options{Env: "dev"}).For(filepath.Join(dir, "a.http"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, w := range v.Warnings() {
+		got = append(got, strings.TrimPrefix(w.String(), filepath.Join(dir, PrivateFile)+": "))
+	}
+	want := []string{
+		"dev.SSLConfiguration.clientCertificate is not used: an environment file comes with the requests and does not choose a client certificate; pass --cert and --key",
+		"dev.SSLConfiguration.other is not supported: ignored",
+		"dev.SSLConfiguration.verifyHostCertificate is ignored: an environment file may not turn off the check of server certificates; " +
+			"trust the server's CA with --cacert, or use --insecure at a terminal",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("warnings =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if _, ok := v.private["SSLConfiguration"]; ok {
+		t.Error("SSLConfiguration is a variable")
+	}
+}
+
 func TestNames(t *testing.T) {
 	path := tree(t, "GET https://{{host}}/")
 	writeFiles(t, filepath.Dir(path), map[string]string{PrivateFile: `{"$shared": {}, "$other": {}, "staging": {}, "dev": {}}`})

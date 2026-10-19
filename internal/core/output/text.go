@@ -74,6 +74,17 @@ func WriteRequest(b *strings.Builder, r *Request) {
 	}
 }
 
+// WriteTransport writes what a request is sent with, as a comment line
+// that may go before the request.
+func WriteTransport(b *strings.Builder, t *Transport) {
+	d := func(ms float64) string { return core.FormatTimeout(time.Duration(ms * float64(time.Millisecond))) }
+	b.WriteString("# ")
+	if t.Version != "" {
+		b.WriteString(t.Version + "; ")
+	}
+	fmt.Fprintf(b, "timeouts: connect %s, read %s, max time %s\n", d(t.ConnectTimeoutMS), d(t.ReadTimeoutMS), d(t.MaxTimeMS))
+}
+
 func writeHeaders(b *strings.Builder, headers []Header) {
 	for _, h := range headers {
 		fmt.Fprintf(b, "%s: %s\n", h.Name, h.Value)

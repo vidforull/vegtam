@@ -3,12 +3,14 @@ package cli
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
 	"github.com/vidforull/vegtam/internal/core/output"
 	"github.com/vidforull/vegtam/internal/core/policy"
@@ -24,16 +26,25 @@ func newShowCmd(cfg *Config) *cobra.Command {
 environment and shown as it would go on the wire; without -e it is shown
 as written. Secrets appear as their placeholders, such as {{token}}. A
 {{$cmd NAME}} is checked against the trust store, with exit code 6 if
-its command file is not trusted, but its command does not run.`,
+its command file is not trusted, but its command does not run. The
+timeouts shown are those that vegtam run gives the request without its
+flags.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			f, i, err := parseTarget(args[0]).request()
 			if err != nil {
 				return err
 			}
-			res := &output.Result{Ref: output.Ref(f, i), Request: output.Written(f.Requests[i])}
+			defaults := newNetFlags()
+			tr, err := defaults.transport(cfg)
+			if err != nil {
+				return err
+			}
+			st, warnings := exec.New(exec.Options{Transport: tr}).Settings(f.Requests[i])
+			res := &output.Result{Ref: output.Ref(f, i), Request: output.Written(f.Requests[i]), Transport: output.NewTransport(st)}
+			warnings = slices.Concat(f.Requests[i].Warnings, warnings)
 			if envName != "" {
-				s := session.New(session.Options{Env: envName, DryRun: true, Trust: policy.DefaultStore()})
+				s := session.New(session.Options{Env: envName, DryRun: true, Trust: policy.DefaultStore(), Transport: tr})
 				cfg.secrets = s.Masker
 				j := s.Prepare(cmd.Context(), f, i)
 				cfg.masker = s.Masker()
@@ -41,12 +52,16 @@ its command file is not trusted, but its command does not run.`,
 					return j.Err
 				}
 				res.Request = output.Sent(j.Prepared, cfg.masker)
+				warnings = j.Warnings // those of its environment files too
 			}
+			res.Warnings = output.Warnings(warnings, cfg.masker)
+			cfg.printWarnings(res.Warnings)
 			if cfg.asJSON() {
 				cfg.writeJSON(output.Document{SchemaVersion: output.SchemaVersion, Result: res})
 				return nil
 			}
 			var b strings.Builder
+			output.WriteTransport(&b, res.Transport)
 			output.WriteRequest(&b, res.Request)
 			fmt.Fprint(cfg.out, cfg.text(b.String()))
 			return nil
@@ -81,6 +96,9 @@ its directives. Files that do not parse are reported, the rest listed.`,
 					continue
 				}
 				doc.Requests = append(doc.Requests, output.List(f)...)
+				for _, r := range f.Requests {
+					cfg.printWarnings(output.Warnings(r.Warnings, cfg.masker))
+				}
 			}
 			if cfg.asJSON() {
 				cfg.writeJSON(doc)

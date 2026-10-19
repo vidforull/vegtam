@@ -327,9 +327,26 @@ func (m *Model) responseText() string {
 			res.Response = &resp
 			output.WriteResponse(&b, &res, true, m.fold)
 		}
+		writeWarnings(&b, m.result.Warnings)
 		writeError(&b, m.result.Error)
 	}
 	return b.String()
+}
+
+func writeWarnings(b *strings.Builder, ws []output.Warning) {
+	for i, w := range ws {
+		if i == 0 && b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		loc := w.File
+		if loc != "" && w.Line > 0 {
+			loc += ":" + strconv.Itoa(w.Line)
+		}
+		if loc != "" {
+			loc += ": "
+		}
+		fmt.Fprintf(b, "! %s%s\n", loc, w.Message)
+	}
 }
 
 func writeError(b *strings.Builder, e *output.Error) {
@@ -402,7 +419,11 @@ func (m *Model) statusLine() string {
 	default:
 		state = "sending; esc cancels"
 	}
-	left := m.line(" env: " + cmp.Or(m.env, "none") + "  " + state)
+	left := " env: " + cmp.Or(m.env, "none") + "  " + state
+	if m.opts.Transport.TLS.Insecure {
+		left = " INSECURE " + left // --insecure: server certificates are not checked
+	}
+	left = m.line(left)
 	keys, main := m.keys.ShortHelp(), m.keys.mainHelp()
 	if m.runsOpen {
 		keys = m.keys.runsHelp()

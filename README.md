@@ -76,6 +76,11 @@ $ vegtam run api.http#list -e dev --json
       }
     ]
   },
+  "transport": {
+    "connect_timeout_ms": 10000,
+    "read_timeout_ms": 30000,
+    "max_time_ms": 120000
+  },
   "response": {
     "proto": "HTTP/1.1",
     "status": 200,
@@ -96,7 +101,8 @@ $ vegtam run api.http#list -e dev --json
     ],
     "body": "[{\"id\":1,\"name\":\"Ada\"},{\"id\":2,\"name\":\"Grace\"}]",
     "truncated": false,
-    "untrusted": true
+    "untrusted": true,
+    "tls_verified": true
   },
   "timing": {
     "total_ms": 84.215
@@ -136,6 +142,30 @@ status, the time and the outcome. It holds no secret: no headers, bodies
 or values, and no URL with its placeholders resolved. `--no-history`
 keeps a run out of it, `VEGTAM_NO_HISTORY=1` every run, and
 `# @no-log` one request.
+
+## Transport
+
+`run` and `tui` take these flags; a `.http` or environment file never
+sets what weakens a check or belongs to the machine.
+
+| Flag | Default | Unlike curl |
+|---|---|---|
+| `--cacert <pem>` | the system's roots | adds to the system's roots; curl's replaces them |
+| `--cert <pem>`, `--key <pem>` | none | offered to the origin of each request as written, never after a redirect elsewhere; PEM only, the key unencrypted (`--key <(openssl pkey -in key.pem)`) |
+| `--insecure` | off | only when stdin and stdout are terminals, never with `--json`; a warning on every run |
+| `--connect-timeout <time>` | 10s | the whole of getting a connection: DNS, TCP, a proxy's CONNECT, the TLS handshake |
+| `--read-timeout <time>` | 30s | no counterpart: how long the server may send nothing, once the request is sent |
+| `--max-time <time>` | 2m | curl has no limit by default; `--timeout` is the old name |
+| `--http1.1`, `--http2`, `--http2-prior-knowledge` | as negotiated | `--http2` is HTTP/2 over TLS or an error: no fallback, no upgrade of `http` |
+
+A time is in seconds (`5`, `0.5`) or has a unit (`500ms`, `2m`, `1m30s`);
+`0` or `none` is no limit. Directives may lower the limits of a request, and the
+request line may ask for a version (see [docs/FORMAT.md](docs/FORMAT.md)).
+More differences: the proxy comes from `HTTPS_PROXY`, `HTTP_PROXY` and
+`NO_PROXY`, and one without a port uses that of its scheme (80, 443),
+where curl uses 1080; `--verbose` masks secrets, where curl's `-v`
+prints `Authorization` and `Cookie` as they are; `SSLKEYLOGFILE` is not
+read; HTTP/3 is not supported.
 
 ## TUI
 

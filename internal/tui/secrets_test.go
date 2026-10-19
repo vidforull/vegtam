@@ -21,6 +21,7 @@ import (
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/env"
+	"github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/history"
 )
 
@@ -62,7 +63,7 @@ func TestNoSecretInTUI(t *testing.T) {
 	for _, sz := range []size{{60, 24}, {100, 30}, {150, 40}} {
 		for _, maxBody := range []int64{1 << 20, 106} {
 			m := open(t, Options{
-				Path: fx.dir, Timeout: 5 * time.Second, MaxBody: maxBody, UserAgent: "vegtam/test",
+				Path: fx.dir, Transport: exec.Transport{Total: 5 * time.Second}, MaxBody: maxBody, UserAgent: "vegtam/test",
 				History: history.New(filepath.Join(t.TempDir(), "vegtam")),
 			}, sz.w, sz.h)
 			views, styled := 0, 0
@@ -229,7 +230,7 @@ func TestRun(t *testing.T) {
 	} {
 		in, keys := io.Pipe()
 		var out bytes.Buffer
-		m, err := New(Options{Path: fx.dir, Env: tt.env, Timeout: time.Minute, MaxBody: 1 << 20, Input: in, Output: &out})
+		m, err := New(Options{Path: fx.dir, Env: tt.env, Transport: exec.Transport{Total: time.Minute}, MaxBody: 1 << 20, Input: in, Output: &out})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -303,7 +304,7 @@ func TestRunCopy(t *testing.T) {
 	fx := newFixture(t)
 	in, keys := io.Pipe()
 	out := &syncBuffer{}
-	m, err := New(Options{Path: fx.dir, Env: "test", Timeout: time.Minute, MaxBody: 1 << 20, Input: in, Output: out})
+	m, err := New(Options{Path: fx.dir, Env: "test", Transport: exec.Transport{Total: time.Minute}, MaxBody: 1 << 20, Input: in, Output: out})
 	if err != nil {
 		t.Fatal(err)
 	}

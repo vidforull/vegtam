@@ -40,12 +40,13 @@ type Request struct {
 	Name       string // from "# @name"; empty when the request has none
 	Method     string
 	URL        string
-	Version    string // HTTP version written after the URL, if any
+	Version    string // HTTP11, HTTP2 or HTTP2PriorKnowledge, if written after the URL
 	Headers    []Header
 	Body       string // inline body
 	BodyFile   string // path from a "< path" body, as written
 	Directives []Directive
-	Source     Source // the request line
+	Source     Source    // the request line
+	Warnings   []Warning // of the parser: the directives of other clients it ignored
 }
 
 // Header is one "Name: value" line.
@@ -54,13 +55,20 @@ type Header struct {
 	Value string
 }
 
-// Directive is an "# @assert", "# @capture", "# @tag" or "# @no-log"
-// comment, kept as written for the stages that act on it.
+// Directive is an "# @assert", "# @capture", "# @tag", "# @no-log" or
+// time limit comment, kept as written for the stages that act on it.
 type Directive struct {
-	Kind  string // "assert", "capture", "tag" or NoLog
+	Kind  string // "assert", "capture", "tag", NoLog, Timeout, ConnectionTimeout or MaxTime
 	Value string // "" for NoLog
 	Line  int
 }
+
+// The HTTP versions a request line or a flag may ask for.
+const (
+	HTTP11              = "HTTP/1.1"
+	HTTP2               = "HTTP/2" // over TLS, as ALPN agrees on it
+	HTTP2PriorKnowledge = "HTTP/2 (Prior Knowledge)"
+)
 
 // NoLog is the kind of the "# @no-log" directive, which JetBrains, kulala
 // and httpyac know too: the history of runs does not keep the request.

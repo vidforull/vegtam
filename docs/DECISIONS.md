@@ -641,3 +641,83 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   such mark: the text says as much (see above). Without an environment,
   the error of an unresolved variable says that `e` chooses one, where
   the CLI says `use -e <name>`: the session takes the hint as an option.
+
+## 2026-10-20: transport
+
+- **Files only tighten.** A `.http` file and its environment files come
+  with the requests, often from someone else's repository, so what they
+  say of the transport may only make a run stricter: a shorter timeout,
+  say. Whatever weakens a defence (TLS checks turned off), belongs to the
+  machine (a CA, a client certificate, a proxy) or holds a secret comes
+  from a command-line flag, and later from a policy file of the
+  operator's that no repository holds. A transport directive of another
+  client, such as httpyac's `@no-reject-unauthorized` and `@proxy`,
+  kulala's `@kulala-curl-*` or resterm's `@setting insecure`, is an
+  error that names the flag to use; a directive of another client that
+  does not touch the transport, such as `@note`, `@prompt`, `@sleep` or
+  `@ratelimit`, is a warning, and the request runs. The `SSLConfiguration`
+  that JetBrains reads from `http-client.private.env.json` is not
+  applied: `verifyHostCertificate: false` is ignored with a warning, and
+  its certificate paths with a hint to `--cert` and `--key`. A private
+  file is meant to stay out of version control, but whoever wrote the
+  requests can commit one.
+- **A transport per identity.** `exec.Client` keeps a transport, with its
+  own pool of connections, for each configuration it sends with: whether
+  it offers the client certificate, the connect timeout and the HTTP
+  version; the TLS settings are the client's, one set per run. Each is a
+  clone of net/http's transport, which keeps HTTP/2, and its TLS config
+  is not changed once made. Each hop of a request takes its own: the hops
+  to the origin of the request as written offer the certificate, the
+  others do not, and once a redirect has led elsewhere none does, as no
+  secret header goes on: a redirect elsewhere, even to the same server,
+  gets neither the certificate nor a connection made with it, and one
+  back cannot make the client sign a request of the other origin's
+  choosing. curl's CVEs of
+  credentials sent where they should not go are largely of this kind.
+  Two tests are gates for the whole of the transport work: no connection
+  is reused across TLS identities, and no secret reaches a transport
+  error. The transport with the certificate refuses an https proxy:
+  net/http hands the proxy's TLS connection the same config.
+- **TLS files.** `--cacert` adds to the system's roots, unlike curl's: a
+  company's CA comes on top of public sites, not in their place. Keys are
+  PEM and unencrypted; an encrypted one is refused with a hint to
+  `--key <(openssl pkey -in key.pem)`, which leaves no decrypted file.
+  `SSLKEYLOGFILE` is not read; a test checks it.
+- **`--insecure` for a person only.** It works when stdin and stdout are
+  terminals and `--json` is not given; otherwise it is a usage error. A
+  script or an agent can be led by what a file or a response says, and
+  the agent writes the argv itself, so a flag alone does not stop it;
+  the operator's policy file is the place to allow it for a host. Every
+  run with it says so on stderr, and the status line of the interface
+  says so while it is open. `tls_verified` is false over plain http too,
+  and if any hop of the redirects was: what a program wants to know is
+  whether anything on the way could have read or changed the exchange.
+- **Three limits.** connect (10s) covers the whole of getting a
+  connection, DNS, TCP, a proxy's CONNECT and the TLS handshake, so that
+  a host that does not answer fails fast; the dialer's and the
+  handshake's own limits do not cover a proxy, so a timer from the
+  request's trace does. read (30s) is how long the server may send
+  nothing once the request is written, for the headers and between reads
+  of the body, a redirect's included; net/http has no such limit, so a
+  timer that the trace and the body's reads restart cancels the request
+  with a cause of its own. total (`--max-time`, 2m) bounds the whole
+  exchange. With the old
+  single 30s, a read timeout of 30s could never end a request first; 2m
+  lets a response that keeps coming finish, and still bounds the wait
+  of an agent. These numbers are a starting point, to check against real
+  APIs. A directive may lower a limit and never raise it, with
+  JetBrains' units; httpyac's bare milliseconds read as seconds are then
+  held to the flag's limit. The error says which limit ran out, from the
+  cause of the request's context or from the trace, in `timeout_phase`.
+  `--timeout` stays as the old name of `--max-time`, with a warning of
+  vegtam's own: pflag's notice would go to stdout, into the JSON.
+- **HTTP versions.** A version weakens nothing, so the request line and
+  the flags are equals, and the flag wins. `HTTP/2` means HTTP/2 or an
+  error: a fault that shows only on HTTP/2 must not hide behind a quiet
+  fallback, and over plain http net/http would speak HTTP/1.1 without a
+  word, so that is refused before sending. HTTP/3 is not supported.
+- **Unknown stays an error.** Only the directives of other clients that
+  vegtam knows are warnings; one that no client has is an error as
+  before: a mistyped `@asert` must not drop a check and exit with 0.
+  Warnings go to stderr and into `warnings` in JSON, those of the
+  environment files once, with the first request of their directory.

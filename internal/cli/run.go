@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -25,14 +24,14 @@ type runFlags struct {
 	env       string
 	dryRun    bool
 	fail      bool
-	timeout   time.Duration
 	maxBody   byteSize
 	verbose   bool
 	noHistory bool
+	net       netFlags
 }
 
 func newRunCmd(cfg *Config) *cobra.Command {
-	f := runFlags{maxBody: 1 << 20}
+	f := runFlags{maxBody: 1 << 20, net: newNetFlags()}
 	cmd := &cobra.Command{
 		Use:   "run <file>[#<name>|#<N>] | <dir>",
 		Short: "Send requests",
@@ -69,21 +68,25 @@ it, VEGTAM_NO_HISTORY=1 every run, and "# @no-log" one request.`,
 	fl.StringVarP(&f.env, "env", "e", "", "the environment to use")
 	fl.BoolVar(&f.dryRun, "dry-run", false, "resolve the requests and print them without sending")
 	fl.BoolVar(&f.fail, "fail", false, "exit with 4 if a response status is 400 or above")
-	fl.DurationVar(&f.timeout, "timeout", 30*time.Second, "time limit for each request, body included; 0 for none")
 	fl.Var(&f.maxBody, "max-body", "response body bytes to keep, such as 64KiB or 10MB; the rest is not read")
 	fl.BoolVarP(&f.verbose, "verbose", "v", false, "print the request and the response headers too")
 	fl.BoolVar(&f.noHistory, "no-history", false, "keep this run out of the history of runs")
+	f.net.add(fl)
 	return cmd
 }
 
 func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
-	if f.timeout < 0 {
-		return core.Errorf(core.KindUsage, core.Source{}, "--timeout must not be negative")
+	tr, err := f.net.transport(cfg)
+	if err != nil {
+		return err
+	}
+	if f.net.insecure {
+		fmt.Fprint(cfg.errOut, insecureBanner)
 	}
 	t := parseTarget(arg)
 	s := session.New(session.Options{
-		Env: f.env, DryRun: f.dryRun, Trust: policy.DefaultStore(),
-		Timeout: f.timeout, MaxBody: int64(f.maxBody), UserAgent: "vegtam/" + cfg.Version, Fail: f.fail,
+		Env: f.env, DryRun: f.dryRun, Trust: policy.DefaultStore(), Transport: tr,
+		MaxBody: int64(f.maxBody), UserAgent: "vegtam/" + cfg.Version, Fail: f.fail,
 		History: cfg.history(f.noHistory || f.dryRun),
 	})
 	cfg.secrets = s.Masker
@@ -108,6 +111,7 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 		if res.Error != nil {
 			code = max(code, exitCode(res.Error.Kind))
 		}
+		cfg.printWarnings(res.Warnings)
 		if !cfg.asJSON() {
 			cfg.printResult(res, i, !t.one, f.verbose)
 		} else if res.Error != nil {

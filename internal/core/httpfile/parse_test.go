@@ -97,6 +97,16 @@ Accept: application/json`,
 			"no-log", "# @no-log\nGET https://example.com/a\n###\nGET https://example.com/b\n// @no-log",
 			"2 GET https://example.com/a @no-log():1\n4 GET https://example.com/b @no-log():5\n",
 		},
+		{
+			"HTTP versions", "GET http://example.com/a HTTP/2 (Prior Knowledge)\n###\nGET https://example.com/b HTTP/2.0\n" +
+				"###\nGET http://example.com/c HTTP/2  ( prior  knowledge )",
+			"1 GET http://example.com/a HTTP/2 (Prior Knowledge)\n3 GET https://example.com/b HTTP/2\n" +
+				"5 GET http://example.com/c HTTP/2 (Prior Knowledge)\n",
+		},
+		{
+			"time limits", "# @timeout 5\n# @connection-timeout 500 ms\nGET https://example.com\n# @max-time 1m30s",
+			"3 GET https://example.com @timeout(5):1 @connection-timeout(500 ms):2 @max-time(1m30s):4\n",
+		},
 		{"empty file", "\n# only a comment\n", ""},
 	}
 	for _, tt := range tests {
@@ -138,6 +148,14 @@ func TestParseErrors(t *testing.T) {
 		{"unknown directive", "# @no-redirect\nGET https://example.com", 1, "unknown directive @no-redirect"},
 		{"directive without value", "# @assert\nGET https://example.com", 1, "@assert needs a value"},
 		{"no-log with a value", "# @no-log yes\nGET https://example.com", 1, "@no-log takes no value"},
+		{"httpyac without TLS checks", "# @no-reject-unauthorized\nGET https://example.com", 1, "--insecure does it, for a person at a terminal"},
+		{"httpyac proxy", "GET https://example.com\n# @proxy http://proxy.example.test", 2, "@proxy (httpyac) chooses a proxy, which a file may not do"},
+		{"kulala curl option", "# @kulala-curl--insecure\nGET https://example.com", 1, "@kulala-curl--insecure (kulala) passes an option to curl"},
+		{"old kulala curl option", "# @curl-insecure\nGET https://example.com", 1, "@curl-insecure (kulala) passes an option to curl"},
+		{"resterm TLS setting", "# @setting http-root-cas ./ca.pem\nGET https://example.com", 1, "@setting (resterm) sets http-root-cas, which a file may not do: pass --cacert"},
+		{"unknown directive of no client", "# @asert status == 200\nGET https://example.com", 1, "unknown directive @asert"},
+		{"bad time limit", "# @timeout soon\nGET https://example.com", 1, "@timeout soon: want a time such as 30 (seconds)"},
+		{"time limit twice", "# @max-time 5\nGET https://example.com\n# @max-time 6", 3, "@max-time given twice"},
 		{"orphan directive", "GET https://example.com\n###\n# @name lost\n", 3, "not followed by a request line"},
 		{"numeric name", "# @name 2\nGET https://example.com", 1, "is a number"},
 		{"negative numeric name", "# @name -1\nGET https://example.com", 1, "is a number"},
@@ -150,7 +168,10 @@ func TestParseErrors(t *testing.T) {
 		{"missing separator", "GET https://example.com/a\n\nGET https://example.com/b", 3, "separate requests with ###"},
 		{"directive in body", "POST https://example.com\n\n{}\n# @name b", 4, "separate requests with ###"},
 		{"unclosed placeholder in body", "POST https://example.com\n\n{\"a\": \"{{x\"}", 3, "body: unclosed placeholder"},
-		{"HTTP version", "GET https://example.com HTTP/3", 1, `unsupported HTTP version "HTTP/3"`},
+		{"HTTP/3", "GET https://example.com HTTP/3", 1, "HTTP/3 is not supported"},
+		{"HTTP version", "GET https://example.com HTTP/1.0", 1, `unsupported HTTP version "HTTP/1.0"`},
+		{"prior knowledge of HTTP/1.1", "GET http://example.com HTTP/1.1 (Prior Knowledge)", 1, "goes with HTTP/2 only"},
+		{"prior knowledge alone", "GET http://example.com (Prior Knowledge)", 1, "goes after HTTP/2"},
 		{"bad assertion", "GET https://example.com\n# @assert status is 200", 2, "@assert status is 200: want status <op> <code>"},
 		{"bad capture", "GET https://example.com\n# @capture token", 2, "@capture token: want [plain] <name> = <source>"},
 	}
@@ -224,5 +245,29 @@ func TestCaptureNames(t *testing.T) {
 		"GET x\n# @capture 1bad = $.x\n#@capture  s  =  header S\nbody # @capture no = $.x\n"
 	if got, want := CaptureNames([]byte(src)), []string{"token", "id", "plain", "s"}; !slices.Equal(got, want) {
 		t.Errorf("CaptureNames = %q, want %q", got, want)
+	}
+}
+
+// TestForeignWarnings checks the directives of other clients that change
+// nothing on the wire: ignored, each with a warning at its line.
+func TestForeignWarnings(t *testing.T) {
+	f, err := Parse("x.http", []byte("# @note sure?\n# @sleep 100\nGET https://example.com\n# @setting timeout 5s\n"+
+		"###\n// @prompt user\n// @ratelimit 1\nGET https://example.com/b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range f.Requests {
+		for _, w := range r.Warnings {
+			got = append(got, w.String())
+		}
+	}
+	want := []string{
+		"x.http:1: @note (httpyac) is not supported: ignored", "x.http:2: @sleep (httpyac) is not supported: ignored",
+		"x.http:4: @setting timeout (resterm) is not supported: ignored",
+		"x.http:6: @prompt (JetBrains, httpyac) is not supported: ignored", "x.http:7: @ratelimit (httpyac) is not supported: ignored",
+	}
+	if !slices.Equal(got, want) || len(f.Requests[0].Directives) != 0 {
+		t.Errorf("warnings = %q, directives %v", got, f.Requests[0].Directives)
 	}
 }

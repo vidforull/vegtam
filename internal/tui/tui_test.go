@@ -23,6 +23,7 @@ import (
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/env"
+	vexec "github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/history"
 )
 
@@ -130,7 +131,7 @@ func (fx *fixture) asked() []string {
 // a terminal of the given size.
 func newModel(t *testing.T, path, envName string, width, height int) *Model {
 	t.Helper()
-	return open(t, Options{Path: path, Env: envName, Timeout: 5 * time.Second, MaxBody: 1 << 20, UserAgent: "vegtam/test"}, width, height)
+	return open(t, Options{Path: path, Env: envName, Transport: vexec.Transport{Total: 5 * time.Second}, MaxBody: 1 << 20, UserAgent: "vegtam/test"}, width, height)
 }
 
 // open returns the interface with opts, ready as Run would make it, on
@@ -806,6 +807,21 @@ func TestStatusLine(t *testing.T) {
 	}
 }
 
+// TestStatusLineInsecure checks that --insecure is on the screen while the
+// interface is: the banner on stderr is hidden under it.
+func TestStatusLineInsecure(t *testing.T) {
+	fx := newFixture(t)
+	opts := Options{Path: fx.dir, Transport: vexec.Transport{TLS: vexec.TLS{Insecure: true}}, MaxBody: 1 << 20}
+	for _, w := range []int{40, 100} {
+		if line := sgr.ReplaceAllString(open(t, opts, w, 24).statusLine(), ""); !strings.HasPrefix(line, " INSECURE") {
+			t.Errorf("%d columns: %q", w, line)
+		}
+	}
+	if line := newModel(t, fx.dir, "", 100, 24).statusLine(); strings.Contains(line, "INSECURE") {
+		t.Errorf("without --insecure: %q", line)
+	}
+}
+
 // TestRedraw checks that ctrl+l, in any mode, has Bubble Tea clear the
 // screen and draw it again, over what something else wrote on it.
 func TestRedraw(t *testing.T) {
@@ -831,7 +847,7 @@ func TestHistory(t *testing.T) {
 	}
 
 	log := history.New(filepath.Join(t.TempDir(), "vegtam"))
-	m = open(t, Options{Path: fx.dir, Env: "test", Timeout: 5 * time.Second, MaxBody: 1 << 20, History: log}, 150, 40)
+	m = open(t, Options{Path: fx.dir, Env: "test", Transport: vexec.Transport{Total: 5 * time.Second}, MaxBody: 1 << 20, History: log}, 150, 40)
 	if press(m, "h"); !m.runsOpen || !strings.Contains(view(m), "History") || !strings.Contains(view(m), "no runs yet") ||
 		!strings.Contains(m.responseText(), "No runs yet") {
 		t.Errorf("h before any run:\n%s", view(m))
@@ -942,7 +958,7 @@ func TestHistory(t *testing.T) {
 	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m = open(t, Options{Path: fx.dir, Env: "test", Timeout: 5 * time.Second, MaxBody: 1 << 20, History: history.New(blocked)}, 150, 40)
+	m = open(t, Options{Path: fx.dir, Env: "test", Transport: vexec.Transport{Total: 5 * time.Second}, MaxBody: 1 << 20, History: history.New(blocked)}, 150, 40)
 	press(m, "enter")
 	if m.result.Error != nil || !strings.Contains(m.statusLine(), "history: ") {
 		t.Errorf("with no place for the history: %+v\n%s", m.result.Error, m.statusLine())
