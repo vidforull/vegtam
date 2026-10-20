@@ -197,7 +197,9 @@ func TestNoReuseAcrossIdentities(t *testing.T) {
 }
 
 // TestTransports checks the factory: one transport for each key, cloned
-// from net/http's, with a TLS config of its own.
+// from net/http's, with a TLS config of its own. Its proxy function is the
+// transport's own, which the guard checks the target in; with no proxy in
+// the transport, it gives none.
 func TestTransports(t *testing.T) {
 	c := New(Options{Transport: Transport{TLS: TLS{Cert: &tls.Certificate{}}}})
 	with, without := c.transport(transportKey{cert: true}), c.transport(transportKey{})
@@ -207,12 +209,24 @@ func TestTransports(t *testing.T) {
 	case with.TLSClientConfig == without.TLSClientConfig:
 		t.Error("the transports share a TLS config")
 	case !with.ForceAttemptHTTP2 || without.Proxy == nil:
-		t.Error("the defaults of net/http are lost: HTTP/2, the proxy from the environment")
+		t.Error("the defaults of net/http are lost: HTTP/2, a proxy function")
+	case proxyOf(t, without) != nil:
+		t.Error("a transport without a proxy gives one")
 	case with.TLSClientConfig.GetClientCertificate == nil || without.TLSClientConfig.GetClientCertificate != nil:
 		t.Error("the client certificate is not where the key says")
 	case with.TLSClientConfig.KeyLogWriter != nil || without.TLSClientConfig.KeyLogWriter != nil:
 		t.Error("a transport writes TLS keys")
 	}
+}
+
+// proxyOf returns the proxy that t sends a request through.
+func proxyOf(t *testing.T, tr *http.Transport) *url.URL {
+	t.Helper()
+	u, err := tr.Proxy(httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://192.0.2.1/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
 }
 
 // TestNoTLSProxy checks that the transport with the client certificate
@@ -222,13 +236,13 @@ func TestNoTLSProxy(t *testing.T) {
 		return func(*http.Request) (*url.URL, error) { return url.Parse(s) }
 	}
 	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "https://api.example.test/", nil)
-	if u, err := noTLSProxy(via("http://proxy.example.test:3128"))(r); err != nil || u.Host != "proxy.example.test:3128" {
+	if u, err := noTLSProxy(via("http://proxy.example.test:3128"), "for the tests")(r); err != nil || u.Host != "proxy.example.test:3128" {
 		t.Errorf("http proxy: %v, %v", u, err)
 	}
-	if u, err := noTLSProxy(via("https://proxy.example.test"))(r); err == nil || u != nil {
+	if u, err := noTLSProxy(via("https://proxy.example.test"), "for the tests")(r); err == nil || u != nil {
 		t.Errorf("https proxy: %v, %v; want an error", u, err)
 	}
-	if u, err := noTLSProxy(nil)(r); err != nil || u != nil {
+	if u, err := noTLSProxy(nil, "for the tests")(r); err != nil || u != nil {
 		t.Errorf("no proxy: %v, %v", u, err)
 	}
 }
@@ -485,5 +499,24 @@ func TestHTTPVersions(t *testing.T) {
 	p.Request.Version = core.HTTP2
 	if err := New(Options{}).Check(t.Context(), p, testSecrets); err == nil || !strings.Contains(err.Error(), "needs HTTP/2 (Prior Knowledge)") {
 		t.Errorf("Check = %v", err)
+	}
+}
+
+// TestInsecureOrigins checks that an origin the policy lets --insecure
+// leave unchecked is the only one: another is checked, and the response
+// says that the certificate was not.
+func TestInsecureOrigins(t *testing.T) {
+	p := newPKI(t)
+	open, other := p.server(t, tls.NoClientCert, http.NotFoundHandler()), p.server(t, tls.NoClientCert, http.NotFoundHandler())
+	u, err := url.Parse(open.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{Transport: Transport{InsecureOrigins: []string{origin(u)}}}
+	if r, err := do(t, opts, prepared(http.MethodGet, lit(open.URL), nil)); err != nil || r.TLSVerified {
+		t.Errorf("the origin left unchecked: %+v, %v", r, err)
+	}
+	if _, err := do(t, opts, prepared(http.MethodGet, lit(other.URL), nil)); err == nil || !strings.Contains(err.Error(), "unknown authority") {
+		t.Errorf("another origin: %v", err)
 	}
 }

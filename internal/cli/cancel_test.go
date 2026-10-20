@@ -14,8 +14,7 @@ import (
 // its response and while a {{$cmd NAME}} runs: vegtam stops, exits with
 // 130, and prints the error masked.
 func TestCanceled(t *testing.T) {
-	fx := newFixture(t)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fx := newFixture(t) // with a configuration directory of its own: no file is trusted yet
 	t.Setenv("VEGTAM_TEST_HELPER", "1")
 	t.Setenv("GORACE", "atexit_sleep_ms=0") // a helper built with -race would wait a second
 	cmds, _ := json.Marshal(map[string]any{

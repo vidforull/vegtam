@@ -1,8 +1,8 @@
-// Package policy holds what a person allows vegtam to do on its own. So
-// far that is running the commands of a command file,
-// http-client.cmd.json: only once a person has trusted the file with
-// "vegtam trust", and only as long as it has not changed since, as direnv
-// does with .envrc files.
+// Package policy holds what a person allows vegtam to do on its own:
+// running the commands of a command file, http-client.cmd.json, only once
+// a person has trusted the file with "vegtam trust", and only as long as
+// it has not changed since, as direnv does with .envrc files; and what the
+// operator's policy file allows and limits (see Policy).
 package policy
 
 import (
@@ -55,8 +55,9 @@ func DefaultStore() *Store {
 // HistoryDir returns the directory of the history of runs,
 // $XDG_DATA_HOME/vegtam, or ~/.local/share/vegtam if XDG_DATA_HOME is not
 // set; or "" if the operator keeps no history: VEGTAM_NO_HISTORY is set
-// to anything but "". The process environment is read here, and for
-// {{$env NAME}}, and nowhere else.
+// to anything but "". The process environment is read here, for
+// {{$env NAME}}, and for the proxy of the environment, and nowhere
+// else.
 func HistoryDir() (string, error) {
 	if os.Getenv("VEGTAM_NO_HISTORY") != "" {
 		return "", nil
@@ -173,37 +174,43 @@ func (s *Store) load() (map[string]string, error) {
 		return nil, fail("%v", err)
 	}
 	defer root.Close()
+	// Whoever can write the store, or replace it in its directory, can
+	// trust any command. The directory first: whoever can write it could
+	// put anything in the store's place between the checks and the open.
+	if derr := checkDir(root, filepath.Dir(s.path), "it trusts nothing", fail); derr != nil {
+		return nil, derr
+	}
+	// A named pipe would block the open until something writes to it.
+	if fi, serr := root.Stat(name); errors.Is(serr, fs.ErrNotExist) {
+		return map[string]string{}, nil
+	} else if serr != nil {
+		return nil, fail("%v", serr)
+	} else if !fi.Mode().IsRegular() {
+		return nil, fail("not a regular file")
+	}
 	f, err := root.Open(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]string{}, nil
 	} else if err != nil {
 		return nil, fail("%v", err)
 	}
-	m, err := s.read(root, f, fail)
+	m, err := s.read(f, fail)
 	if cerr := f.Close(); err == nil && cerr != nil {
 		return nil, fail("%v", cerr)
 	}
 	return m, err
 }
 
-// read reads the store from f, opened in root, its directory.
-func (s *Store) read(root *os.Root, f *os.File, fail func(string, ...any) error) (map[string]string, error) {
-	// Whoever can write the store, or replace it in its directory, can
-	// trust any command.
+// read reads the store from f, whose directory is checked.
+func (s *Store) read(f *os.File, fail func(string, ...any) error) (map[string]string, error) {
 	fi, err := f.Stat()
-	if err != nil {
-		return nil, fail("%v", err)
-	}
-	di, err := root.Stat(".")
 	switch {
 	case err != nil:
 		return nil, fail("%v", err)
-	case !ownedByUser(fi) || !ownedByUser(di):
-		return nil, fail("it or its directory belongs to another user, so it trusts nothing")
+	case !ownedByUser(fi):
+		return nil, fail("it belongs to another user, so it trusts nothing")
 	case fi.Mode().Perm()&0o022 != 0:
 		return nil, fail("others can write it, so it trusts nothing; make it private: chmod 600 %s", s.path)
-	case di.Mode().Perm()&0o022 != 0:
-		return nil, fail("others can write its directory, so it trusts nothing; make it private: chmod 700 %s", filepath.Dir(s.path))
 	}
 	var r record
 	dec := json.NewDecoder(f)

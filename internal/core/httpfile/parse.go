@@ -309,8 +309,8 @@ func foreign(kind, value string) (msg string, refused, ok bool) {
 	refuse := func(client, what, instead string) (string, bool, bool) {
 		return fmt.Sprintf("@%s (%s) %s, which a file may not do: %s", kind, client, what, instead), true, true
 	}
-	insecure := "--insecure does it, for a person at a terminal"
-	proxy := "vegtam takes HTTPS_PROXY, HTTP_PROXY and NO_PROXY from the environment"
+	insecure := "--insecure does it, for a person at a terminal or for the hosts of the operator's policy"
+	proxy := "the proxy is the operator's to choose: network.proxy in the policy, or the environment's for a person at a terminal"
 	switch kind {
 	case "no-reject-unauthorized":
 		return refuse("httpyac", "turns off the check of server certificates", insecure)

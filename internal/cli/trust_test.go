@@ -34,8 +34,7 @@ func TestHelperProcess(_ *testing.T) {
 }
 
 func TestTrust(t *testing.T) {
-	fx := newFixture(t)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fx := newFixture(t) // with a configuration directory of its own: no file is trusted yet
 	t.Setenv("VEGTAM_TEST_HELPER", "1")
 	t.Setenv("GORACE", "atexit_sleep_ms=0") // a helper built with -race would wait a second
 	helper := []string{os.Args[0], "-test.run=^TestHelperProcess$"}

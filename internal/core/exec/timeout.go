@@ -18,9 +18,9 @@ type Settings struct {
 }
 
 // Settings returns what r is sent with: the HTTP version of its line
-// unless the flags give one, and the limits of the flags, each lowered by
-// the directive for it. A directive may not raise a limit: one above it
-// is a warning, and the flag's limit holds.
+// unless the flags give one, and the limits of the transport, each
+// lowered by the directive for it. A directive may not raise a limit: one
+// above it is a warning, and the limit of the flag or the policy holds.
 func (c *Client) Settings(r *core.Request) (Settings, []core.Warning) {
 	t := c.opts.Transport
 	st := Settings{Version: t.Version, Connect: t.Connect, Read: t.Read, Total: t.Total}
@@ -33,16 +33,19 @@ func (c *Client) Settings(r *core.Request) (Settings, []core.Warning) {
 	var warnings []core.Warning
 	for _, d := range r.Directives {
 		var limit *time.Duration
-		var flag string
+		var flag, from string
 		switch d.Kind {
 		case core.Timeout:
-			limit, flag = &st.Read, "--read-timeout"
+			limit, flag, from = &st.Read, "--read-timeout", t.ReadFrom
 		case core.ConnectionTimeout:
-			limit, flag = &st.Connect, "--connect-timeout"
+			limit, flag, from = &st.Connect, "--connect-timeout", t.ConnectFrom
 		case core.MaxTime:
-			limit, flag = &st.Total, "--max-time"
+			limit, flag, from = &st.Total, "--max-time", t.TotalFrom
 		default:
 			continue
+		}
+		if from != "" {
+			flag = from
 		}
 		v, err := core.ParseTimeout(d.Value)
 		if err != nil { // the parser refuses such a file

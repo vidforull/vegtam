@@ -244,7 +244,7 @@ func TestSecureCookies(t *testing.T) {
 	}
 	// A client of its own: a transport keeps the proxy it was made with.
 	c = New(Options{MaxBody: 1 << 20})
-	c.proxy = func(*http.Request) (*url.URL, error) { return via, nil }
+	c.proxy, c.resolver = func(*http.Request) (*url.URL, error) { return via, nil }, tableResolver{"api.example.test": {"93.184.216.34"}}
 	c.jar.set(&url.URL{Scheme: "https", Host: "api.example.test", Path: "/"},
 		[]*http.Cookie{cookie(t, "sec=1; Secure"), cookie(t, "plain=2")}, time.Now())
 	if send("http://api.example.test/"); got != "plain=2" {

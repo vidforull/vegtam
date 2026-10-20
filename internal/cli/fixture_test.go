@@ -35,6 +35,10 @@ type fixture struct {
 	hidden string // the base URL in the private file, as localhost:port
 	live   string // another one, as localhost:port, where a server answers
 	ca     string // a PEM file with the certificate of the TLS servers
+	// config is vegtam's configuration directory, of the trust store and
+	// the policy, which allows the servers of the tests: a run without a
+	// person at a terminal connects to loopback only as it allows.
+	config string
 
 	mu   sync.Mutex
 	seen []string // the raw queries the server received
@@ -96,6 +100,7 @@ func newFixture(t *testing.T) *fixture {
 			})
 		}
 	})
+	fx.config = writePolicy(t, loopbackPolicy)
 	fx.ca = filepath.Join(fx.dir, "ca.pem")
 	if err := os.WriteFile(fx.ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: secure.Certificate().Raw}), 0o600); err != nil {
 		t.Fatal(err)
@@ -117,6 +122,41 @@ func newFixture(t *testing.T) *fixture {
 }
 
 func (fx *fixture) path(name string) string { return filepath.Join(fx.dir, name) }
+
+// loopbackPolicy allows the servers of the tests, on loopback.
+const loopbackPolicy = `{"network": {"allow": ["127.0.0.1", "::1"]}}`
+
+// setPolicy makes the fixture's policy say doc until the test ends.
+func setPolicy(t *testing.T, fx *fixture, doc string) {
+	t.Helper()
+	path := filepath.Join(fx.config, "policy.json")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.WriteFile(path, []byte(loopbackPolicy), 0o600); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+// writePolicy makes a configuration directory, private as vegtam wants it
+// (t.TempDir is group-writable where the umask is 0002), with a policy
+// file that says doc; XDG_CONFIG_HOME points to it. It returns vegtam's
+// directory in it.
+func writePolicy(t *testing.T, doc string) string {
+	t.Helper()
+	home := t.TempDir()
+	dir := filepath.Join(home, "vegtam")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "policy.json"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", home)
+	return dir
+}
 
 // handler serves the requests of testdata/cli. /echo and /fail send the
 // request back: as JSON, as JSON with "/" escaped as PHP does and "+" as

@@ -28,15 +28,21 @@ as written. Secrets appear as their placeholders, such as {{token}}. A
 {{$cmd NAME}} is checked against the trust store, with exit code 6 if
 its command file is not trusted, but its command does not run. The
 timeouts shown are those that vegtam run gives the request without its
-flags.`,
+flags, with the ceilings of the operator's policy (see vegtam policy).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			f, i, err := parseTarget(args[0]).request()
 			if err != nil {
 				return err
 			}
+			pol, err := cfg.loadPolicy()
+			if err != nil {
+				return err
+			}
+			// The limits of the run, with the policy's ceilings; nothing is
+			// sent, so what the policy says of the network does not matter.
 			defaults := newNetFlags()
-			tr, err := defaults.transport(cfg)
+			tr, _, err := defaults.merged(cfg, pol)
 			if err != nil {
 				return err
 			}

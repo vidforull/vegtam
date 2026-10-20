@@ -806,3 +806,122 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   every secret value, and a session adds the `user:password` of each
   such header. As a curl command it is `-u`, which curl encodes and,
   like vegtam, does not send to another host.
+
+## 2026-10-20: network policy
+
+- **A policy of the operator's, in one place.** What weakens a check or
+  belongs to the machine is the operator's to allow, and a flag is not
+  enough for that once no person is at a terminal: an agent writes its
+  argv itself, and a file or a response may lead it. So the operator
+  writes `$XDG_CONFIG_HOME/vegtam/policy.json`, beside the trust store,
+  and vegtam reads it from there alone: never from a directory of
+  `.http` files, nor from the current one, nor from an environment file,
+  all of which can come with a repository. Its directory is opened as
+  an `os.Root`, and a file or a directory that others can write is
+  refused, as the trust store refuses one; a file others can read is a
+  warning, since it holds no secret but says what vegtam may do.
+- **JSON, not TOML.** TOML was the other candidate; the trust store is
+  JSON already, the standard library reads it, and no parser joins the
+  dependencies for a file of a dozen fields. An unknown field is an
+  error, so that a misspelt `alow` does not allow nothing without a
+  word, and so is a file that does not parse: an empty policy in its
+  place would drop its ceilings.
+- **One order, one function.** The transport of a run is made by
+  `merge` in the CLI, in one order for every setting: what vegtam does
+  on its own, then the policy, then the flags; the directives of a
+  request may then only lower its limits, in `exec.Client.Settings`.
+  A table test goes through each step. The ceilings of `limits` hold the
+  flags, and so the directives: a flag above one is a warning, and the
+  ceiling holds, as a directive above a flag is a warning and the flag
+  holds.
+- **No person at a terminal.** A run is without a person when stdin or
+  stdout is not a terminal, or `--json` is given, the same rule that
+  `--insecure` has had, and the one thing vegtam can tell. It catches
+  the CI scripts that a person writes too; for them, the way to allow
+  is the same policy. Such a run
+  takes what weakens a check from the policy alone: `--insecure` leaves
+  unchecked only the hosts of `network.insecure_hosts`, and is an error
+  without them.
+- **The guard is at the connection.** The dialer's `ControlContext`
+  checks the address each connection is made to, after the lookup, on
+  every hop and every new connection, as OWASP's SSRF cheat sheet asks:
+  a check of the name before the request would let DNS rebinding through,
+  and a check of the first hop only, a redirect. It runs before the
+  connection is made, so nothing is sent to an address refused.
+- **What is never connected to.** The metadata services of clouds hand
+  the credentials of the machine to any request that reaches them; the
+  list in `netguard` names each address with its cloud: 169.254.169.254
+  (AWS, Azure, Google Cloud, Oracle Cloud, DigitalOcean, OpenStack),
+  169.254.170.2 (AWS ECS), 169.254.170.23 and fd00:ec2::23 (AWS EKS Pod
+  Identity), fd00:ec2::254 (AWS over IPv6), fd20:ce::254 (Google Cloud
+  over IPv6), fd00:c1::a9fe:a9fe (Oracle Cloud over IPv6), 192.0.0.192
+  (Oracle Cloud Classic), 100.100.100.200 (Alibaba Cloud) and
+  168.63.129.16 (Azure's WireServer). Link-local, multicast and
+  unspecified addresses (`0.0.0.0/8` too, which Linux connects to the
+  host itself) are no single host's. These are refused with a person at
+  a terminal too, and `network.allow` cannot allow them. An IPv4 address
+  written as IPv6, mapped or behind the NAT64 prefix of RFC 6052, is
+  checked as the IPv4 address it carries. Behind a NAT64 prefix of local
+  use (RFC 8215), whose length is the network's, it is read as under a
+  /96, the usual one, to refuse what is never connected to; the rest is
+  private, since which address it carries is not known.
+- **Private only as allowed.** Without a person, loopback, RFC 1918, the
+  shared space of RFC 6598 and the unique local addresses of IPv6 are
+  refused unless `network.allow` names them, by address, prefix, or
+  name and port; a name needs its port, so that allowing `localhost:3000`
+  does not allow every service of the machine. With a person they are
+  allowed: localhost is what a developer most often calls. The error
+  names the entry to write, `allow it in policy: network.allow`, and is
+  of kind `policy`, exit code 6, which the trust store's errors have.
+- **The guard and a proxy.** Behind a proxy the dialer sees only the
+  proxy's address. So the proxy function looks the target up and checks
+  every address it has, with the same rules, before the proxy gets the
+  request; a target
+  that does not resolve here, as behind a proxy that resolves names
+  itself, or only to an unspecified address, as a DNS that blocks a name
+  answers, passes with a person at a terminal and is refused without one
+  unless `network.allow` names it with its port. The host is read as a
+  proxy may read it: first as net/http sends it, a name not in ASCII as
+  IDNA writes it (so that
+  digits of full width are digits), then as a number, since Go's
+  resolver does not read `2852039166` or `0251.0376.0251.0376`, which
+  glibc and so many a proxy read as 169.254.169.254: in every reading
+  of `inet_aton`, of the WHATWG URL standard and of leading zeros as
+  decimal, refused if any is. The lookup is bounded by the connect
+  timeout, a lookup that gets no answer in that time being a timeout of
+  the connect phase rather than a refusal, and kept out of the hop's
+  trace, whose `name_lookup_ms` is the proxy's. It tells the local
+  resolver every name, with `socks5h` too: the price of refusing
+  metadata through a proxy, which a person at a terminal pays as well.
+  The proxy may still see another address than vegtam did; its own rules
+  are the last word.
+  Without a person, the proxy of the environment is not used unless
+  `network.proxy` says `"environment"`: whoever sets the environment of
+  a script or an agent would choose where its requests go, and a
+  warning says it is not used. The proxy, the policy's or the
+  environment's, is the operator's: the guard lets a connection to it
+  be when it is made to it as the proxy, and checks one to its address
+  as any other, since net/http sends a request for loopback direct. A
+  request that `--insecure` leaves unchecked does not go through an
+  https proxy: net/http checks the proxy's certificate with the same
+  config, and would hand the proxy's credentials to whoever answered.
+  That refusal, and the older one of an https proxy with a client
+  certificate, are usage errors, exit code 2: the flags and the policy
+  conflict, and a retry would not help.
+  `httpproxy.Config.ProxyFunc` reads `no_proxy` and the
+  environment for each run, where net/http's `ProxyFromEnvironment`
+  reads it once a process; it brings `golang.org/x/text`, through
+  `idna`, and moved `golang.org/x/sync` to 0.24, which `x/text`
+  requires.
+- **What binds it.** The policy holds against what vegtam's arguments,
+  its files and the responses say. It is found through `XDG_CONFIG_HOME`
+  or `HOME`, as the trust store is: a program that sets vegtam's
+  environment can name another, as it could run another client. A
+  system path that only root can write would bind such a program too;
+  that is a choice for later, and the documentation says how to run an
+  agent meanwhile. A named pipe in place of the policy or of the trust
+  store is refused before it is opened, rather than waited on for ever.
+- **Not yet.** The history of runs stays off with `VEGTAM_NO_HISTORY`,
+  not in the policy; the policy's TLS by host, the credentials of its
+  proxy, `--proxy`, `--resolve`, `--connect-to` and unix sockets come
+  next.

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/netguard"
 )
 
 // MaxRedirects is how many redirects a request follows.
@@ -34,25 +35,28 @@ type Options struct {
 }
 
 // Client sends requests. It speaks HTTP/2 when the server offers it over
-// TLS and HTTP/1.1 otherwise, and takes its proxy from the environment
-// (HTTPS_PROXY, HTTP_PROXY, NO_PROXY). It keeps a transport, with its
-// pool of connections, for each configuration it sends with.
+// TLS and HTTP/1.1 otherwise, and goes through the proxy its transport
+// gives, if any. It keeps a transport, with its pool of connections, for
+// each configuration it sends with.
 type Client struct {
 	opts Options
 	mu   sync.Mutex
 	pool map[transportKey]*http.Transport
-	// control is the dialer's: tests make a connection hang with it.
+	// control is the dialer's, after the guard: tests make a connection
+	// hang with it.
 	control func(ctx context.Context, network, address string, c syscall.RawConn) error
-	// proxy takes the place of the environment's, for tests: net/http
-	// reads it once a process.
+	// proxy takes the place of the transport's, for tests.
 	proxy func(*http.Request) (*url.URL, error)
-	jar   *Jar // nil without one
+	// resolver looks up the target of a request that goes to a proxy, for
+	// the guard; tests answer from a table.
+	resolver netguard.Resolver
+	jar      *Jar // nil without one
 }
 
 // New returns a Client, with a cookie jar of its own unless the transport
 // says no.
 func New(opts Options) *Client {
-	c := &Client{opts: opts, pool: map[transportKey]*http.Transport{}}
+	c := &Client{opts: opts, pool: map[transportKey]*http.Transport{}, resolver: net.DefaultResolver}
 	if !opts.Transport.NoCookies {
 		c.jar = NewJar()
 	}
@@ -70,8 +74,9 @@ type Response struct {
 	Duration  time.Duration
 	// TLSVerified is set when every hop of the request, redirects
 	// included, went over TLS with the server's certificate checked: not
-	// if one went over http, nor with TLS.Insecure. A plain hop on the way
-	// could have led anywhere.
+	// if one went over http, nor to an origin left unchecked, as
+	// TLS.Insecure leaves all of them. A plain hop on the way could have
+	// led anywhere.
 	TLSVerified bool
 }
 
@@ -125,7 +130,7 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 		Body:     body,
 		Duration: time.Since(start),
 
-		TLSVerified: !h.plain && !c.opts.Transport.TLS.Insecure,
+		TLSVerified: !h.plain && !h.insecure,
 	}
 	if int64(len(body)) > c.opts.MaxBody {
 		r.Body, r.Truncated = body[:c.opts.MaxBody], true
@@ -358,6 +363,15 @@ func (c *Client) netError(ctx context.Context, p *core.Prepared, s core.Secrets,
 		return timeout(core.PhaseConnect, "%s: no connection within %s (connect timeout)", where, core.FormatTimeout(st.Connect))
 	case errors.Is(err, context.Canceled):
 		return core.Errorf(core.KindCanceled, p.Request.Source, "%s", msg)
+	}
+	if pe, ok := errors.AsType[*proxyError](err); ok {
+		return core.Errorf(core.KindUsage, p.Request.Source, "%s: %s", where, pe.Error())
+	}
+	if errors.Is(err, errLookup) {
+		return timeout(core.PhaseConnect, "%s: %v, within %s (connect timeout)", where, errLookup, core.FormatTimeout(st.Connect))
+	}
+	if ge, ok := errors.AsType[*netguard.Error](err); ok {
+		return core.Errorf(core.KindPolicy, p.Request.Source, "%s: %s", where, hide(p, s, wire, ge.Error()))
 	}
 	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 		if w.isConnecting() {

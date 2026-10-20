@@ -1,5 +1,5 @@
-// Package output defines the JSON documents that run, show, list, import
-// and trust print, and the JSON Schema that describes them. The documents are a
+// Package output defines the JSON documents that run, show, list, import,
+// trust and policy print, and the JSON Schema that describes them. The documents are a
 // contract for scripts and agents: fields are only ever added. Building a
 // document masks every secret value in it.
 package output
@@ -38,6 +38,7 @@ var Schema string
 //   - list: Requests;
 //   - import: Import;
 //   - trust: Trust;
+//   - policy: Policy;
 //   - an error that ends a command before any request: Result.Error.
 type Document struct {
 	SchemaVersion int        `json:"schema_version"`
@@ -46,6 +47,7 @@ type Document struct {
 	Requests      []*Listed  `json:"requests,omitzero"`
 	Import        *Import    `json:"import,omitempty"`
 	Trust         []*Trusted `json:"trust,omitzero"`
+	Policy        *Policy    `json:"policy,omitempty"`
 }
 
 // Result is the outcome of one request. Timing and the fields after it,

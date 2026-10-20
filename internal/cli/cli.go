@@ -26,7 +26,7 @@ const (
 	exitUsage    = 2   // bad arguments, a file that does not parse, an unresolved variable, an invalid request, a capture without a value, an export that cannot be read
 	exitNetwork  = 3   // network or TLS error, timeout
 	exitStatus   = 4   // HTTP status 400 or above, with run --fail
-	exitPolicy   = 6   // not allowed by policy: a command file that is not trusted
+	exitPolicy   = 6   // not allowed by policy: a command file that is not trusted, an address the guard refuses, a policy file that cannot be read
 	exitCanceled = 130 // interrupted by Ctrl-C or SIGTERM: 128 + SIGINT, as a shell reports it
 	exitPanic    = 2   // a bug in vegtam: the code Go exits with on a panic
 )
@@ -68,7 +68,9 @@ Exit codes:
   4  HTTP status 400 or above, with run --fail
   5  reserved for requests that need confirmation
   6  blocked by policy: a {{$cmd NAME}} whose command file is not
-     trusted (see vegtam trust --help)
+     trusted (see vegtam trust --help), an address that vegtam never
+     connects to or that the operator's policy does not allow, or a
+     policy file that cannot be read (see vegtam policy --help)
   130  interrupted by Ctrl-C (SIGINT) or SIGTERM
 With several requests, the exit code is the highest of theirs.`
 
@@ -96,6 +98,25 @@ type Config struct {
 
 // asJSON reports whether output should be JSON.
 func (c *Config) asJSON() bool { return c.json || !c.TTY }
+
+// unattended reports whether no person is at a terminal: stdin or stdout
+// is not one, or --json asks for what a program reads. A script or an
+// agent, which a file or a response may lead, then gets what the
+// operator's policy allows, and no more.
+func (c *Config) unattended() bool { return !c.Interactive || c.json }
+
+// loadPolicy reads the operator's policy and prints what it says of its
+// file.
+func (c *Config) loadPolicy() (*policy.Policy, error) {
+	p, err := policy.Load()
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range p.Warnings {
+		fmt.Fprintf(c.errOut, "vegtam: warning: %s\n", c.text(w))
+	}
+	return p, nil
+}
 
 // writeJSON prints v as one JSON document, indented on a terminal, with
 // secret values masked in its strings.
@@ -227,7 +248,7 @@ func Run(ctx context.Context, args []string, cfg Config) (code int) {
 	root.SetErr(cfg.errOut)
 	root.PersistentFlags().BoolVar(&cfg.json, "json", false, "print JSON even on a terminal")
 	root.AddCommand(newRunCmd(&cfg), newShowCmd(&cfg), newListCmd(&cfg), newTUICmd(&cfg), newImportCmd(&cfg),
-		newTrustCmd(&cfg), newSchemaCmd(&cfg), newVersionCmd(&cfg))
+		newTrustCmd(&cfg), newPolicyCmd(&cfg), newSchemaCmd(&cfg), newVersionCmd(&cfg))
 
 	cmd, err := root.ExecuteContextC(ctx)
 	if err == nil {

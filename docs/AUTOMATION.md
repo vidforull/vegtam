@@ -25,8 +25,8 @@ and `list` do with output a program can read.
 ## Output
 
 When stdout is not a terminal, or with `--json`, `run`, `show`, `list`,
-`import` and `trust` print one JSON document to stdout, followed by a
-newline. On a terminal
+`import`, `trust` and `policy` print one JSON document to stdout,
+followed by a newline. On a terminal
 the output is text for people, and `--json` prints the same document
 indented. Nothing else is written to stdout; diagnostics go to stderr.
 
@@ -42,6 +42,7 @@ command and on its argument, never on what happens at run time:
 | `list <file>`, `list <dir>` | `requests` |
 | `import postman <export> -o <dir>` | `import`: the report of the import |
 | `trust <dir>`, `trust --revoke <dir>`, `trust --list` | `trust`: the command files and their status |
+| `policy` | `policy`: the operator's policy and what applies to a run |
 | an error that ends a command before any request | `error` only |
 
 A result for `run api/users.http#list -e dev` looks like this (shortened):
@@ -188,7 +189,7 @@ by its exit code.
 | 3 | network or TLS error, or timeout |
 | 4 | HTTP status 400 or above, with `run --fail` |
 | 5 | reserved: the request needs confirmation |
-| 6 | blocked by policy: a `{{$cmd NAME}}` whose command file is not trusted |
+| 6 | blocked by policy: a `{{$cmd NAME}}` whose command file is not trusted, an address vegtam never connects to or that the operator's policy does not allow, or a policy file that cannot be read |
 | 130 | interrupted: Ctrl-C (SIGINT) or SIGTERM stopped a request or a `{{$cmd NAME}}` |
 
 Without `--fail`, any HTTP status is a success: the status is in the
@@ -211,7 +212,7 @@ The outcome of every assertion is in `asserts` all the same.
 | `network` | 3 | DNS, connection, TLS, redirects |
 | `timeout` | 3 | a time limit ran out; `timeout_phase` says which: `connect`, `read` or `total` |
 | `status` | 4 | HTTP status 400 or above, with `--fail` |
-| `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write |
+| `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write; an address that vegtam never connects to, or a loopback or private one that the operator's policy does not allow; a policy file that does not parse, or that others can write |
 | `canceled` | 130 | SIGINT or SIGTERM came while a request waited for its response or a command ran; the requests after it are canceled too |
 
 Every error is printed to stderr as text, `vegtam: file:line: message`.
@@ -275,9 +276,12 @@ Without `--force`, existing files make it 2 and nothing is written. Run
 
 ## Policy
 
-Policy is what a person has to allow before vegtam does it on its own.
-So far it covers one thing: running the commands of a command file,
-`http-client.cmd.json` (see [FORMAT.md](FORMAT.md#commands)).
+Policy is what a person has to allow before vegtam does it on its own:
+running the commands of a command file, `http-client.cmd.json` (see
+[FORMAT.md](FORMAT.md#commands)), and what the operator's policy file
+allows of the network.
+
+### Trusted command files
 
 - `vegtam trust <dir>` trusts the `http-client.cmd.json` in `<dir>` (or
   the file named): it records where the file is, as an absolute path
@@ -303,8 +307,63 @@ So far it covers one thing: running the commands of a command file,
 Trusting is a decision for a person, who reads the commands first. A
 program that gets a `policy` error should stop and ask, not run `vegtam
 trust` itself: the error message names the command for the person to
-run. The confirmation of unsafe methods and the host allowlist, with
-exit code 5 and more of code 6, are still to come.
+run. The confirmation of unsafe methods, with exit code 5, is still to
+come.
+
+### The operator's policy
+
+A program runs without a person at a terminal: stdin or stdout is not a
+terminal, or `--json` is given. Such a run gets what the operator's
+policy, `$XDG_CONFIG_HOME/vegtam/policy.json`, allows, and no more; a
+file, a response or the program's own arguments cannot widen it.
+`vegtam policy --json` prints it, with `run.unattended`, the proxies a
+run goes through and the addresses never connected to; `vegtam policy
+--help` describes every field.
+
+- **Addresses.** vegtam never connects to the metadata services of
+  clouds (`169.254.169.254`, `fd00:ec2::254` and the others that
+  `never` lists), nor to link-local, multicast or unspecified
+  addresses, whoever runs it. Without a person, it connects to loopback
+  (`127.0.0.0/8`, `::1`), RFC 1918, `100.64.0.0/10` and `fc00::/7`
+  addresses only as `network.allow` names them: `"localhost:3000"`,
+  `"127.0.0.1"`, `"127.0.0.1:8080"`, `"10.0.0.0/8"`. The check is of the
+  address each connection is made to, every hop and every connection.
+  A refused one is an error of kind `policy`, before anything is sent:
+
+  ```json
+  {"kind": "policy", "message": "Get \"http://localhost:3000/health\": address 127.0.0.1:3000 is private (loopback), and no person is at a terminal; allow it in policy: network.allow"}
+  ```
+
+- **Proxy.** Without a person, requests go through `network.proxy`, a
+  URL or `"environment"` for that of `HTTPS_PROXY`, `HTTP_PROXY` and
+  `NO_PROXY`; with none there, through no proxy, and a warning says that
+  the environment's is not used. Through a proxy, the target of each
+  request is looked up here and checked as a connection would be,
+  numbers such as `2852039166` read as the IPv4 addresses they are; a
+  target that does not resolve here, or only to `0.0.0.0`, is refused
+  unless `network.allow` names it with its port. The proxy itself is
+  connected to as the proxy only: a request to its address goes direct,
+  and is checked as any other. An https proxy does not carry a request
+  that `--insecure` leaves unchecked: its own certificate would go
+  unchecked too.
+- **Unchecked certificates.** `--insecure` without a person leaves
+  unchecked the hosts of `network.insecure_hosts` only, and is a
+  `usage` error without them.
+- **Limits.** `limits.*_ceiling` hold every flag and directive.
+
+The policy is the operator's to write. A program that gets a `policy`
+error for an address should stop and tell a person which entry would
+allow it, from the message: it does not write the policy itself, and
+it does not try another address, port or name to get past it.
+
+The policy holds against what vegtam's arguments, files and responses
+say. It is found through `XDG_CONFIG_HOME`, or `HOME`, so a program that
+sets vegtam's environment can name another policy, as it can run
+another client: run an agent with an environment that the operator
+sets, and without a shell of its own, for the policy to bind it.
+Warnings about the run itself, such as a flag above a ceiling or a
+proxy of the environment that is not used, go to stderr only; the
+`transport` of each result gives the limits that hold.
 
 ## Response size and time limits
 
@@ -320,7 +379,11 @@ in seconds (`5`) or with a unit (`500ms`, `2m`, `1m30s`), `0` or `none` for none
 | `--max-time` | 2m | the whole exchange, redirects and body included; `--timeout` is its old name |
 
 The directives `# @connection-timeout`, `# @timeout` and `# @max-time`
-may lower them for a request, never raise them.
+may lower them for a request, never raise them. The ceilings of the
+operator's policy (`limits.max_time_ceiling`, `read_timeout_ceiling`,
+`connect_timeout_ceiling`) hold the flags too: a flag above one, or `0`,
+is a warning, and the ceiling holds. `transport` in each result, of
+`--dry-run` and `show` too, gives the limits that apply.
 
 ## Cookies
 
@@ -347,10 +410,12 @@ each request as written, not after a redirect elsewhere. `--http1.1`,
 `--http2` and `--http2-prior-knowledge` set the HTTP version of every
 request. None of this comes from a `.http` or environment file.
 
-`--insecure` turns off the check of server certificates, and works only
-for a person at a terminal: when stdin or stdout is not a terminal, or
-with `--json`, it is a `usage` error, exit code 2. A program that has to
-reach a server with a private CA passes `--cacert`.
+`--insecure` turns off the check of server certificates for a person at
+a terminal. When stdin or stdout is not a terminal, or with `--json`, it
+leaves unchecked only the hosts that the operator's policy names in
+`network.insecure_hosts`, and without them it is a `usage` error, exit
+code 2. A program that has to reach a server with a private CA passes
+`--cacert`.
 
 ## Secrets
 

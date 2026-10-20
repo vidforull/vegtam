@@ -124,21 +124,26 @@ A time is a number of seconds (`30`), a number with a unit, `ms`, `s` or
 (`1m30s`); `0` or `none` is no limit. Note that httpyac reads a bare number as
 milliseconds: vegtam reads it as JetBrains does. A directive may only
 lower the limit that the flag of the run gives (`--read-timeout`,
-`--connect-timeout`, `--max-time`): one above it, `0` included, is a
-warning, and the flag's limit holds. Each comes once per request.
+`--connect-timeout`, `--max-time`), which the operator's policy may
+itself hold to a ceiling: one above it, `0` included, is a warning, and
+the limit of the flag or the policy holds. Each comes once per request.
 
 ### Directives of other clients
 
 A `.http` file only ever makes the transport stricter: what weakens a
-check or belongs to the machine comes from the command line. The
-transport directives of other clients are errors that say what to use:
+check or belongs to the machine comes from the command line or the
+operator's policy (see `vegtam policy --help`). Nothing in a `.http` or
+environment file chooses a proxy, an address to connect to, a CA, a
+client certificate or which addresses may be reached, and nothing in
+them is ever read as the policy. The transport directives of other
+clients are errors that say what to use:
 
 | Directive | Client | Instead |
 |---|---|---|
 | `@no-reject-unauthorized` | httpyac | `--insecure`, at a terminal |
-| `@proxy`, `@no-proxy` | httpyac | `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` |
+| `@proxy`, `@no-proxy` | httpyac | the policy's `network.proxy`; for a person at a terminal, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` |
 | `@kulala-curl-...`, and `@curl-...` before kulala 6 | kulala | the flags of `vegtam run` |
-| `@setting insecure`, `proxy`, `http-root-cas`, `http-client-cert`, `http-client-key` | resterm | `--insecure`, the environment, `--cacert`, `--cert` and `--key` |
+| `@setting insecure`, `proxy`, `http-root-cas`, `http-client-cert`, `http-client-key` | resterm | `--insecure`, the policy or the environment, `--cacert`, `--cert` and `--key` |
 
 `@note`, `@prompt`, `@sleep`, `@ratelimit` and resterm's other
 `@setting`s do not touch the transport: they are ignored with a warning,

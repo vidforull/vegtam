@@ -163,6 +163,17 @@ func (h *hopTrace) cookies(sent []Cookie, set []SetCookie) {
 	h.record(func(hop *Hop, _ time.Duration) { hop.Sent, hop.Set = sent, set })
 }
 
+// proxyAddr returns the host and port of the proxy that the hop goes
+// through, "" for none.
+func (h *hopTrace) proxyAddr() string {
+	h.t.mu.Lock()
+	defer h.t.mu.Unlock()
+	if h.hop.Proxy == nil {
+		return ""
+	}
+	return proxyHostPort(h.hop.Proxy)
+}
+
 // proxied records the proxy u that the hop of r goes through.
 func proxied(r *http.Request, u *url.URL) {
 	if h, ok := r.Context().Value(hopKey{}).(*hopTrace); ok && u != nil {

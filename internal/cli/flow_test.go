@@ -27,6 +27,7 @@ const (
 // gave; GET /users/1 needs neither.
 func newFlowFixture(t *testing.T) (dir, host string) {
 	t.Helper()
+	writePolicy(t, loopbackPolicy)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /login", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

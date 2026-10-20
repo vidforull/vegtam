@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "vegtam output",
-  "description": "A JSON document printed by vegtam run, show, list, import or trust. run <file>#<ref> and show print the fields of one result; run <file> and run <dir> print results; list prints requests; import prints import; trust prints trust; an error that ends a command before any request is printed as error. Fields are only ever added: ignore the ones you do not know.",
+  "description": "A JSON document printed by vegtam run, show, list, import, trust or policy. run <file>#<ref> and show print the fields of one result; run <file> and run <dir> print results; list prints requests; import prints import; trust prints trust; policy prints policy; an error that ends a command before any request is printed as error. Fields are only ever added: ignore the ones you do not know.",
   "type": "object",
   "required": ["schema_version"],
   "properties": {
@@ -43,7 +43,8 @@
           "sha256": {"type": "string", "description": "The SHA-256 trusted, in hex, of the file and the files its commands name by relative paths. Absent after --revoke."}
         }
       }
-    }
+    },
+    "policy": {"$ref": "#/$defs/policy"}
   },
   "$defs": {
     "ref": {
@@ -125,7 +126,7 @@
     },
     "warnings": {
       "type": "array",
-      "description": "What to know of the request, which did not stop it: a directive vegtam ignores, a limit above the flag's. Absent if there is nothing. Each is also printed on stderr.",
+      "description": "What to know of the request, which did not stop it: a directive vegtam ignores, a limit above the flag's or the policy's. Absent if there is nothing. Each is also printed on stderr. What concerns the whole run, such as a flag above a ceiling of the policy, is printed on stderr only; transport gives the limits that hold.",
       "items": {
         "type": "object",
         "required": ["message"],
@@ -226,7 +227,7 @@
     },
     "proxy": {
       "type": "string",
-      "description": "The proxy the request went through, as scheme://host:port, from HTTPS_PROXY, HTTP_PROXY and NO_PROXY; a user and password in it are shown as ***@. Absent without a proxy."
+      "description": "The proxy the request went through, as scheme://host:port: the operator's policy's, or for a person at a terminal that of HTTPS_PROXY, HTTP_PROXY and NO_PROXY; a user and password in it are shown as ***@. Absent without a proxy."
     },
     "tls": {
       "type": "object",
@@ -272,7 +273,7 @@
       "properties": {
         "kind": {
           "type": "string",
-          "description": "assert (exit code 1); usage, parse, variable, request, import or capture (2); network or timeout (3); status (4, with --fail); policy (6); canceled (130, interrupted by SIGINT or SIGTERM). New kinds may be added; rely on the exit code for anything you do not know."
+          "description": "assert (exit code 1); usage, parse, variable, request, import or capture (2); network or timeout (3); status (4, with --fail); policy (6: a command file that is not trusted, an address vegtam never connects to or that the operator's policy does not allow, a policy file that cannot be read); canceled (130, interrupted by SIGINT or SIGTERM). New kinds may be added; rely on the exit code for anything you do not know."
         },
         "message": {"type": "string"},
         "file": {"type": "string"},
@@ -330,6 +331,47 @@
         "category": {"type": "string", "description": "request, body, auth, script, variable, header, example, setting or file. New categories may be added."},
         "reason": {"type": "string"},
         "where": {"type": "string", "description": "file#name for a request; a folder's .http file, or its directory if it has no requests of its own; a collection's directory; the output directory for the whole export; or a file of the export."}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "description": "The operator's policy, $XDG_CONFIG_HOME/vegtam/policy.json: what its file says, and what applies to a run in the mode of this one. It holds no secret.",
+      "required": ["found", "run", "never"],
+      "properties": {
+        "path": {"type": "string", "description": "The file, found or not. Absent if there is no place for it: neither XDG_CONFIG_HOME nor HOME is set."},
+        "found": {"type": "boolean", "description": "false: there is no file, and vegtam does what it does on its own."},
+        "limits": {
+          "type": "object",
+          "description": "Ceilings on the time limits of every request, in milliseconds: on the flags, and so on the directives of a file. Absent for none.",
+          "properties": {
+            "max_time_ceiling_ms": {"type": "number"},
+            "read_timeout_ceiling_ms": {"type": "number"},
+            "connect_timeout_ceiling_ms": {"type": "number"}
+          }
+        },
+        "network": {
+          "type": "object",
+          "description": "The network part of the file, as written.",
+          "properties": {
+            "allow": {"type": "array", "items": {"type": "string"}, "description": "The loopback and private addresses a run without a person at a terminal may connect to: host:port, an IP address with a port or without, or a CIDR prefix."},
+            "proxy": {"type": "string", "description": "The proxy of every request, a URL; environment for that of HTTPS_PROXY, HTTP_PROXY and NO_PROXY."},
+            "no_proxy": {"type": "array", "items": {"type": "string"}, "description": "Hosts that bypass the proxy."},
+            "insecure_hosts": {"type": "array", "items": {"type": "string"}, "description": "The hosts, host:port, whose certificates --insecure may leave unchecked without a person at a terminal."}
+          }
+        },
+        "run": {
+          "type": "object",
+          "description": "What applies to a run in the mode of this one.",
+          "required": ["unattended"],
+          "properties": {
+            "unattended": {"type": "boolean", "description": "true: no person is at a terminal (stdin or stdout is not one, or --json is given). Loopback and private addresses are then connected to only as network.allow names them, and a flag that weakens a check beyond what the policy allows is a usage error."},
+            "https_proxy": {"type": "string", "description": "The proxy of requests to https URLs, its user and password as ***. Absent for none."},
+            "http_proxy": {"type": "string", "description": "The proxy of requests to http URLs, the same."},
+            "no_proxy": {"type": "string", "description": "The hosts that go direct, as NO_PROXY writes them."}
+          }
+        },
+        "never": {"type": "array", "items": {"type": "string"}, "description": "The addresses vegtam never connects to, whoever asks: the metadata services of clouds, and link-local, multicast and unspecified addresses."},
+        "warnings": {"$ref": "#/$defs/warnings"}
       }
     },
     "import_variable": {

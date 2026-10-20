@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/spf13/cobra"
 
@@ -68,14 +67,15 @@ func runTUI(ctx context.Context, cfg *Config, f tuiFlags, path string) error {
 	case !cfg.Interactive:
 		return core.Errorf(core.KindUsage, core.Source{}, "the terminal interface needs a terminal for its input and output")
 	}
-	tr, err := f.net.transport(cfg)
+	pol, err := cfg.loadPolicy()
 	if err != nil {
 		return err
 	}
-	if f.net.insecure {
-		// Left on the terminal once the interface is gone; the status line
-		// says it meanwhile.
-		fmt.Fprint(cfg.errOut, insecureBanner)
+	// Its warnings, --insecure's among them, are left on the terminal once
+	// the interface is gone; the status line says --insecure meanwhile.
+	tr, err := f.net.transport(cfg, pol)
+	if err != nil {
+		return err
 	}
 	// Bubble Tea writes to the terminal itself, not through the masked
 	// writer: it draws the screen in pieces, which masking each write could

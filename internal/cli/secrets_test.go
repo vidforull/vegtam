@@ -72,30 +72,33 @@ func TestNoSecretInOutput(t *testing.T) {
 	fx := newFixture(t)
 	api, transport := fx.path("api.http"), fx.transportFile(t)
 	scenarios := []struct {
-		name string
-		args []string
-		code int
-		want string // what shows that the secret was there and got masked
+		name   string
+		args   []string
+		code   int
+		want   string // what shows that the secret was there and got masked
+		policy string // in place of the fixture's
 	}{
-		{"success", []string{"run", api + "#echo"}, exitOK, "***"},
-		{"HTTP 500", []string{"run", api + "#fail"}, exitOK, "***"},
-		{"HTTP 500 with --fail", []string{"run", api + "#fail", "--fail"}, exitStatus, "***"},
-		{"network error", []string{"run", api + "#refused"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}"},
-		{"timeout", []string{"run", api + "#slow", "--max-time", "100ms"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}"},
-		{"read timeout", []string{"run", api + "#slow", "--read-timeout", "100ms"}, exitNetwork, "(read timeout)"},
-		{"connect timeout", []string{"run", transport + "#silent", "--connect-timeout", "100ms"}, exitNetwork, "(connect timeout)"},
-		{"dry run", []string{"run", api + "#echo", "--dry-run"}, exitOK, "Bearer {{token}}"},
-		{"binary body", []string{"run", api + "#binary"}, exitOK, ""},
-		{"truncated body", []string{"run", api + "#big", "--max-body", "106"}, exitOK, "xx***"},
-		{"secret host", []string{"run", api + "#hidden"}, exitNetwork, "{{base}}/?key={{token}}"},
-		{"secret host that redirects", []string{"run", transport + "#moved"}, exitOK, "***"},
-		{"session cookie", []string{"run", fx.cookieFile(t)}, exitOK, "***"},
-		{"Basic", []string{"run", transport + "#basic"}, exitOK, "Basic ***"},
-		{"redirect error", []string{"run", api + "#hops"}, exitNetwork, "stopped after 10 redirects"},
-		{"unknown CA", []string{"run", transport + "#untrusted"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}"},
-		{"no client certificate", []string{"run", transport + "#mtls", "--cacert", fx.ca}, exitNetwork, "pass --cert and --key"},
-		{"directory", []string{"run", fx.dir, "--max-time", "100ms", "--max-body", "106", "--fail"}, exitStatus, "***"},
-		{"show", []string{"show", api + "#echo"}, exitOK, "Bearer {{token}}"},
+		{"success", []string{"run", api + "#echo"}, exitOK, "***", ""},
+		{"HTTP 500", []string{"run", api + "#fail"}, exitOK, "***", ""},
+		{"HTTP 500 with --fail", []string{"run", api + "#fail", "--fail"}, exitStatus, "***", ""},
+		{"network error", []string{"run", api + "#refused"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}", ""},
+		{"timeout", []string{"run", api + "#slow", "--max-time", "100ms"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}", ""},
+		{"read timeout", []string{"run", api + "#slow", "--read-timeout", "100ms"}, exitNetwork, "(read timeout)", ""},
+		{"connect timeout", []string{"run", transport + "#silent", "--connect-timeout", "100ms"}, exitNetwork, "(connect timeout)", ""},
+		{"dry run", []string{"run", api + "#echo", "--dry-run"}, exitOK, "Bearer {{token}}", ""},
+		{"binary body", []string{"run", api + "#binary"}, exitOK, "", ""},
+		{"truncated body", []string{"run", api + "#big", "--max-body", "106"}, exitOK, "xx***", ""},
+		{"secret host", []string{"run", api + "#hidden"}, exitNetwork, "{{base}}/?key={{token}}", ""},
+		{"secret host that redirects", []string{"run", transport + "#moved"}, exitOK, "***", ""},
+		{"session cookie", []string{"run", fx.cookieFile(t)}, exitOK, "***", ""},
+		{"Basic", []string{"run", transport + "#basic"}, exitOK, "Basic ***", ""},
+		{"redirect error", []string{"run", api + "#hops"}, exitNetwork, "stopped after 10 redirects", ""},
+		{"unknown CA", []string{"run", transport + "#untrusted"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}", ""},
+		{"no client certificate", []string{"run", transport + "#mtls", "--cacert", fx.ca}, exitNetwork, "pass --cert and --key", ""},
+		{"directory", []string{"run", fx.dir, "--max-time", "100ms", "--max-body", "106", "--fail"}, exitStatus, "***", ""},
+		{"show", []string{"show", api + "#echo"}, exitOK, "Bearer {{token}}", ""},
+		{"an address the policy does not allow", []string{"run", api + "#echo"}, exitPolicy, "allow it in policy: network.allow", `{}`},
+		{"a secret host the policy does not allow", []string{"run", api + "#hidden"}, exitPolicy, "address *** is private", `{}`},
 	}
 	modes := []struct {
 		name      string
@@ -114,6 +117,9 @@ func TestNoSecretInOutput(t *testing.T) {
 				continue
 			}
 			t.Run(sc.name+"/"+m.name, func(t *testing.T) {
+				if sc.policy != "" {
+					setPolicy(t, fx, sc.policy)
+				}
 				args := append(append([]string{}, sc.args...), "-e", "test")
 				code, stdout, stderr := runCLI(t, m.tty, append(args, m.args...)...)
 				if code != sc.code {

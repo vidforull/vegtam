@@ -79,12 +79,13 @@ it, VEGTAM_NO_HISTORY=1 every run, and "# @no-log" one request.`,
 }
 
 func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
-	tr, err := f.net.transport(cfg)
+	pol, err := cfg.loadPolicy()
 	if err != nil {
 		return err
 	}
-	if f.net.insecure {
-		fmt.Fprint(cfg.errOut, insecureBanner)
+	tr, err := f.net.transport(cfg, pol)
+	if err != nil {
+		return err
 	}
 	t := parseTarget(arg)
 	s := session.New(session.Options{

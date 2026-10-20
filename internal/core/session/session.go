@@ -80,10 +80,11 @@ func New(opts Options) *Session {
 }
 
 // Masker returns a Masker for every secret the session has read or
-// captured so far, for the values of the cookies responses have set, and
-// for the credentials of Basic, which go in base64.
+// captured so far, for the values of the cookies responses have set, for
+// the credentials of Basic, which go in base64, and for the secrets of the
+// transport, such as the password of the proxy.
 func (s *Session) Masker() *core.Masker {
-	values := slices.Concat(s.cookies, s.credentials)
+	values := slices.Concat(s.cookies, s.credentials, s.opts.Transport.Secrets)
 	for _, v := range s.client.CookieValues() {
 		if len(v) >= minCookieSecret {
 			values = append(values, v)

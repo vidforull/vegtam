@@ -145,14 +145,60 @@ keeps a run out of it, `VEGTAM_NO_HISTORY=1` every run, and
 
 ## Transport
 
-`run` and `tui` take these flags; a `.http` or environment file never
-sets what weakens a check or belongs to the machine.
+What a request is sent with comes from three places, in this order:
+what vegtam does on its own, the operator's policy file, and the flags
+of `run` and `tui`. A `.http` or environment file may then only make a
+request stricter. What weakens a check or belongs to the machine never
+comes from a file, and when no person is at a terminal (stdin or stdout
+is not one, or `--json` is given, as for a script or an agent) it comes
+from the policy alone:
+
+| What | `.http` file | Flag, a person at a terminal | Flag, no person | Policy |
+|---|---|---|---|---|
+| time limits | lower only: `@connection-timeout`, `@timeout`, `@max-time` | `--connect-timeout`, `--read-timeout`, `--max-time` | the same | `limits`: ceilings on flags and directives |
+| HTTP version | the request line | `--http1.1`, `--http2`, `--http2-prior-knowledge` | the same | |
+| CAs | no | `--cacert` | the same | |
+| client certificate | no | `--cert`, `--key` | the same | |
+| unchecked certificates | no: an error | `--insecure`, every host | `--insecure`, only the hosts of `network.insecure_hosts` | `network.insecure_hosts` |
+| proxy | no: an error | the environment's, unless the policy names one | the policy's only | `network.proxy`, `network.no_proxy` |
+| loopback and private addresses | no | connected to | only those of `network.allow` | `network.allow` |
+| cloud metadata, link-local, multicast, unspecified addresses | no | never | never | never |
+| cookie jar | `@no-cookie-jar` | `--no-cookies` | the same | |
+
+The policy is `$XDG_CONFIG_HOME/vegtam/policy.json`
+(`~/.config/vegtam/policy.json` without `XDG_CONFIG_HOME`), and nothing
+else: never a file of a repository, nor of the current directory.
+Others must not be able to write it or its directory. Every field may
+be left out:
+
+```json
+{
+  "limits":  {"max_time_ceiling": "5m", "read_timeout_ceiling": "2m", "connect_timeout_ceiling": "30s"},
+  "network": {"allow": ["127.0.0.1:8080", "localhost:3000", "10.0.0.0/8"],
+              "proxy": "http://proxy.example:3128", "no_proxy": ["localhost"],
+              "insecure_hosts": ["dev.example:8443"]}
+}
+```
+
+`vegtam policy` prints it and what applies to a run; `vegtam policy
+--help` describes every field. A connection the policy does not allow
+fails before anything is sent, with exit code 6 and a message that
+names the entry to write: `address 127.0.0.1:8080 is private (loopback),
+and no person is at a terminal; allow it in policy: network.allow`. The
+address checked is the one each connection is made to, after the name
+is looked up; through a proxy, which connects out of sight, the target
+is looked up here and checked before the proxy gets the request, which
+tells the local resolver the name, with `socks5h` too. The proxy looks
+it up again, and may get another answer: its own rules are the last
+word there.
+
+The flags:
 
 | Flag | Default | Unlike curl |
 |---|---|---|
 | `--cacert <pem>` | the system's roots | adds to the system's roots; curl's replaces them |
 | `--cert <pem>`, `--key <pem>` | none | offered to the origin of each request as written, never after a redirect elsewhere; PEM only, the key unencrypted (`--key <(openssl pkey -in key.pem)`) |
-| `--insecure` | off | only when stdin and stdout are terminals, never with `--json`; a warning on every run |
+| `--insecure` | off | for a person at a terminal; without one, only for the hosts that the policy names in `network.insecure_hosts`; a warning on every run |
 | `--connect-timeout <time>` | 10s | the whole of getting a connection: DNS, TCP, a proxy's CONNECT, the TLS handshake |
 | `--read-timeout <time>` | 30s | no counterpart: how long the server may send nothing, once the request is sent |
 | `--max-time <time>` | 2m | curl has no limit by default; `--timeout` is the old name |
@@ -162,9 +208,11 @@ sets what weakens a check or belongs to the machine.
 A time is in seconds (`5`, `0.5`) or has a unit (`500ms`, `2m`, `1m30s`);
 `0` or `none` is no limit. Directives may lower the limits of a request, and the
 request line may ask for a version (see [docs/FORMAT.md](docs/FORMAT.md)).
-More differences: the proxy comes from `HTTPS_PROXY`, `HTTP_PROXY` and
-`NO_PROXY`, and one without a port uses that of its scheme (80, 443),
-where curl uses 1080; `--verbose` masks secrets, where curl's `-v`
+More differences: the proxy is the policy's, or for a person at a
+terminal that of `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`, and one
+without a port uses that of its scheme (80, 443, 1080 for SOCKS), where
+curl uses 1080 for all; `socks5` is `socks5h`, the proxy looks up the
+name, as in Go; `--verbose` masks secrets, where curl's `-v`
 prints `Authorization` and `Cookie` as they are; `SSLKEYLOGFILE` is not
 read; HTTP/3 is not supported.
 
