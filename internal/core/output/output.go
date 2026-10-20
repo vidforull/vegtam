@@ -1,5 +1,5 @@
 // Package output defines the JSON documents that run, show, list, import,
-// trust and policy print, and the JSON Schema that describes them. The documents are a
+// trust, policy and describe print, and the JSON Schema that describes them. The documents are a
 // contract for scripts and agents: fields are only ever added. Building a
 // document masks every secret value in it.
 package output
@@ -39,6 +39,7 @@ var Schema string
 //   - import: Import;
 //   - trust: Trust;
 //   - policy: Policy;
+//   - describe: Describe;
 //   - an error that ends a command before any request: Result.Error.
 type Document struct {
 	SchemaVersion int        `json:"schema_version"`
@@ -48,6 +49,7 @@ type Document struct {
 	Import        *Import    `json:"import,omitempty"`
 	Trust         []*Trusted `json:"trust,omitzero"`
 	Policy        *Policy    `json:"policy,omitempty"`
+	Describe      *Describe  `json:"describe,omitempty"`
 }
 
 // Result is the outcome of one request. Timing and the fields after it,
@@ -68,6 +70,7 @@ type Result struct {
 	Asserts    []Assert   `json:"asserts,omitempty"`  // nil without a response
 	Captures   []Capture  `json:"captures,omitempty"` // the values taken; nil without a response
 	Warnings   []Warning  `json:"warnings,omitempty"`
+	Confirm    *Confirm   `json:"confirm,omitempty"` // of a dry run: the confirmation that sending would need
 	Error      *Error     `json:"error,omitempty"`
 
 	last *Timing // of the last hop alone, for the text form
@@ -164,6 +167,31 @@ type Error struct {
 	Line      int       `json:"line,omitempty"`
 	Variables []string  `json:"variables,omitempty"`     // unresolved names, for kind "variable"
 	Phase     string    `json:"timeout_phase,omitempty"` // for kind "timeout": connect, read or total
+	Confirm   *Confirm  `json:"confirm,omitempty"`       // for kind "confirm"
+}
+
+// Confirm is what a request needs before it is sent: why, the request,
+// and the flag that confirms it.
+type Confirm struct {
+	Reason string  `json:"reason"` // core.ReasonMethod or core.ReasonNote
+	Method string  `json:"method"`
+	URL    string  `json:"url"`            // as written, its placeholders unresolved
+	Note   *string `json:"note,omitempty"` // the text of its @note, which may be empty; absent without one
+	Flag   string  `json:"flag"`
+}
+
+// NewConfirm returns c with every secret value hidden by m, or nil for
+// nil.
+func NewConfirm(c *core.Confirmation, m *core.Masker) *Confirm {
+	if c == nil {
+		return nil
+	}
+	out := &Confirm{Reason: c.Reason, Method: m.Mask(c.Method), URL: m.Mask(c.URL), Flag: m.Mask(c.Flag)}
+	if c.Note != nil {
+		note := m.Mask(*c.Note)
+		out.Note = &note
+	}
+	return out
 }
 
 // Listed is a request in a listing, as written.
@@ -175,6 +203,7 @@ type Listed struct {
 	Name       string      `json:"name,omitempty"`
 	Method     string      `json:"method"`
 	URL        string      `json:"url"`
+	Note       *string     `json:"note,omitempty"` // the text of its @note: it is not sent without a confirmation
 	Directives []Directive `json:"directives"`
 }
 
@@ -356,7 +385,10 @@ func NewError(err error, m *core.Masker) *Error {
 	if !ok {
 		return &Error{Kind: core.KindUsage, Message: m.Mask(err.Error())}
 	}
-	return &Error{Kind: e.Kind, Message: m.Mask(e.Msg), File: e.Source.File, Line: e.Source.Line, Variables: e.Variables, Phase: e.Phase}
+	return &Error{
+		Kind: e.Kind, Message: m.Mask(e.Msg), File: e.Source.File, Line: e.Source.Line, Variables: e.Variables, Phase: e.Phase,
+		Confirm: NewConfirm(e.Confirm, m),
+	}
 }
 
 // List returns the requests of f.
@@ -369,6 +401,9 @@ func List(f *core.File) []*Listed {
 		}
 		for _, d := range r.Directives {
 			l.Directives = append(l.Directives, Directive{d.Kind, d.Value})
+		}
+		if note, ok := r.Note(); ok {
+			l.Note = &note
 		}
 		list = append(list, l)
 	}

@@ -11,7 +11,7 @@ import (
 func TestCookieOutput(t *testing.T) {
 	fx := newFixture(t)
 	file := fx.cookieFile(t)
-	code, stdout, stderr := runCLI(t, true, "run", file, "-e", "test", "-v")
+	code, stdout, stderr := runCLI(t, true, "run", file, "-e", "test", "-v", "--confirm")
 	for _, want := range []string{
 		"Set-Cookie: session=***; Path=/; HttpOnly\nSet-Cookie: lang=***; Path=/\n",
 		"* cookies: set session, lang\n",
@@ -25,7 +25,7 @@ func TestCookieOutput(t *testing.T) {
 	if code != exitOK {
 		t.Errorf("exit code %d", code)
 	}
-	code, stdout, _ = runCLI(t, false, "run", file, "-e", "test")
+	code, stdout, _ = runCLI(t, false, "run", file, "-e", "test", "--confirm")
 	validateJSON(t, stdout)
 	for _, want := range []string{
 		`"cookies":{"set":[{"hop":0,"name":"session","domain":"127.0.0.1","path":"/","host_only":true,"secure":false,"http_only":true,"stored":true},`,
@@ -35,7 +35,7 @@ func TestCookieOutput(t *testing.T) {
 			t.Errorf("JSON lacks %s\n%s", want, stdout)
 		}
 	}
-	_, stdout, _ = runCLI(t, false, "run", file, "-e", "test", "--no-cookies")
+	_, stdout, _ = runCLI(t, false, "run", file, "-e", "test", "--no-cookies", "--confirm")
 	if !strings.Contains(stdout, `"reason":"the jar is off: --no-cookies"`) || strings.Contains(stdout, `"sent"`) || !strings.Contains(stdout, `"body":"{\"cookie\": \"\"}"`) {
 		t.Errorf("--no-cookies:\n%s", stdout)
 	}

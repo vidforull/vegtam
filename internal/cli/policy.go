@@ -11,6 +11,7 @@ import (
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/output"
+	"github.com/vidforull/vegtam/internal/core/policy"
 )
 
 func newPolicyCmd(cfg *Config) *cobra.Command {
@@ -34,7 +35,8 @@ vegtam does what it does on its own. Every field may be left out:
                 "insecure_hosts": ["dev.example:8443"],
                 "resolve": ["api.example:443:127.0.0.1"],
                 "connect_to": ["api.example:443:staging.example:8443"],
-                "unix_sockets": ["/var/run/docker.sock"]},
+                "unix_sockets": ["/var/run/docker.sock"],
+                "confirm": "mutations"},
     "hosts": {"api.internal.example:443": {"cacert": "~/certs/corp.pem",
               "cert": "~/certs/me.pem", "key": "~/certs/me.key"}}
   }
@@ -65,18 +67,20 @@ checked here, as the connection would be, before the proxy gets it.
 hosts gives an origin, host or host:port (443 if not given), CAs trusted
 for it alone, on top of the system's and --cacert's, and a client
 certificate offered to it alone. The paths are absolute, or ~/path; a
-key must be private to its owner.`,
+key must be private to its owner.
+
+network.confirm says which requests a run without a person sends only
+with --confirm: "mutations", the default, those whose method is not
+GET, HEAD or OPTIONS; "never" none of them, for an operator who trusts
+whatever runs vegtam. Only the policy says "never": no flag, variable
+or file can. A request with "# @note" needs --confirm whatever it says.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			pol, err := cfg.loadPolicy()
 			if err != nil {
 				return err
 			}
-			run := output.PolicyRun{Unattended: cfg.unattended()}
-			if proxy, _ := proxyOf(pol, run.Unattended, httpproxy.FromEnvironment(), "", nil); proxy != nil {
-				run.HTTPSProxy, run.HTTPProxy, run.NoProxy = output.ProxyURL(proxy.HTTPSProxy), output.ProxyURL(proxy.HTTPProxy), proxy.NoProxy
-			}
-			p := output.NewPolicy(pol, run)
+			p := cfg.policyDoc(pol)
 			if cfg.asJSON() {
 				cfg.writeJSON(output.Document{SchemaVersion: output.SchemaVersion, Policy: p})
 				return nil
@@ -85,6 +89,17 @@ key must be private to its owner.`,
 			return nil
 		},
 	}
+}
+
+// policyDoc returns pol as vegtam policy prints it, with what applies to
+// a run in the mode of this one.
+func (c *Config) policyDoc(pol *policy.Policy) *output.Policy {
+	run := output.PolicyRun{Unattended: c.unattended()}
+	run.ConfirmMutations = run.Unattended && pol.Network.ConfirmMutations()
+	if proxy, _ := proxyOf(pol, run.Unattended, httpproxy.FromEnvironment(), "", nil); proxy != nil {
+		run.HTTPSProxy, run.HTTPProxy, run.NoProxy = output.ProxyURL(proxy.HTTPSProxy), output.ProxyURL(proxy.HTTPProxy), proxy.NoProxy
+	}
+	return output.NewPolicy(pol, run)
 }
 
 // policyText returns p as text.
@@ -121,6 +136,7 @@ func policyText(p *output.Policy) string {
 			{"resolve", strings.Join(n.Resolve, ", ")},
 			{"connect to", strings.Join(n.ConnectTo, ", ")},
 			{"unix sockets", strings.Join(n.UnixSockets, ", ")},
+			{"confirm", n.Confirm},
 		} {
 			if row[1] != "" {
 				fmt.Fprintf(tw, "%s\t%s\n", row[0], row[1])
@@ -142,6 +158,11 @@ func policyText(p *output.Policy) string {
 		b.WriteString("\nThis run has no person at a terminal: loopback and private addresses only as network.allow names them.\n")
 	} else {
 		b.WriteString("\nThis run has a person at a terminal: loopback and private addresses are allowed.\n")
+	}
+	if r.ConfirmMutations {
+		b.WriteString("A method other than GET, HEAD or OPTIONS, and a request with # @note, are sent only with --confirm.\n")
+	} else {
+		b.WriteString("Any method is sent without --confirm; a request with # @note only with it.\n")
 	}
 	switch {
 	case r.HTTPSProxy == "" && r.HTTPProxy == "":

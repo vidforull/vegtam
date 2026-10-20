@@ -17,6 +17,7 @@ const (
 	KindImport   Kind = "import"   // an export from another tool cannot be read
 	KindAssert   Kind = "assert"   // an @assert check on the response failed
 	KindCapture  Kind = "capture"  // an @capture found no value in the response
+	KindConfirm  Kind = "confirm"  // the request needs a confirmation that the run does not give
 	KindPolicy   Kind = "policy"   // policy does not allow it: a command file that is not trusted, an address the network guard refuses, a policy file that cannot be read
 	KindCanceled Kind = "canceled" // the run was interrupted before the request or its command finished
 )
@@ -27,9 +28,26 @@ type Error struct {
 	Kind      Kind
 	Source    Source
 	Msg       string
-	Variables []string // unresolved names, for KindVariable
-	Phase     string   // what a KindTimeout ended: PhaseConnect, PhaseRead or PhaseTotal; "" if not known
+	Variables []string      // unresolved names, for KindVariable
+	Phase     string        // what a KindTimeout ended: PhaseConnect, PhaseRead or PhaseTotal; "" if not known
+	Confirm   *Confirmation // what a KindConfirm asks for
 }
+
+// Confirmation is what a request that is not sent without a confirmation
+// asks for.
+type Confirmation struct {
+	Reason string // ReasonMethod or ReasonNote
+	Method string
+	URL    string  // as written, its placeholders unresolved
+	Note   *string // the text of its @note, which may be empty; nil if it has none
+	Flag   string  // what confirms it, such as --confirm=api.http#create
+}
+
+// Why a request needs a confirmation.
+const (
+	ReasonMethod = "method" // its method may change something, and no person is at a terminal
+	ReasonNote   = "note"   // it has an @note, which asks a person to confirm it
+)
 
 // Errorf returns an *Error of kind k at src.
 func Errorf(k Kind, src Source, format string, args ...any) *Error {

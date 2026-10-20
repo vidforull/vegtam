@@ -63,8 +63,11 @@ shortcut of JetBrains, REST Client and httpyac, goes on the wire as
 password are a word each, literal text or placeholders, so that the
 password can stay in the private environment file. Words are split at
 the spaces of the text as written: the value of a secret may hold a
-space, a value of `http-client.env.json` may not. `Basic` and one word,
-the encoded form, is sent as it is. A user with a colon in it is an
+space, a value of `http-client.env.json` may not. One word with a colon
+in it, `Basic {{user}}:{{password}}` as REST Client and httpyac also
+write it, is the same shortcut, split at the first colon outside the
+secrets. `Basic` and one word without such a colon, the encoded form,
+is sent as it is: base64 has no colon. A user with a colon in it is an
 error, since Basic cannot carry it. The encoded form is masked like the
 secrets in it, and the header is dropped on a redirect to another
 origin, as every `Authorization` header is.
@@ -103,12 +106,14 @@ vegtam's own extensions are comments, so other tools ignore them:
 | `# @tag <tags>` | labels for selecting requests |
 | `# @no-log` | keeps the request out of the history of runs, as in JetBrains, kulala and httpyac |
 | `# @no-cookie-jar` | the request neither sends the cookies of the run nor keeps those its response sets (see [Cookies](#cookies)) |
+| `# @note [<text>]` | the request is not sent without a confirmation, as in httpyac; the text says why (see [Notes](#notes)) |
 | `# @timeout <time>` | lowers the read timeout, as in JetBrains: how long to wait for data once the request is sent |
 | `# @connection-timeout <time>` | lowers the connect timeout, as in JetBrains: DNS, TCP and the TLS handshake |
 | `# @max-time <time>` | lowers the time limit of the whole exchange, as curl's `--max-time` |
 
 Directives go before the request line or among the headers, and each
-but `@no-log` and `@no-cookie-jar`, which take none, needs a value. Their values are taken
+but `@no-log` and `@no-cookie-jar`, which take none, and `@note`, whose
+text may be left out, needs a value. Their values are taken
 as written: placeholders in them are not resolved, so
 `header Authorization == "Bearer {{token}}"` compares with that very
 text. `@tag` is kept with the request but not
@@ -128,6 +133,31 @@ lower the limit that the flag of the run gives (`--read-timeout`,
 itself hold to a ceiling: one above it, `0` included, is a warning, and
 the limit of the flag or the policy holds. Each comes once per request.
 
+### Notes
+
+`# @note <text>` says that a person must confirm the request before it
+is sent, whatever its method: the file's author asks for it, as
+httpyac, which shows the text in a dialog, does. The text is optional
+and comes once per request.
+
+```http
+### Deletes every draft
+# @name purge
+# @note Deletes every draft of every user, for good
+DELETE {{host}}/drafts
+```
+
+- The terminal interface asks before sending it, a GET too, and shows
+  the text in its question; a second enter sends it.
+- `vegtam run` sends it only with `--confirm`, or `--confirm=file#name`
+  naming it, with a person at a terminal too; without, the request is
+  an error of kind `confirm`, exit code 5, that shows the text. The
+  operator's policy cannot lift it.
+- `vegtam list` shows the text, and `note` in its JSON.
+
+The text comes from the file, so it is masked and shown with control
+characters as escapes, as everything vegtam prints is.
+
 ### Directives of other clients
 
 A `.http` file only ever makes the transport stricter: what weakens a
@@ -146,11 +176,10 @@ clients are errors that say what to use:
 | `@resolve`, `@connect-to`, `@unix-socket`, `@abstract-unix-socket` | curl's names | the flags of the same names, for a person at a terminal or as the operator's policy lists them |
 | `@setting insecure`, `proxy`, `http-root-cas`, `http-client-cert`, `http-client-key` | resterm | `--insecure`, the policy or the environment, `--cacert`, `--cert` and `--key` |
 
-`@note`, `@prompt`, `@sleep`, `@ratelimit` and resterm's other
-`@setting`s do not touch the transport: they are ignored with a warning,
-and the request runs. Note what that means for `@note`, with which
-httpyac asks before sending: vegtam does not ask, though the terminal
-interface asks before any method but GET, HEAD and OPTIONS.
+`@prompt`, `@sleep`, `@ratelimit` and resterm's other `@setting`s do
+not touch the transport: they are ignored with a warning, and the
+request runs. `@note`, which httpyac has too, is a directive of
+vegtam's: see [Notes](#notes).
 
 ### Assertions
 

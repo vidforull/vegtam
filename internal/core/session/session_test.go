@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -53,11 +54,13 @@ func newFile(t *testing.T) *core.File {
 }
 
 // TestCapturesCarryOver sends the requests one at a time, each prepared
-// just before it is sent, as the terminal interface does: the token one
-// request captures is sent by the next, and masked in its response.
+// just before it is sent, as the terminal interface does, a POST once a
+// person has confirmed it: the token one request captures is sent by the
+// next, and masked in its response.
 func TestCapturesCarryOver(t *testing.T) {
 	f := newFile(t)
 	s := New(Options{Env: "test", MaxBody: 1 << 20})
+	s.ConfirmOnce(f, 0)
 	login := s.Run(t.Context(), s.Prepare(t.Context(), f, 0))
 	if login.Error != nil || len(login.Captures) != 1 {
 		t.Fatalf("login = %+v, error %+v", login, login.Error)
@@ -78,7 +81,7 @@ func TestCapturesCarryOver(t *testing.T) {
 // captured variable is a placeholder rather than unresolved.
 func TestPreview(t *testing.T) {
 	f := newFile(t)
-	s := New(Options{Env: "test", MaxBody: 1 << 20})
+	s := New(Options{Env: "test", MaxBody: 1 << 20, Confirm: Confirm{Mutations: true}})
 	s.Run(t.Context(), s.Prepare(t.Context(), f, 0))
 	if got := s.Declared(); len(got) != 1 || got[0] != "token" {
 		t.Fatalf("Declared() = %q, want [token]", got)
@@ -190,7 +193,7 @@ func TestHistory(t *testing.T) {
 	}
 	log := history.New(filepath.Join(t.TempDir(), "vegtam"))
 	t.Chdir(dir)
-	s := New(Options{Env: "test", MaxBody: 1 << 20, History: log})
+	s := New(Options{Env: "test", MaxBody: 1 << 20, History: log, Confirm: Confirm{All: true}})
 	for _, r := range []struct {
 		f *core.File
 		i int
@@ -234,7 +237,7 @@ func TestHistory(t *testing.T) {
 	if err = os.WriteFile(blocked, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s = New(Options{Env: "test", MaxBody: 1 << 20, History: history.New(filepath.Join(blocked, "vegtam"))})
+	s = New(Options{Env: "test", MaxBody: 1 << 20, History: history.New(filepath.Join(blocked, "vegtam")), Confirm: Confirm{All: true}})
 	if res := s.Run(t.Context(), s.Prepare(t.Context(), f, 0)); res.Error != nil || s.HistoryError() == nil {
 		t.Errorf("with no place for the history: %+v, %v", res.Error, s.HistoryError())
 	}
@@ -261,7 +264,7 @@ func TestCookieJar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(Options{MaxBody: 1 << 20})
+	s := New(Options{MaxBody: 1 << 20, Confirm: Confirm{Mutations: true}})
 	login := s.Run(t.Context(), s.Prepare(t.Context(), f, 0))
 	me := s.Run(t.Context(), s.Prepare(t.Context(), f, 1))
 	if login.Response.Headers[3].Value != "sid=***" || login.Cookies == nil || me.Cookies == nil || len(me.Cookies.Sent) != 1 ||
@@ -283,5 +286,44 @@ func TestCookieJar(t *testing.T) {
 	other := New(Options{MaxBody: 1 << 20})
 	if res := other.Run(t.Context(), other.Prepare(t.Context(), f, 1)); res.Cookies != nil || res.Response.Body != `{"cookie": ""}` {
 		t.Errorf("another session: %+v, %s", res.Cookies, res.Response.Body)
+	}
+}
+
+// TestBasicOneWord sends credentials written as Basic and one word,
+// user:password, with the password a secret: they go encoded, and the
+// output hides them as it does for the two words of JetBrains.
+func TestBasicOneWord(t *testing.T) {
+	const password = "b4sic/pass+w0rd"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pw, ok := r.BasicAuth()
+		fmt.Fprintf(w, `{"user": %q, "password": %q, "ok": %v, "header": %q}`, user, pw, ok, r.Header.Get("Authorization"))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	files := map[string]string{
+		"api.http":                     "GET " + srv.URL + "/\nAuthorization: Basic {{user}}:{{password}}\n",
+		"http-client.env.json":         `{"test": {"user": "alice"}}`,
+		"http-client.private.env.json": `{"test": {"password": "` + password + `"}}`,
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f, err := httpfile.ParseFile(filepath.Join(dir, "api.http"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(Options{Env: "test", MaxBody: 1 << 20})
+	res := s.Run(t.Context(), s.Prepare(t.Context(), f, 0))
+	if res.Error != nil || res.Response == nil || !strings.Contains(res.Response.Body, `"user": "alice", "password": "***", "ok": true, "header": "Basic ***"`) {
+		t.Fatalf("result %+v, error %+v", res.Response, res.Error)
+	}
+	if got := res.Request.Headers[0].Value; got != "Basic alice:{{password}}" {
+		t.Errorf("request header = %q, want the password as its placeholder", got)
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte("alice:" + password))
+	if m := s.Masker(); m.Mask(encoded) != "***" || m.Mask("alice:"+password) != "***" {
+		t.Errorf("the masker does not hide the credentials: %q", m.Mask(encoded+" alice:"+password))
 	}
 }

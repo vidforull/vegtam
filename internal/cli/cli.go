@@ -9,6 +9,7 @@ import (
 	"io"
 	"runtime/debug"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -26,6 +27,7 @@ const (
 	exitUsage    = 2   // bad arguments, a file that does not parse, an unresolved variable, an invalid request, a capture without a value, an export that cannot be read
 	exitNetwork  = 3   // network or TLS error, timeout
 	exitStatus   = 4   // HTTP status 400 or above, with run --fail
+	exitConfirm  = 5   // a request that needs a confirmation the run does not give
 	exitPolicy   = 6   // not allowed by policy: a command file that is not trusted, an address the guard refuses, a policy file that cannot be read
 	exitCanceled = 130 // interrupted by Ctrl-C or SIGTERM: 128 + SIGINT, as a shell reports it
 	exitPanic    = 2   // a bug in vegtam: the code Go exits with on a panic
@@ -40,6 +42,8 @@ func exitCode(k core.Kind) int {
 		return exitNetwork
 	case core.KindStatus:
 		return exitStatus
+	case core.KindConfirm:
+		return exitConfirm
 	case core.KindPolicy:
 		return exitPolicy
 	case core.KindCanceled:
@@ -50,29 +54,69 @@ func exitCode(k core.Kind) int {
 	return exitUsage
 }
 
-const rootHelp = `vegtam is a local-first API client for .http files.
+// exitCodes are the exit codes and what each means, as the root
+// command's help and vegtam describe give them.
+var exitCodes = []struct {
+	code    int
+	meaning string
+}{
+	{exitOK, "success"},
+	{exitAssert, "an assertion (# @assert) failed"},
+	{exitUsage, "bad arguments, a .http or environment file that does not parse, an unresolved variable, an invalid request, " +
+		"a capture (# @capture) that finds no value, or an export that cannot be imported"},
+	{exitNetwork, "network or TLS error, or timeout"},
+	{exitStatus, "HTTP status 400 or above, with run --fail"},
+	{exitConfirm, `a request that is not sent without a confirmation, --confirm: one with "# @note", or, with no person ` +
+		"at a terminal, one whose method is not GET, HEAD or OPTIONS (see vegtam run --help)"},
+	{exitPolicy, "blocked by policy: a {{$cmd NAME}} whose command file is not trusted (see vegtam trust --help), " +
+		"an address that vegtam never connects to or that the operator's policy does not allow, " +
+		"or a policy file that cannot be read (see vegtam policy --help)"},
+	{exitCanceled, "interrupted by Ctrl-C (SIGINT) or SIGTERM"},
+}
+
+// rootHelp returns the help of vegtam itself, with the exit codes.
+func rootHelp() string {
+	var b strings.Builder
+	b.WriteString(`vegtam is a local-first API client for .http files.
 
 On a terminal vegtam prints text. Otherwise, or with --json, it prints JSON
-documents; "vegtam schema" prints their JSON Schema. Secret values never
-appear in the output. With no command, when stdin and stdout are
-terminals, vegtam opens the terminal interface on the current directory,
-as "vegtam tui" does.
+documents; "vegtam schema" prints their JSON Schema, and "vegtam describe"
+what a program needs to know to run vegtam. Secret values never appear in
+the output. With no command, when stdin and stdout are terminals, vegtam
+opens the terminal interface on the current directory, as "vegtam tui"
+does.
 
 Exit codes:
-  0  success
-  1  an assertion (# @assert) failed
-  2  bad arguments, a .http or environment file that does not parse, an
-     unresolved variable, an invalid request, a capture (# @capture)
-     that finds no value, or an export that cannot be imported
-  3  network or TLS error, or timeout
-  4  HTTP status 400 or above, with run --fail
-  5  reserved for requests that need confirmation
-  6  blocked by policy: a {{$cmd NAME}} whose command file is not
-     trusted (see vegtam trust --help), an address that vegtam never
-     connects to or that the operator's policy does not allow, or a
-     policy file that cannot be read (see vegtam policy --help)
-  130  interrupted by Ctrl-C (SIGINT) or SIGTERM
-With several requests, the exit code is the highest of theirs.`
+`)
+	for _, e := range exitCodes {
+		b.WriteString(wrap(fmt.Sprintf("  %d  ", e.code), e.meaning) + "\n")
+	}
+	b.WriteString("With several requests, the exit code is the highest of theirs.")
+	return b.String()
+}
+
+// helpWidth is the width that help text is wrapped at.
+const helpWidth = 72
+
+// wrap returns s after prefix, its words wrapped at helpWidth, each line
+// after the first indented as wide as prefix.
+func wrap(prefix, s string) string {
+	var b strings.Builder
+	line := prefix
+	for i, w := range strings.Fields(s) {
+		if i > 0 && len(line)+1+len(w) > helpWidth {
+			b.WriteString(line + "\n")
+			line = strings.Repeat(" ", len(prefix)) + w
+			continue
+		}
+		if i > 0 {
+			line += " "
+		}
+		line += w
+	}
+	b.WriteString(line)
+	return b.String()
+}
 
 // Config is what the commands need from the process.
 type Config struct {
@@ -227,7 +271,7 @@ func Run(ctx context.Context, args []string, cfg Config) (code int) {
 	root := &cobra.Command{
 		Use:           "vegtam",
 		Short:         "A local-first API client for .http files",
-		Long:          rootHelp,
+		Long:          rootHelp(),
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		// A person at a terminal gets the terminal interface; a program,
@@ -248,7 +292,7 @@ func Run(ctx context.Context, args []string, cfg Config) (code int) {
 	root.SetErr(cfg.errOut)
 	root.PersistentFlags().BoolVar(&cfg.json, "json", false, "print JSON even on a terminal")
 	root.AddCommand(newRunCmd(&cfg), newShowCmd(&cfg), newListCmd(&cfg), newTUICmd(&cfg), newImportCmd(&cfg),
-		newTrustCmd(&cfg), newPolicyCmd(&cfg), newSchemaCmd(&cfg), newVersionCmd(&cfg))
+		newTrustCmd(&cfg), newPolicyCmd(&cfg), newSchemaCmd(&cfg), newDescribeCmd(&cfg), newVersionCmd(&cfg))
 
 	cmd, err := root.ExecuteContextC(ctx)
 	if err == nil {

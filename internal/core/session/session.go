@@ -36,6 +36,10 @@ type Options struct {
 	// History keeps each request sent, outside a dry run, unless it has
 	// an @no-log directive; nil keeps none.
 	History *history.Log
+	// Confirm says which requests that need a confirmation are sent; its
+	// zero value sends none of them. A dry run sends nothing, and says in
+	// each result what sending it would need.
+	Confirm Confirm
 }
 
 // Session is one run: the environment loader that hands out variables and
@@ -49,6 +53,7 @@ type Session struct {
 	declared   []string        // the variables @capture directives take, in order
 	historyErr error           // why the entry of the latest run was not kept
 	warned     map[string]bool // the warnings of environment files a job has had
+	once       map[string]bool // the requests ConfirmOnce has confirmed, by Key
 	// Secret values that no file holds: the latest values of cookies that
 	// responses set, and the credentials of Basic written as user and
 	// password.
@@ -74,6 +79,7 @@ func New(opts Options) *Session {
 	return &Session{
 		opts:   opts,
 		warned: map[string]bool{},
+		once:   map[string]bool{},
 		loader: env.NewLoader(env.Options{Env: opts.Env, DryRun: opts.DryRun, Trust: opts.Trust, EnvHint: opts.EnvHint, Hidden: opts.Transport.HiddenEnv}),
 		client: exec.New(exec.Options{MaxBody: opts.MaxBody, UserAgent: opts.UserAgent, Transport: opts.Transport}),
 	}
@@ -135,6 +141,7 @@ type Job struct {
 	vars     *env.Vars
 	captures []string             // the variables its @capture directives take
 	classes  map[string]env.Class // of its placeholders, as it was prepared
+	ask      *core.Confirmation   // what it needs before it is sent; nil for nothing
 }
 
 // Class returns what the placeholder r of the request stands for, as the
@@ -142,7 +149,10 @@ type Job struct {
 func (j *Job) Class(r core.Ref) env.Class { return j.classes[r.String()] }
 
 // Prepare resolves the i-th request of f, then declares the variables its
-// captures take for the requests prepared after it.
+// captures take for the requests prepared after it. A request that needs
+// a confirmation it does not have is refused here, outside a dry run,
+// before it is resolved: nothing of it is sent, and none of its
+// {{$cmd NAME}} runs.
 func (s *Session) Prepare(ctx context.Context, f *core.File, i int) *Job {
 	j := &Job{Ref: output.Ref(f, i), Request: f.Requests[i]}
 	var warnings []core.Warning
@@ -160,7 +170,12 @@ func (s *Session) Prepare(ctx context.Context, f *core.File, i int) *Job {
 		}
 	}
 	j.Warnings = slices.Concat(j.Warnings, j.Request.Warnings, warnings)
-	if j.Err == nil {
+	j.ask = s.ask(f, i, j.Ref)
+	switch {
+	case j.Err != nil:
+	case j.ask != nil && !s.opts.DryRun:
+		j.Err = refused(j.Request, j.ask)
+	default:
 		j.classes = j.vars.Classes(j.Request)
 		j.Prepared, j.Err = j.vars.Prepare(ctx, j.Request)
 	}
@@ -214,9 +229,14 @@ func (s *Session) Run(ctx context.Context, j *Job) *output.Result {
 	if j.Request != nil {
 		res.Transport = output.NewTransport(j.settings)
 	}
+	if s.opts.DryRun && j.ask != nil {
+		res.Confirm = output.NewConfirm(j.ask, s.Masker())
+	}
 	err := j.Err
 	switch {
 	case err != nil:
+	case j.ask != nil && !s.opts.DryRun: // as Prepare refused it
+		err = refused(j.Request, j.ask)
 	case s.opts.DryRun:
 		var p *core.Prepared
 		if p, err = s.loader.Fill(j.Prepared); err == nil {

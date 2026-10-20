@@ -33,8 +33,9 @@ no command does the same.
 One pane lists the files and their requests, the next shows the selected
 request as it would be sent, its variables coloured, and the last the
 latest response. enter sends the request as vegtam run does, and esc
-cancels it; for a method other than GET, HEAD or OPTIONS it asks first,
-and only a second enter sends. / searches the list, y copies the request
+cancels it; for a method other than GET, HEAD or OPTIONS, and for a
+request with "# @note", it asks first, showing the note, and only a
+second enter sends. / searches the list, y copies the request
 as a curl command, z folds the JSON of the response, e chooses the
 environment, h lists the latest runs, tab moves between panes, ? lists
 the keys and q quits.

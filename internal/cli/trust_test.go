@@ -17,7 +17,8 @@ const cmdSecret = "Cmd-s3cr/et+v"
 
 // TestHelperProcess is not a test: the {{$cmd NAME}} tests run the test
 // binary as their command. It prints cmdSecret, or with "leak" fails with
-// cmdSecret on stderr, or with "sleep" waits to be killed.
+// cmdSecret on stderr, or with "sleep" waits to be killed, or with
+// "touch" first creates the file $VEGTAM_TEST_TOUCH.
 func TestHelperProcess(_ *testing.T) {
 	if os.Getenv("VEGTAM_TEST_HELPER") != "1" {
 		return
@@ -28,6 +29,10 @@ func TestHelperProcess(_ *testing.T) {
 		os.Exit(1)
 	case "sleep":
 		time.Sleep(time.Minute)
+	case "touch":
+		if err := os.WriteFile(os.Getenv("VEGTAM_TEST_TOUCH"), nil, 0o600); err != nil {
+			os.Exit(2)
+		}
 	}
 	fmt.Fprintln(os.Stdout, cmdSecret)
 	os.Exit(0)
@@ -75,7 +80,7 @@ func TestTrust(t *testing.T) {
 	// Not trusted yet: exit 6 with the command that trusts, and no command
 	// runs, not even for a dry run or show.
 	for _, args := range [][]string{
-		{"run", "cmd/key.http#echo", "-e", "test"},
+		{"run", "cmd/key.http#echo", "-e", "test", "--confirm"},
 		{"run", "cmd", "-e", "test", "--dry-run"},
 		{"show", "cmd/key.http#echo", "-e", "test"},
 	} {
@@ -95,7 +100,7 @@ func TestTrust(t *testing.T) {
 	}
 
 	// The value goes on the wire and is masked in the response.
-	code, stdout, _ = run(true, "run", "cmd/key.http#echo", "-e", "test")
+	code, stdout, _ = run(true, "run", "cmd/key.http#echo", "-e", "test", "--confirm")
 	if code != exitOK || !strings.Contains(stdout, `"authorization": "Bearer ***"`) || !strings.Contains(stdout, `"key": "***"`) {
 		t.Errorf("run trusted = %d\n%s", code, stdout)
 	}
@@ -136,7 +141,7 @@ func TestTrust(t *testing.T) {
 	if l := list(); len(l) != 1 || l[0].Status != "changed" {
 		t.Errorf("list after a change: %+v", l)
 	}
-	code, _, stderr = run(true, "run", "cmd/key.http#echo", "-e", "test")
+	code, _, stderr = run(true, "run", "cmd/key.http#echo", "-e", "test", "--confirm")
 	if code != exitPolicy || !strings.Contains(stderr, file+" has changed since it was trusted") {
 		t.Errorf("run changed = %d, %s", code, stderr)
 	}

@@ -475,6 +475,8 @@ func TestBasic(t *testing.T) {
 		{auth(lit("basic alice s3 ")), "alice:s3"},
 		{auth(lit("Basic YWxpY2U6dDBrZW4=")), "alice:t0ken"},
 		{auth(slices.Concat(lit("Basic "), secret("user"), lit(" x"))), "the user of Basic holds a colon"},
+		{auth(append(lit("Basic alice:"), secret("token")...)), "alice:t0ken"},
+		{auth(slices.Concat(lit("Basic "), secret("user"), lit(":x"))), "the user of Basic holds a colon"},
 	} {
 		r, _, err := New(Options{MaxBody: 1 << 20}).Do(t.Context(), prepared(http.MethodGet, lit(srv.URL), nil, tt.h), s)
 		got := fmt.Sprint(err)

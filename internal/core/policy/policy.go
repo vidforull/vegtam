@@ -67,11 +67,30 @@ type Network struct {
 	// person at a terminal: absolute paths, and "@name" for those of
 	// --abstract-unix-socket.
 	UnixSockets []string
+	// Confirm is which requests a run without a person at a terminal
+	// sends only with --confirm: ConfirmMutations, the default, or
+	// ConfirmNever; "" if the file does not say.
+	Confirm string
 }
 
 // ProxyEnvironment is the value of network.proxy that takes the proxy
 // from the environment.
 const ProxyEnvironment = "environment"
+
+// The values of network.confirm.
+const (
+	// ConfirmMutations: a request whose method is not GET, HEAD or OPTIONS
+	// needs --confirm.
+	ConfirmMutations = "mutations"
+	// ConfirmNever: any method goes without --confirm, for an operator who
+	// trusts what runs vegtam. A request with an @note still needs it.
+	ConfirmNever = "never"
+)
+
+// ConfirmMutations reports whether a run without a person at a terminal
+// sends a request whose method is not GET, HEAD or OPTIONS only with
+// --confirm.
+func (n Network) ConfirmMutations() bool { return n.Confirm != ConfirmNever }
 
 // Host is the TLS of one origin: CAs trusted for it alone, on top of the
 // system's, and a client certificate offered to it alone. The paths are
@@ -212,6 +231,7 @@ type file struct {
 		Resolve       []string `json:"resolve"`
 		ConnectTo     []string `json:"connect_to"`
 		UnixSockets   []string `json:"unix_sockets"`
+		Confirm       string   `json:"confirm"`
 	} `json:"network"`
 	Hosts map[string]struct {
 		CACert string `json:"cacert"`
@@ -270,6 +290,12 @@ func Parse(path string, b []byte) (*Policy, error) {
 				return nil, fail("network.unix_sockets: %v; or @name for an abstract one", err)
 			}
 			p.Network.UnixSockets = append(p.Network.UnixSockets, path)
+		}
+		switch n.Confirm {
+		case "", ConfirmMutations, ConfirmNever:
+			p.Network.Confirm = n.Confirm
+		default:
+			return nil, fail("network.confirm %q: want %q, the default, or %q", n.Confirm, ConfirmMutations, ConfirmNever)
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(f.Hosts)) {

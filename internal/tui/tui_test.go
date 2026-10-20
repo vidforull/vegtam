@@ -271,6 +271,46 @@ func TestEnvironment(t *testing.T) {
 	}
 }
 
+// TestSendNeedsConfirmation checks that the session holds the
+// confirmation, not the interface alone: a POST sent without the
+// question is refused, and the server gets nothing.
+func TestSendNeedsConfirmation(t *testing.T) {
+	fx := newFixture(t)
+	m := newModel(t, fx.dir, "test", 150, 40)
+	goTo(t, m, "create")
+	run(m, m.sendSelected(false))
+	if got := fx.asked(); len(got) != 0 || m.result == nil || m.result.Error == nil || m.result.Error.Kind != core.KindConfirm {
+		t.Errorf("the server had %q; result %+v", got, m.result)
+	}
+	run(m, m.sendSelected(true))
+	if got := fx.asked(); len(got) != 1 || m.result.Error != nil {
+		t.Errorf("confirmed: the server had %q; error %+v", got, m.result.Error)
+	}
+}
+
+// TestSendNote checks a request with an @note: the interface asks before
+// sending it, a GET too, with the note in the question, masked and made
+// fit for the terminal; enter again sends it.
+func TestSendNote(t *testing.T) {
+	fx := newFixture(t)
+	src := "# @name noted\n# @note Sends {{token}} " + privateSecret + " \x1b]0;t\x07 \u202edone\nGET {{host}}/echo?key={{token}}\n"
+	if err := os.WriteFile(filepath.Join(fx.dir, "note.http"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(t, fx.dir, "test", 150, 40)
+	goTo(t, m, "noted")
+	press(m, "enter")
+	v := view(m)
+	if m.mode != confirming || !strings.Contains(v, "Send GET") || !strings.Contains(v, `Sends {{token}} *** \x1b]0;t\x07 \u202edone`) ||
+		strings.Contains(v, privateSecret) || strings.Contains(v, "\x1b]0;t") || len(fx.asked()) != 0 {
+		t.Fatalf("enter on a GET with a note does not ask with the note:\n%s", v)
+	}
+	press(m, "enter")
+	if got := fx.asked(); len(got) != 1 || got[0] != "GET /echo" || m.result == nil || m.result.Error != nil {
+		t.Errorf("enter again: the server had %q", got)
+	}
+}
+
 func TestSend(t *testing.T) {
 	fx := newFixture(t)
 	m := newModel(t, fx.dir, "test", 150, 40)

@@ -28,7 +28,9 @@ as written. Secrets appear as their placeholders, such as {{token}}. A
 {{$cmd NAME}} is checked against the trust store, with exit code 6 if
 its command file is not trusted, but its command does not run. The
 timeouts shown are those that vegtam run gives the request without its
-flags, with the ceilings of the operator's policy (see vegtam policy).`,
+flags, with the ceilings of the operator's policy (see vegtam policy).
+show sends nothing, so it reads nothing else that the policy names: a
+CA file or the variable of the proxy's credentials cannot stop it.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			f, i, err := parseTarget(args[0]).request()
@@ -40,12 +42,10 @@ flags, with the ceilings of the operator's policy (see vegtam policy).`,
 				return err
 			}
 			// The limits of the run, with the policy's ceilings; nothing is
-			// sent, so what the policy says of the network does not matter.
+			// sent, so what the policy says of TLS and the proxy does not
+			// matter, and a file or a variable it names must not stop show.
 			defaults := newNetFlags()
-			tr, _, err := defaults.merged(cfg, pol)
-			if err != nil {
-				return err
-			}
+			tr := defaults.offline(pol)
 			st, warnings := exec.New(exec.Options{Transport: tr}).Settings(f.Requests[i])
 			res := &output.Result{Ref: output.Ref(f, i), Request: output.Written(f.Requests[i]), Transport: output.NewTransport(st)}
 			warnings = slices.Concat(f.Requests[i].Warnings, warnings)
@@ -83,7 +83,9 @@ func newListCmd(cfg *Config) *cobra.Command {
 		Short: "List the requests of .http files",
 		Long: `List the requests of a .http file, or of the .http files in a directory
 and below it: how to refer to each, its method and URL as written, and
-its directives. Files that do not parse are reported, the rest listed.`,
+its directives, the text of "# @note" among them: such a request is not
+sent without --confirm. Files that do not parse are reported, the rest
+listed.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			paths, err := httpfile.Files(args[0])
@@ -130,15 +132,20 @@ its directives. Files that do not parse are reported, the rest listed.`,
 // column.
 var trailingSpace = regexp.MustCompile(`(?m) +$`)
 
-// directives summarises ds: how many asserts and captures, the tags, and
-// whether the history keeps the request.
+// directives summarises ds: how many asserts and captures, the tags,
+// whether the history keeps the request, and the text of its @note, last
+// since it may hold anything.
 func directives(ds []output.Directive) string {
 	count := map[string]int{}
 	var tags []string
+	note := ""
 	for _, d := range ds {
 		count[d.Kind]++
-		if d.Kind == "tag" {
+		switch d.Kind {
+		case "tag":
 			tags = append(tags, d.Value)
+		case core.Note:
+			note = strings.TrimSpace("@note " + d.Value)
 		}
 	}
 	var parts []string
@@ -153,6 +160,9 @@ func directives(ds []output.Directive) string {
 	if count[core.NoLog] > 0 {
 		parts = append(parts, "@"+core.NoLog)
 	}
+	if note != "" {
+		parts = append(parts, note)
+	}
 	return strings.Join(parts, ", ")
 }
 
@@ -161,8 +171,8 @@ func newSchemaCmd(cfg *Config) *cobra.Command {
 		Use:   "schema",
 		Short: "Print the JSON Schema of the JSON output",
 		Long: `Print the JSON Schema (draft 2020-12) of the JSON documents that run,
-show, list, import and trust print. Fields are only ever added; schema_version
-changes if one has to change its meaning or go away.`,
+show, list, import, trust, policy and describe print. Fields are only ever
+added; schema_version changes if one has to change its meaning or go away.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			fmt.Fprint(cfg.out, output.Schema)

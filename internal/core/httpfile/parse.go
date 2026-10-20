@@ -153,9 +153,10 @@ func (p *parser) comment(n int, t string) error {
 		if value != "" {
 			return p.errorf(n, "@%s takes no value", kind)
 		}
+	case kind == core.Note: // its text may be empty
 	case !directives[kind]:
 		return p.errorf(n, "unknown directive @%s (supported: @name, @assert, @capture, @tag, @no-log, "+
-			"@no-cookie-jar, @timeout, @connection-timeout, @max-time)", kind)
+			"@no-cookie-jar, @note, @timeout, @connection-timeout, @max-time)", kind)
 	case value == "":
 		return p.errorf(n, "@%s needs a value", kind)
 	}
@@ -164,6 +165,8 @@ func (p *parser) comment(n int, t string) error {
 		if _, err := core.ParseTimeout(value); err != nil {
 			return p.errorf(n, "@%s %s: %v", kind, value, err)
 		}
+	}
+	if kind == core.Timeout || kind == core.ConnectionTimeout || kind == core.MaxTime || kind == core.Note {
 		if slices.ContainsFunc(r.Directives, func(d core.Directive) bool { return d.Kind == kind }) {
 			return p.errorf(n, "@%s given twice", kind)
 		}
@@ -325,7 +328,7 @@ func foreign(kind, value string) (msg string, refused, ok bool) {
 			return refuse("resterm", "sets "+name, instead)
 		}
 		return fmt.Sprintf("@setting %s (resterm) is not supported: ignored", name), false, true
-	case "note", "sleep", "ratelimit":
+	case "sleep", "ratelimit":
 		return fmt.Sprintf("@%s (httpyac) is not supported: ignored", kind), false, true
 	case "prompt":
 		return "@prompt (JetBrains, httpyac) is not supported: ignored", false, true

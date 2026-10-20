@@ -39,6 +39,7 @@ type PolicyNetwork struct {
 	Resolve       []string `json:"resolve,omitempty"`
 	ConnectTo     []string `json:"connect_to,omitempty"`
 	UnixSockets   []string `json:"unix_sockets,omitempty"`
+	Confirm       string   `json:"confirm,omitempty"` // mutations or never, as written
 }
 
 // PolicyHost is the TLS of one origin.
@@ -59,6 +60,9 @@ type PolicyRun struct {
 	HTTPSProxy string `json:"https_proxy,omitempty"` // for https URLs; absent for none
 	HTTPProxy  string `json:"http_proxy,omitempty"`  // for http URLs
 	NoProxy    string `json:"no_proxy,omitempty"`    // the hosts that go direct, as NO_PROXY writes them
+	// ConfirmMutations is true when vegtam run sends a request whose
+	// method is not GET, HEAD or OPTIONS only with --confirm.
+	ConfirmMutations bool `json:"confirm_mutations"`
 }
 
 // NewPolicy returns p as vegtam policy prints it, with run, what applies.
@@ -71,8 +75,9 @@ func NewPolicy(p *policy.Policy, run PolicyRun) *Policy {
 		out.Limits = &PolicyLimits{MaxTimeMS: ms(l.MaxTime), ReadMS: ms(l.Read), ConnectMS: ms(l.Connect)}
 	}
 	n := p.Network
-	if len(n.Allow) > 0 || n.Proxy != "" || len(n.NoProxy) > 0 || len(n.InsecureHosts) > 0 || len(n.Resolve) > 0 || len(n.ConnectTo) > 0 || len(n.UnixSockets) > 0 {
-		out.Network = &PolicyNetwork{Proxy: n.Proxy, NoProxy: n.NoProxy, InsecureHosts: n.InsecureHosts, UnixSockets: n.UnixSockets}
+	if len(n.Allow) > 0 || n.Proxy != "" || len(n.NoProxy) > 0 || len(n.InsecureHosts) > 0 || len(n.Resolve) > 0 || len(n.ConnectTo) > 0 ||
+		len(n.UnixSockets) > 0 || n.Confirm != "" {
+		out.Network = &PolicyNetwork{Proxy: n.Proxy, NoProxy: n.NoProxy, InsecureHosts: n.InsecureHosts, UnixSockets: n.UnixSockets, Confirm: n.Confirm}
 		for _, e := range n.Allow {
 			out.Network.Allow = append(out.Network.Allow, e.String())
 		}

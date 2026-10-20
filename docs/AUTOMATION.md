@@ -1,16 +1,67 @@
 # Automation: driving vegtam from scripts and agents
 
 vegtam is meant to be run by programs as much as by people: shell scripts,
-CI jobs and AI agents. What they can rely on is the JSON output, its
-schema, the exit codes and the way secrets are kept out of both. This
-document describes that contract.
+CI jobs and agents. What they can rely on is the JSON output, its
+schema, the exit codes, the way secrets are kept out of both, and what
+the operator allows a run without a person. This document is that
+contract; `vegtam describe` prints a summary of it, for the version at
+hand and the mode it runs in.
 
 ```sh
+vegtam describe --json                    # the version, the commands, the exit codes, the mode and the policy
 vegtam list api/                          # what is there to run
-vegtam show api/users.http#list -e dev    # what a request would send
-vegtam run api/users.http#list -e dev     # send it
+vegtam run api/ -e dev --dry-run          # what each request would send, and what needs a confirmation
+vegtam run api/users.http#list -e dev     # send one
 vegtam run api/ -e dev --fail             # send everything, fail on HTTP errors
 ```
+
+## How a program runs vegtam
+
+1. **`vegtam describe --json`** first: the commands and their flags, the
+   exit codes and the kinds of error, whether vegtam sees a person at a
+   terminal, the operator's policy and what of it applies, where the
+   history goes. `vegtam schema` prints the JSON Schema of every
+   document. A policy file that cannot be read does not stop describe:
+   `policy_error` says why, in place of `policy`, and the exit code is
+   6, as every command that reads the policy would give.
+2. **`list`** and **`run --dry-run`** to see the requests and what they
+   would send. Nothing is sent; a request that would need a
+   confirmation has `confirm` in its result.
+3. **Ask a person** about each such request, showing its method, its URL
+   and its note, and pass only what they confirmed: `--confirm=<ref>`
+   (see [Confirmation](#confirmation)).
+4. **`run`**, and read the JSON document on stdout and the exit code.
+   `--no-history` keeps the run out of the history of runs.
+5. On exit code 5 or 6, or an error of kind `confirm` or `policy`, **stop
+   and ask a person**: the message says what they can do. Do not try
+   another flag, address or name to get past it.
+
+A program cannot weaken the transport, read a secret, get past the
+network guard or confirm a request on its own: a run without a person
+gets what the operator's policy allows, and no more (see
+[Modes](#modes)). No file, response or environment variable can
+confirm a request; only `--confirm`, which the program passes once a
+person has said so. The operator allows more in the policy file, never
+through vegtam's arguments.
+
+## Modes
+
+A person is at a terminal when stdin and stdout are terminals and
+`--json` is not given. Otherwise no person is: a script, a CI job or an
+agent. `vegtam policy` and `vegtam describe` say which mode applies, in
+`run.unattended` and `mode`.
+
+| | A person at a terminal | No person |
+|---|---|---|
+| Loopback and private addresses | connected to | only as `network.allow` names them |
+| Cloud metadata, link-local, multicast, unspecified addresses | never | never |
+| Proxy | `--proxy`, else the policy's, else the environment's | the policy's `network.proxy`, or none; `--proxy` and `--proxy-auth` are usage errors |
+| `--insecure` | every host, with a warning | only the hosts of `network.insecure_hosts` |
+| `--resolve`, `--connect-to`, `--unix-socket` | as given | only as `network.resolve`, `network.connect_to` and `network.unix_sockets` list them |
+| A method other than GET, HEAD and OPTIONS | `run` sends it; the terminal interface asks first | only with `--confirm`, unless `network.confirm` is `"never"` |
+| `# @note` | only with `--confirm`; the terminal interface asks first | only with `--confirm`, whatever the policy says |
+| `{{$cmd NAME}}` | only from a command file a person has trusted | the same |
+| History of runs | kept, unless `--no-history`, `VEGTAM_NO_HISTORY=1` or `# @no-log` | the same |
 
 ## The terminal interface is for people
 
@@ -25,7 +76,7 @@ and `list` do with output a program can read.
 ## Output
 
 When stdout is not a terminal, or with `--json`, `run`, `show`, `list`,
-`import`, `trust` and `policy` print one JSON document to stdout,
+`import`, `trust`, `policy` and `describe` print one JSON document to stdout,
 followed by a newline. On a terminal
 the output is text for people, and `--json` prints the same document
 indented. Nothing else is written to stdout; diagnostics go to stderr.
@@ -36,13 +87,14 @@ command and on its argument, never on what happens at run time:
 
 | Command | Document |
 |---|---|
-| `run <file>#<ref>` | one result: `ref`, `request`, `transport`, `response`, `timing`, `remote_addr`, `resolved_by`, `proxy`, `tls`, `redirects`, `cookies`, `asserts`, `captures`, `warnings`, `error` |
+| `run <file>#<ref>` | one result: `ref`, `request`, `transport`, `response`, `timing`, `remote_addr`, `resolved_by`, `proxy`, `tls`, `redirects`, `cookies`, `asserts`, `captures`, `warnings`, `confirm`, `error` |
 | `run <file>`, `run <dir>` | `results`: one result per request, in file order |
 | `show <file>#<ref>` | one result with `ref`, `request`, `transport` and `warnings` only |
 | `list <file>`, `list <dir>` | `requests` |
 | `import postman <export> -o <dir>` | `import`: the report of the import |
 | `trust <dir>`, `trust --revoke <dir>`, `trust --list` | `trust`: the command files and their status |
 | `policy` | `policy`: the operator's policy and what applies to a run |
+| `describe` | `describe`: what a program needs to know to run vegtam |
 | an error that ends a command before any request | `error` only |
 
 A result for `run api/users.http#list -e dev` looks like this (shortened):
@@ -174,7 +226,10 @@ A result for `run api/users.http#list -e dev` looks like this (shortened):
   the unresolved placeholders, such as `host` or `$env TOKEN`, or the
   captured variables without a value. For `kind: "timeout"`,
   `timeout_phase` says which limit ran out: `connect`, `read` or
-  `total`.
+  `total`. For `kind: "confirm"`, `confirm` says what the request needs
+  (see [Confirmation](#confirmation)).
+- **`confirm`**, in the result of a dry run, is what sending the request
+  would need: the same as `error.confirm`.
 
 ### Stability
 
@@ -192,7 +247,7 @@ by its exit code.
 | 2 | bad arguments, a `.http` or environment file that does not parse, an unresolved variable, an invalid request, a capture (`# @capture`) that found no value, or an export that cannot be imported |
 | 3 | network or TLS error, or timeout |
 | 4 | HTTP status 400 or above, with `run --fail` |
-| 5 | reserved: the request needs confirmation |
+| 5 | a request that is not sent without a confirmation, `--confirm`: one with `# @note`, or, without a person at a terminal, one whose method is not GET, HEAD or OPTIONS |
 | 6 | blocked by policy: a `{{$cmd NAME}}` whose command file is not trusted, an address vegtam never connects to or that the operator's policy does not allow, or a policy file that cannot be read |
 | 130 | interrupted: Ctrl-C (SIGINT) or SIGTERM stopped a request or a `{{$cmd NAME}}` |
 
@@ -216,6 +271,7 @@ The outcome of every assertion is in `asserts` all the same.
 | `network` | 3 | DNS, connection, TLS, redirects |
 | `timeout` | 3 | a time limit ran out; `timeout_phase` says which: `connect`, `read` or `total` |
 | `status` | 4 | HTTP status 400 or above, with `--fail` |
+| `confirm` | 5 | a request not sent without `--confirm`; `confirm` says what confirms it |
 | `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write; an address that vegtam never connects to, or a loopback or private one that the operator's policy does not allow; a policy file that does not parse, or that others can write |
 | `canceled` | 130 | SIGINT or SIGTERM came while a request waited for its response or a command ran; the requests after it are canceled too |
 
@@ -248,10 +304,13 @@ and the URL or header that holds it is left unchecked.
 
 A dry run also runs no command: `{{$cmd NAME}}` is checked against the
 trust store and the command file, and the request shows the
-placeholder.
+placeholder. It needs no confirmation either: a request that a run
+with the same flags would refuse has `confirm` in its result, so that a
+program can ask a person once for all it needs.
 
 `show <file>#<ref>` prints one request as written, or with `-e` as it would
-be sent; like a dry run, it runs no command.
+be sent; like a dry run, it runs no command. It sends nothing, so of
+the policy it reads only the ceilings of the time limits.
 
 ## Importing
 
@@ -306,13 +365,76 @@ allows of the network.
   `status`: `trusted`, `changed` or `missing`.
 - A request with a `{{$cmd NAME}}` from a file that is not trusted fails
   with kind `policy` and exit code 6 before anything is sent, also with
-  `--dry-run` and `show -e`, and whatever else is wrong with it.
+  `--dry-run` and `show -e`, and whatever else is wrong with it but a
+  confirmation it lacks, which stops it before it is resolved (see
+  [Confirmation](#confirmation)).
 
 Trusting is a decision for a person, who reads the commands first. A
 program that gets a `policy` error should stop and ask, not run `vegtam
 trust` itself: the error message names the command for the person to
-run. The confirmation of unsafe methods, with exit code 5, is still to
-come.
+run.
+
+### Confirmation
+
+Without a person at a terminal, a request whose method is not GET,
+HEAD or OPTIONS is not sent without `--confirm`: TRACE, CONNECT and any
+other method included. A request with `# @note` (see
+[FORMAT.md](FORMAT.md#notes)) is not sent without it in any mode. Such
+a request is an error of kind `confirm`, exit code 5, before it is
+resolved: nothing of it is sent, none of its `{{$cmd NAME}}` runs, and
+the trust of its command file is not checked yet; a dry run checks
+both.
+The other requests of the run go on, and a variable that it would have
+captured has no value for them.
+
+```sh
+vegtam run api/users.http#delete -e dev --json
+```
+
+```json
+{
+  "schema_version": 1,
+  "ref": "api/users.http#delete",
+  "transport": {"connect_timeout_ms": 10000, "read_timeout_ms": 30000, "max_time_ms": 120000},
+  "error": {
+    "kind": "confirm",
+    "message": "DELETE {{host}}/users/{{id}} is not sent without a confirmation, which its @note asks for (--confirm=api/users.http#delete sends it): Deletes the user and every token of ***",
+    "file": "api/users.http",
+    "line": 12,
+    "confirm": {
+      "reason": "note",
+      "method": "DELETE",
+      "url": "{{host}}/users/{{id}}",
+      "note": "Deletes the user and every token of ***",
+      "flag": "--confirm=api/users.http#delete"
+    }
+  }
+}
+```
+
+- **`reason`** is `note` for a request with `# @note`, and `method` for a
+  method that needs a person; **`url`** is as written, its placeholders
+  unresolved, with secret values masked; **`note`** is the text of the
+  note, which may be empty; **`flag`** is what confirms the request.
+- **`--confirm`** alone confirms every request of the run, and
+  **`--confirm=<ref>[,<ref>...]`** those named, `file#name` or `file#N`
+  as `run` takes them; a file is the same file however it is written.
+  A ref that names no request of the run is a usage error before
+  anything is sent. The value needs the `=`: `--confirm api.http#a` is
+  `--confirm` and an argument, which a run with its own argument refuses
+  as a usage error.
+- **`network.confirm`** in the operator's policy is `"mutations"`, the
+  default, or `"never"`, which lets a run without a person send any
+  method. It does not lift `# @note`, and nothing else can set it: no
+  flag, variable or file.
+- A person's `vegtam run` sends any method without a question, and a
+  request with `# @note` only with `--confirm`. The terminal interface
+  asks before either, and a second enter sends.
+
+`--confirm` is a flag of the program's command line: vegtam cannot tell
+who chose it. A program passes it for a request only once a person who
+saw the method, the URL and the note has said to send it, and never
+`--confirm` alone to get past a refusal.
 
 ### The operator's policy
 
@@ -320,8 +442,9 @@ A program runs without a person at a terminal: stdin or stdout is not a
 terminal, or `--json` is given. Such a run gets what the operator's
 policy, `$XDG_CONFIG_HOME/vegtam/policy.json`, allows, and no more; a
 file, a response or the program's own arguments cannot widen it.
-`vegtam policy --json` prints it, with `run.unattended`, the proxies a
-run goes through and the addresses never connected to; `vegtam policy
+`vegtam policy --json` prints it, with `run.unattended`,
+`run.confirm_mutations`, the proxies a run goes through and the
+addresses never connected to; `vegtam policy
 --help` describes every field.
 
 - **Addresses.** vegtam never connects to the metadata services of
@@ -368,6 +491,9 @@ run goes through and the addresses never connected to; `vegtam policy
 - **TLS by host.** `hosts` gives an origin CAs trusted for it alone and a
   client certificate offered to it alone, in every mode.
 - **Limits.** `limits.*_ceiling` hold every flag and directive.
+- **Confirmation.** `network.confirm: "never"` lets a run without a
+  person send any method without `--confirm` (see
+  [Confirmation](#confirmation)).
 
 The policy is the operator's to write. A program that gets a `policy`
 error for an address should stop and tell a person which entry would
@@ -446,8 +572,9 @@ them:
 - in everything else, such as response headers and bodies and error
   messages, every secret value is replaced with `***`, including its URL-
   and JSON-escaped and base64-encoded forms. So are the credentials of
-  `Authorization: Basic {{user}} {{password}}`, which go in base64, and
-  the values of cookies. A JSON body is also masked in its decoded
+  `Authorization: Basic {{user}} {{password}}` and
+  `Basic {{user}}:{{password}}`, which go in base64, and the values of
+  cookies. A JSON body is also masked in its decoded
   strings, so a value is found however the server escaped it. A body cut
   off by `--max-body` in the middle of a value has that part masked too;
   a binary body is masked before it is base64-encoded;
@@ -476,7 +603,8 @@ took, the `result` (`ok` or the error kind) and `truncated`. It holds no
 header, body, variable value or captured value, and no URL as resolved:
 nothing a secret could be in; a password written in a URL is kept as
 `***`. A dry run, a file that does not parse and
-a request with `# @no-log` are not kept. A program that wants no trace
+a request with `# @no-log` are not kept; a request refused for want of
+a confirmation is, with the result `confirm`. A program that wants no trace
 passes `--no-history`, or sets `VEGTAM_NO_HISTORY=1` for every run. A
 history that cannot be written is a warning on stderr, not an error: the
 exit code and the output stay as they are.

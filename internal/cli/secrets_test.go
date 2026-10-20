@@ -92,6 +92,7 @@ func TestNoSecretInOutput(t *testing.T) {
 		{"secret host that redirects", []string{"run", transport + "#moved"}, exitOK, "***", ""},
 		{"session cookie", []string{"run", fx.cookieFile(t)}, exitOK, "***", ""},
 		{"Basic", []string{"run", transport + "#basic"}, exitOK, "Basic ***", ""},
+		{"Basic in one word", []string{"run", transport + "#basic-word"}, exitOK, "Basic ***", ""},
 		{"redirect error", []string{"run", api + "#hops"}, exitNetwork, "stopped after 10 redirects", ""},
 		{"unknown CA", []string{"run", transport + "#untrusted"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}", ""},
 		{"no client certificate", []string{"run", transport + "#mtls", "--cacert", fx.ca}, exitNetwork, "pass --cert and --key", ""},
@@ -121,6 +122,9 @@ func TestNoSecretInOutput(t *testing.T) {
 					setPolicy(t, fx, sc.policy)
 				}
 				args := append(append([]string{}, sc.args...), "-e", "test")
+				if sc.args[0] == "run" {
+					args = append(args, "--confirm")
+				}
 				code, stdout, stderr := runCLI(t, m.tty, append(args, m.args...)...)
 				if code != sc.code {
 					t.Errorf("exit code %d, want %d\nstdout: %s\nstderr: %s", code, sc.code, stdout, stderr)

@@ -210,7 +210,7 @@ func (m *Model) key(k tea.KeyPressMsg) tea.Cmd {
 		}
 		m.mode = browsing
 		if key.Matches(k, m.keys.Send) {
-			return m.sendSelected()
+			return m.sendSelected(true)
 		}
 		m.note = "not sent"
 		return nil
@@ -417,8 +417,9 @@ func (m *Model) match() []int {
 	return shown
 }
 
-// confirmSend sends the selected request, or asks first if its method
-// may change something on the server.
+// confirmSend sends the selected request, or asks first if it needs a
+// confirmation: the session sends nothing that needs one unless told
+// that a person gave it (see session.Confirm).
 func (m *Model) confirmSend() tea.Cmd {
 	r := m.rows[m.cursor]
 	switch {
@@ -428,8 +429,8 @@ func (m *Model) confirmSend() tea.Cmd {
 		m.note = "select a request to send it"
 	case m.flight != nil:
 		m.note = "a request is in flight; esc cancels it"
-	case slices.Contains([]string{"GET", "HEAD", "OPTIONS"}, strings.ToUpper(r.file.Requests[r.index].Method)):
-		return m.sendSelected()
+	case session.Confirm{}.Needs(r.file.Requests[r.index]) == "":
+		return m.sendSelected(false)
 	default:
 		m.mode, m.asked = confirming, m.now()
 	}

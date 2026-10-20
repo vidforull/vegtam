@@ -984,3 +984,97 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   new. `--unix-socket @x` is a file, as curl reads it; only
   `--abstract-unix-socket` names an abstract socket. The guard has no
   address to check there.
+
+## 2026-10-20: the agent contract
+
+- **Confirmation without a person.** A script or an agent, which a file
+  or a response may lead, sends a request whose method is not GET, HEAD
+  or OPTIONS only with `--confirm`; without it, the request is an error
+  of kind `confirm`, exit code 5, which the root help had kept for it.
+  It fails closed: TRACE, CONNECT and any method vegtam does not know
+  need it too. Beside the message, `error.confirm` names the method, the
+  URL and the flag that confirms it. The URL is as written, its
+  placeholders unresolved, so that no value of a variable shows, and
+  masked all the same; the result's ref names the request.
+- **One place, strict by default.** The session, which the CLI and the
+  terminal interface send through and nothing else, refuses such a
+  request, and the zero value of its option is the strict one: a caller
+  that forgets to set it sends nothing that needs a confirmation. It
+  refuses in `Prepare`, before the request is resolved: nothing is sent
+  and no `{{$cmd NAME}}` runs. Its command file's trust is not checked
+  then either, so a request that lacks both says 5 first, and 6 after
+  `--confirm`; a dry run says both at once. The terminal interface asks,
+  and tells the session that a person answered, for that one send. The
+  captures of a refused request are lost, as those of one that failed,
+  and the history keeps it with the result `confirm`, as it keeps one
+  that failed before it was sent.
+- **`--confirm` and its `=`.** `--confirm` alone confirms every request
+  of the run, and `--confirm=file#name,file#N` those it names, which must
+  be requests of the run, compared by absolute path and by position, or
+  the run is a usage error before anything is sent: a typo must not let
+  the run go on as if it had confirmed something. The value is optional,
+  through pflag's `NoOptDefVal`, so it needs the `=`: `--confirm
+  api.http#a` is `--confirm` and an argument, and `run` takes one, so
+  with a target as well it is a usage error; alone, the argument is the
+  target, and `--confirm` confirms its requests and no others. The value
+  of `--confirm` alone is `all`, which no ref can be, having no `#`.
+- **"never" is the policy's alone.** `network.confirm: "never"` lifts the
+  rule for runs without a person, for an operator who trusts whatever
+  runs vegtam, such as CI over reviewed files. It weakens a check, and
+  whoever writes the arguments, the environment or a `.http` file is
+  what the check is for, so no flag, variable or file can say it: only
+  the operator's file, as for every other weakening. An unknown value is
+  a policy error, exit code 6, as other bad values are. `vegtam policy`
+  says which rule applies, in `run.confirm_mutations`.
+- **A person's run is not asked.** `vegtam run` at a terminal sends any
+  method, as before. The person typed the command and its argument; a
+  question would teach them to answer yes, and break the loops they
+  write in a shell. The terminal interface still asks, since there one
+  key sends whatever the cursor is on.
+- **`@note` asks for a person.** httpyac shows the text of `# @note` and
+  asks before sending; vegtam ignored it with a warning, so that a
+  file's own request for a person went unheard. A request with one is
+  now sent only once confirmed, in every mode: the terminal interface
+  asks, for a GET too, with the note in its question, and `vegtam run`
+  refuses it with exit code 5 and the note until `--confirm`, a person's
+  run too, since one who runs a directory may not have read every file.
+  `network.confirm: "never"` does not lift it: the operator trusts the
+  program that runs vegtam, and the file's author asked for a person.
+  The text may be empty; it comes from the file, so it is masked and
+  shown with escapes on a terminal, as all such text is, and is given
+  whole after the message's colon: quoting it would hide a secret value
+  in it from the masker.
+- **Dry runs say what would be asked.** A dry run sends nothing and needs
+  no confirmation; its result has `confirm` when a run with the same
+  flags would refuse the request, so that a program can ask a person
+  once, for every `--confirm=` it needs.
+- **`vegtam describe`.** One document for a program that meets vegtam:
+  the version, the commands and their flags, the exit codes and the
+  kinds of error, the mode and why, the policy as `vegtam policy` prints
+  it, what vegtam never does, and where the schema and the history are.
+  The commands and flags come from the command line itself, hidden and
+  deprecated ones left out, and the exit codes from the table that the
+  root help is now built from, so that neither drifts; a test holds the
+  kinds of error to their codes. A policy file that cannot be read does
+  not stop it: a program calls describe first, and should learn why
+  every other command would exit 6, so the document comes whole, with
+  `policy_error` in place of `policy`, and the exit code is 6. Each claim
+  of `never` is one that the code holds, and its tests check.
+- **One contract.** `docs/AUTOMATION.md` is the contract for programs:
+  how to run vegtam, what the modes allow, how to confirm, what the
+  operator decides. `vegtam describe` is its summary at run time. There
+  is no other file of instructions for them, which would drift from it.
+- **show reads only what it needs of the policy.** It sends nothing,
+  so it takes the ceilings of the time limits and the variable that no
+  request may read, and leaves TLS by host and the proxy's credentials
+  alone: a CA file that cannot be read or a `proxy_auth` variable that
+  is not set made it exit 6, though nothing would have gone out.
+- **Basic in one word.** `Basic {{user}}:{{password}}`, as REST Client
+  and httpyac write it, goes on the wire as the two words of JetBrains
+  do, base64 and all, and its credentials are masked as theirs are. A
+  colon in the text marks it, split at the first: base64 has none, so
+  an encoded value is never taken for the shortcut. A colon inside a
+  secret does not count, since what a file writes, not what a secret
+  holds, decides how the header goes: `Basic {{credentials}}`, a
+  secret, is sent as it is, as before. A plain variable's value is text
+  by then, as in REST Client.

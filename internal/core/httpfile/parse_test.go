@@ -270,11 +270,32 @@ func TestForeignWarnings(t *testing.T) {
 		}
 	}
 	want := []string{
-		"x.http:1: @note (httpyac) is not supported: ignored", "x.http:2: @sleep (httpyac) is not supported: ignored",
+		"x.http:2: @sleep (httpyac) is not supported: ignored",
 		"x.http:4: @setting timeout (resterm) is not supported: ignored",
 		"x.http:6: @prompt (JetBrains, httpyac) is not supported: ignored", "x.http:7: @ratelimit (httpyac) is not supported: ignored",
 	}
-	if !slices.Equal(got, want) || len(f.Requests[0].Directives) != 0 {
+	// @note is vegtam's too: see TestNote.
+	if !slices.Equal(got, want) || !slices.Equal(f.Requests[0].Directives, []core.Directive{{Kind: core.Note, Value: "sure?", Line: 1}}) {
 		t.Errorf("warnings = %q, directives %v", got, f.Requests[0].Directives)
+	}
+}
+
+// TestNote checks the @note directive: its text, which may be empty, as
+// written, and once per request.
+func TestNote(t *testing.T) {
+	f, err := Parse("x.http", []byte("# @note  Deletes {{what}}, for good \nDELETE https://example.com\n\n###\n// @note\nGET https://example.com\n\n###\nGET https://example.com\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []struct {
+		text string
+		ok   bool
+	}{{"Deletes {{what}}, for good", true}, {"", true}, {"", false}} {
+		if text, ok := f.Requests[i].Note(); text != want.text || ok != want.ok {
+			t.Errorf("request %d: Note() = %q, %v; want %q, %v", i, text, ok, want.text, want.ok)
+		}
+	}
+	if _, err := Parse("x.http", []byte("# @note a\n# @note b\nGET https://example.com\n")); err == nil || !strings.Contains(err.Error(), "x.http:2: @note given twice") {
+		t.Errorf("two notes: %v", err)
 	}
 }

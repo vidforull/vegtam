@@ -60,6 +60,11 @@ func TestParse(t *testing.T) {
 		strings.Join(p.Network.UnixSockets, " ") != "/var/run/docker.sock "+filepath.Join(home, "run", "api.sock")+" @vegtam" {
 		t.Errorf("unix_sockets: %+v, %v", p, err)
 	}
+	for in, want := range map[string]bool{`{}`: true, `{"network": {"confirm": "mutations"}}`: true, `{"network": {"confirm": "never"}}`: false} {
+		if p, err := Parse("policy.json", []byte(in)); err != nil || p.Network.ConfirmMutations() != want {
+			t.Errorf("%s: ConfirmMutations() = %v, %v; want %v", in, p.Network.ConfirmMutations(), err, want)
+		}
+	}
 	for _, other := range []string{`{}`, `{"limits": {}, "network": {}}`, `{"network": {"proxy": "environment", "insecure_hosts": ["[::1]:8443"]}}`} {
 		if p, err := Parse("policy.json", []byte(other)); err != nil || p.Limits != (Limits{}) || len(p.Network.Allow) != 0 {
 			t.Errorf("%s: %+v, %v", other, p, err)
@@ -97,6 +102,9 @@ func TestParseErrors(t *testing.T) {
 		`{"hosts": {"api.example": {"cacert": "/ca.pem", "pass": "x"}}}`:   `unknown field "pass"`,
 		`{"network": {"unix_sockets": ["api.sock"]}}`:                      `network.unix_sockets: "api.sock": want an absolute path`,
 		`{"network": {"unix_sockets": ["@"]}}`:                             `network.unix_sockets: "@": want an absolute path`,
+		`{"network": {"confirm": "always"}}`:                               `network.confirm "always": want "mutations", the default, or "never"`,
+		`{"network": {"confirm": "Never"}}`:                                `network.confirm "Never"`,
+		`{"network": {"confirm": true}}`:                                   "cannot unmarshal bool",
 	} {
 		_, err := Parse("policy.json", []byte(in))
 		if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != core.KindPolicy || !strings.Contains(err.Error(), want) {
@@ -213,6 +221,7 @@ func FuzzParsePolicy(f *testing.F) {
 	for _, s := range []string{
 		fullPolicy, `{}`, `{"network": {"allow": ["[::1]:80", "fd00::/8"]}}`, `{"network": {"insecure_hosts": ["[::1]:8443"]}}`, `{"hosts": {"[::1]:8443": {"cacert": "/x"}}}`,
 		`{"network": {"resolve": ["a.example:443:[::1],10.0.0.1"], "connect_to": ["[::1]:80::8080", ":::"]}}`,
+		`{"network": {"confirm": "never"}}`, `{"network": {"confirm": "mutations", "allow": ["127.0.0.1"]}}`,
 	} {
 		f.Add([]byte(s))
 	}
@@ -236,6 +245,10 @@ func FuzzParsePolicy(f *testing.F) {
 		}
 		if p.Network.ProxyAuth != "" && p.Network.Proxy == "" {
 			t.Errorf("proxy_auth without a proxy: %+v", p.Network)
+		}
+		// Only "never", in full, lifts the rule on methods.
+		if c := p.Network.Confirm; c != "" && c != ConfirmMutations && c != ConfirmNever || p.Network.ConfirmMutations() != (c != ConfirmNever) {
+			t.Errorf("confirm %q", c)
 		}
 		// A route lists as the flag that it allows is written.
 		for _, r := range p.Network.Resolve {

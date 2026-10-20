@@ -272,7 +272,7 @@ func TestMerge(t *testing.T) {
 // secret.
 func TestGuardRun(t *testing.T) {
 	fx := newFixture(t)
-	echo := []string{"run", fx.path("api.http") + "#echo", "-e", "test"}
+	echo := []string{"run", fx.path("api.http") + "#echo", "-e", "test", "--confirm"}
 	for _, tt := range []struct {
 		name     string
 		policy   string
@@ -434,6 +434,39 @@ func TestPolicyCeilings(t *testing.T) {
 	}
 }
 
+// TestShowOffline checks that show, which sends nothing, takes from the
+// policy only its ceilings and the variable no request may read: a CA it
+// cannot read and a proxy_auth variable that is not set stop run, not
+// show.
+func TestShowOffline(t *testing.T) {
+	fx := newFixture(t)
+	t.Setenv("VEGTAM_TEST_UNSET_AUTH", "")
+	if err := os.Unsetenv("VEGTAM_TEST_UNSET_AUTH"); err != nil {
+		t.Fatal(err)
+	}
+	writePolicy(t, `{"limits": {"max_time_ceiling": "1m"}, "network": {"allow": ["127.0.0.1"], "proxy": "http://127.0.0.1:9", "proxy_auth": "$env VEGTAM_TEST_UNSET_AUTH"}, `+
+		`"hosts": {"127.0.0.1": {"cacert": "/nonexistent/vegtam/ca.pem"}}}`)
+	echo := fx.path("api.http") + "#fail"
+	for _, args := range [][]string{{"show", echo}, {"show", echo, "-e", "test"}} {
+		code, stdout, stderr := runCLI(t, false, args...)
+		if code != exitOK || !strings.Contains(stdout, `"max_time_ms":60000`) || stderr != "" {
+			t.Errorf("%q = %d\n%s\n%s", args, code, stdout, stderr)
+		}
+		validateJSON(t, stdout)
+	}
+	if code, _, stderr := runCLI(t, false, "run", echo, "-e", "test"); code != exitPolicy {
+		t.Errorf("run = %d, want %d: %s", code, exitPolicy, stderr)
+	}
+	// The variable stays one that no request may read.
+	if err := os.WriteFile(fx.path("steal.http"), []byte("GET http://127.0.0.1:9/?c={{$env VEGTAM_TEST_UNSET_AUTH}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := runCLI(t, false, "show", fx.path("steal.http")+"#1", "-e", "test"); code != exitPolicy ||
+		!strings.Contains(stderr, "holds the credentials of the proxy") {
+		t.Errorf("show -e of the hidden variable = %d, %s", code, stderr)
+	}
+}
+
 // TestInsecureHosts runs --insecure without a person at a terminal: only
 // the hosts the policy names go unchecked.
 func TestInsecureHosts(t *testing.T) {
@@ -479,7 +512,7 @@ func TestEnvironmentProxy(t *testing.T) {
 	if code != exitOK || stderr != "" || !slices.Equal(sent, []string{"http://192.0.2.1/x"}) {
 		t.Errorf("with a person = %d, the proxy got %q\n%s\n%s", code, sent, stdout, stderr)
 	}
-	echo := []string{"run", fx.path("api.http") + "#echo", "-e", "test"}
+	echo := []string{"run", fx.path("api.http") + "#echo", "-e", "test", "--confirm"}
 	code, _, stderr = runCLI(t, false, echo...)
 	if code != exitOK || !strings.Contains(stderr, "warning: the proxy of the environment (HTTPS_PROXY, HTTP_PROXY) is not used without a person at a terminal") {
 		t.Errorf("%q = %d, %s", echo, code, stderr)

@@ -46,6 +46,11 @@ GET {{host}}/echo
 GET {{host}}/echo
 Authorization: Basic alice {{token}}
 
+### Basic in one word, user:password, as REST Client writes it
+# @name basic-word
+GET {{host}}/echo
+Authorization: Basic alice:{{token}}
+
 ### A host from the private file, which redirects to itself
 # @name moved
 GET {{live}}/moved?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
@@ -135,7 +140,7 @@ func TestTLSFlags(t *testing.T) {
 	}{
 		{"unknown CA", true, untrusted, exitNetwork, "", "certificate signed by unknown authority: add the CA that signed it with --cacert"},
 		{"--cacert", false, append(untrusted, "--cacert", fx.ca), exitOK, `"tls_verified":true`, ""},
-		{"http", false, []string{"run", fx.path("api.http") + "#echo", "-e", "test"}, exitOK, `"tls_verified":false`, ""},
+		{"http", false, []string{"run", fx.path("api.http") + "#echo", "-e", "test", "--confirm"}, exitOK, `"tls_verified":false`, ""},
 		{"--insecure", true, append(untrusted, "--insecure"), exitOK, "HTTP/1.1 200 OK", insecureBanner},
 		{"--insecure, not at a terminal", false, append(untrusted, "--insecure"), exitUsage, `"kind":"usage","message":"` + refused, refused},
 		{"--insecure --json", true, append(untrusted, "--insecure", "--json"), exitUsage, `"kind": "usage"`, refused},
@@ -255,7 +260,7 @@ func TestHTTPVersionFlags(t *testing.T) {
 func TestForeignSettings(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string]string{
-		"a.http":                       "# @note sure?\nGET https://example.test/a\n\n###\nGET https://example.test/b\n",
+		"a.http":                       "# @sleep 100\nGET https://example.test/a\n\n###\nGET https://example.test/b\n",
 		"b.http":                       "# @no-reject-unauthorized\nGET https://example.test/c\n",
 		"sub/c.http":                   "GET https://example.test/d\n", // the same environment files
 		"http-client.env.json":         `{"dev": {}}`,
@@ -282,7 +287,7 @@ func TestForeignSettings(t *testing.T) {
 		t.Fatalf("run = %d\n%s\n%s", code, stdout, stderr)
 	}
 	ignored := "dev.SSLConfiguration.verifyHostCertificate is ignored"
-	if w := doc.Results[0].Warnings; len(w) != 2 || !strings.HasPrefix(w[0].Message, ignored) || w[1].Message != "@note (httpyac) is not supported: ignored" {
+	if w := doc.Results[0].Warnings; len(w) != 2 || !strings.HasPrefix(w[0].Message, ignored) || w[1].Message != "@sleep (httpyac) is not supported: ignored" {
 		t.Errorf("warnings of the first request: %+v", w)
 	}
 	if w := doc.Results[1].Warnings; len(w) != 0 {

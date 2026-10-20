@@ -81,7 +81,7 @@ func TestRunCaptures(t *testing.T) {
 
 	// The secrets captured at sign-in are masked in the very response they
 	// come from, and the next request sends them.
-	code, stdout, stderr := runCLI(t, true, "run", "login.http", "-e", "test")
+	code, stdout, stderr := runCLI(t, true, "run", "login.http", "-e", "test", "--confirm")
 	want := `### login.http#before
 HTTP/1.1 200 OK (TIME)
 
@@ -126,7 +126,7 @@ HTTP/1.1 200 OK (TIME)
 		tty, json bool
 		args      []string
 	}{{true, false, []string{"-v"}}, {false, true, nil}, {true, true, []string{"--json", "-v"}}} {
-		code, stdout, stderr = runCLI(t, m.tty, append([]string{"run", "login.http", "-e", "test"}, m.args...)...)
+		code, stdout, stderr = runCLI(t, m.tty, append([]string{"run", "login.http", "-e", "test", "--confirm"}, m.args...)...)
 		if found := flowLeaks(stdout + stderr); len(found) > 0 || code != exitOK {
 			t.Errorf("run %q = %d, secret forms %q in the output\n%s\n%s", m.args, code, found, stdout, stderr)
 		}
@@ -163,7 +163,7 @@ HTTP/1.1 200 OK (TIME)
 	type outcome struct{ ref, kind, msg string }
 	runDir := func() (int, []outcome, *output.Document) {
 		t.Helper()
-		c, out, errOut := runCLI(t, false, "run", ".", "-e", "test")
+		c, out, errOut := runCLI(t, false, "run", ".", "-e", "test", "--confirm")
 		validateJSON(t, out)
 		if found := flowLeaks(out + errOut); len(found) > 0 {
 			t.Errorf("run .: secret forms %q in the output\n%s\n%s", found, out, errOut)

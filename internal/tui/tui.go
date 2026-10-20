@@ -171,14 +171,18 @@ type (
 )
 
 // sendSelected sends the selected request with the session, as vegtam
-// run does, and returns the command that brings back the result. The
+// run does, and returns the command that brings back the result;
+// confirmed says that the person was asked, and said to send it. The
 // session reads the files again first, so that what is sent is what the
 // preview showed, and runs the commands again. The request runs on a
 // goroutine of its own, which Run waits for: Bubble Tea does not wait for
 // the commands it runs, and drops one it is handed as the program ends.
-func (m *Model) sendSelected() tea.Cmd {
+func (m *Model) sendSelected(confirmed bool) tea.Cmd {
 	r := m.rows[m.cursor]
 	m.send.Reload()
+	if confirmed {
+		m.send.ConfirmOnce(r.file, r.index)
+	}
 	ctx, cancel := context.WithCancel(m.ctx)
 	fl := &flight{ref: output.Ref(r.file, r.index), cancel: cancel, done: make(chan struct{})}
 	go fl.send(ctx, m.send, r)

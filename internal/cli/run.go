@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -27,6 +28,7 @@ type runFlags struct {
 	maxBody   byteSize
 	verbose   bool
 	noHistory bool
+	confirm   confirmFlag
 	net       netFlags
 }
 
@@ -61,7 +63,20 @@ Each request sent goes into the history of runs, which keeps where it is
 written, its method and URL as written, and how it ended, and never a
 secret: $XDG_DATA_HOME/vegtam/history.jsonl, or
 ~/.local/share/vegtam/history.jsonl. --no-history keeps this run out of
-it, VEGTAM_NO_HISTORY=1 every run, and "# @no-log" one request.`,
+it, VEGTAM_NO_HISTORY=1 every run, and "# @no-log" one request.
+
+Without a person at a terminal (stdin or stdout is not one, or --json
+is given), a request whose method is not GET, HEAD or OPTIONS is not
+sent without --confirm: it is an error of kind confirm, exit code 5,
+that names the flag to give, and the other requests run. --confirm
+alone confirms every request of the run; --confirm=file#name,file#N
+only those, which must be requests of the run. The value needs the =:
+"--confirm file#name" is --confirm and an argument. The operator's
+policy may let such a run send any method (network.confirm, see vegtam
+policy --help). A request with "# @note" needs --confirm in every mode,
+with a person at a terminal too, whatever the policy says: its file
+asks for a person, and the error shows the note. A dry run needs no
+confirmation: each result says, in confirm, what sending it would need.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return run(cmd.Context(), cfg, f, args[0])
@@ -74,6 +89,8 @@ it, VEGTAM_NO_HISTORY=1 every run, and "# @no-log" one request.`,
 	fl.Var(&f.maxBody, "max-body", "response body bytes to keep, such as 64KiB or 10MB; the rest is not read")
 	fl.BoolVarP(&f.verbose, "verbose", "v", false, "print the request and the response headers too")
 	fl.BoolVar(&f.noHistory, "no-history", false, "keep this run out of the history of runs")
+	fl.Var(&f.confirm, "confirm", "send the requests that need a confirmation: all of them, or --confirm=file#name,file#N those (with =)")
+	fl.Lookup("confirm").NoOptDefVal = confirmAll
 	f.net.add(fl)
 	return cmd
 }
@@ -88,10 +105,17 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 		return err
 	}
 	t := parseTarget(arg)
+	// A person at a terminal runs what they typed; a script or an agent,
+	// which a file or a response may lead, sends what may change something
+	// only with --confirm, unless the operator's policy trusts it.
+	confirm := session.Confirm{Mutations: !cfg.unattended() || !pol.Network.ConfirmMutations(), All: f.confirm.all}
+	if confirm.Requests, err = t.confirmed(f.confirm.refs); err != nil {
+		return err
+	}
 	s := session.New(session.Options{
 		Env: f.env, DryRun: f.dryRun, Trust: policy.DefaultStore(), Transport: tr,
 		MaxBody: int64(f.maxBody), UserAgent: "vegtam/" + cfg.Version, Fail: f.fail,
-		History: cfg.history(f.noHistory || f.dryRun),
+		History: cfg.history(f.noHistory || f.dryRun), Confirm: confirm,
 	})
 	cfg.secrets = s.Masker
 	jobs, err := t.jobs(ctx, s)
@@ -196,6 +220,111 @@ func (t target) jobs(ctx context.Context, s *session.Session) ([]*session.Job, e
 	}
 	return []*session.Job{s.Prepare(ctx, f, i)}, nil
 }
+
+// confirmed returns the keys (see session.Key) of the requests that refs
+// name, as --confirm= gives them. Each must be a request of the run t,
+// or the run is a usage error before anything is sent: a ref that names
+// nothing must not let the run go on as if it had confirmed something.
+// Files are compared as absolute paths, not as typed.
+func (t target) confirmed(refs []string) ([]string, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	var in func(key string) bool
+	if t.one {
+		f, i, err := t.request()
+		if err != nil {
+			return nil, err
+		}
+		k, err := session.Key(f.Path, i)
+		if err != nil {
+			return nil, usage("%v", err)
+		}
+		in = func(key string) bool { return key == k }
+	} else {
+		paths, err := httpfile.Files(t.path)
+		if err != nil {
+			return nil, err
+		}
+		var files []string
+		for _, p := range paths {
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				return nil, usage("%v", err)
+			}
+			files = append(files, abs)
+		}
+		in = func(key string) bool {
+			file, _, _ := strings.CutLast(key, "#")
+			return slices.Contains(files, file)
+		}
+	}
+	var keys []string
+	for _, ref := range refs {
+		c := parseTarget(ref)
+		if !c.one {
+			return nil, usage("--confirm=%s: name a request, file#name or file#N", ref)
+		}
+		f, i, err := c.request()
+		if err != nil {
+			return nil, usage("--confirm=%s: %v", ref, err)
+		}
+		k, err := session.Key(f.Path, i)
+		if err != nil {
+			return nil, usage("%v", err)
+		}
+		if !in(k) {
+			return nil, usage("--confirm=%s is not a request of this run, %s", ref, t.arg())
+		}
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+// arg returns t as the argument of run wrote it.
+func (t target) arg() string {
+	if t.one {
+		return t.path + "#" + t.ref
+	}
+	return t.path
+}
+
+// confirmFlag is --confirm: alone, it confirms every request of the run,
+// and --confirm=<ref>[,<ref>...] the requests named.
+type confirmFlag struct {
+	all  bool
+	refs []string
+}
+
+// confirmAll is what --confirm alone sets. A ref has a "#", so no ref is
+// taken for it. A value needs the "=": "--confirm api.http#a" is
+// --confirm and an argument, which run, of one argument, refuses.
+const confirmAll = "all"
+
+func (c *confirmFlag) Set(v string) error {
+	if v == confirmAll {
+		c.all = true
+		return nil
+	}
+	for ref := range strings.SplitSeq(v, ",") {
+		if !strings.Contains(ref, "#") {
+			return fmt.Errorf("%q: want file#name or file#N, the requests to confirm, or --confirm alone for all", ref)
+		}
+		c.refs = append(c.refs, ref)
+	}
+	return nil
+}
+
+func (c *confirmFlag) String() string {
+	if c.all {
+		return confirmAll
+	}
+	return strings.Join(c.refs, ",")
+}
+
+// Type is empty, so that the help writes --confirm[=all], without a
+// value after the flag that would read as one to give there.
+func (c *confirmFlag) Type() string { return "" }
 
 // byteSize is a size flag: a number of bytes, optionally with a unit.
 type byteSize int64

@@ -113,12 +113,29 @@ func merge(pol *policy.Policy, f *netFlags, unattended bool, proxyEnv *httpproxy
 		Connect: time.Duration(f.connect), Read: time.Duration(f.read), Total: time.Duration(f.maxTime),
 		NoCookies: f.noCookies, Guard: netguard.Rules{Unattended: unattended, Allow: slices.Clone(pol.Network.Allow)},
 	}}
-	for _, step := range []func() error{m.version, m.limits, m.tls, m.routes, m.socket, func() error { return m.proxy(proxyEnv, lookup) }} {
+	m.limits()
+	for _, step := range []func() error{m.version, m.tls, m.routes, m.socket, func() error { return m.proxy(proxyEnv, lookup) }} {
 		if err := step(); err != nil {
 			return exec.Transport{}, nil, err
 		}
 	}
 	return m.tr, m.warnings, nil
+}
+
+// offline returns the transport of a command that sends nothing, as show:
+// the time limits of f with the ceilings of the policy pol, and the
+// variable of the proxy's credentials, which no request may read. It
+// reads no file and no variable, so that a CA of hosts.* that cannot be
+// read, or a proxy_auth variable that is not set, cannot stop it.
+func (f *netFlags) offline(pol *policy.Policy) exec.Transport {
+	m := &merger{pol: pol, f: f, tr: exec.Transport{Connect: time.Duration(f.connect), Read: time.Duration(f.read), Total: time.Duration(f.maxTime)}}
+	m.limits()
+	// As proxyUser names it for a run without --proxy-auth: the policy's
+	// credentials go with its own proxy, a URL.
+	if n := pol.Network; n.ProxyAuth != "" && n.Proxy != "" && n.Proxy != policy.ProxyEnvironment {
+		m.tr.HiddenEnv = append(m.tr.HiddenEnv, n.ProxyAuth)
+	}
+	return m.tr
 }
 
 // merger is the state of merge.
@@ -154,7 +171,7 @@ func (m *merger) version() error {
 // limits holds the time limits of the flags to the ceilings of the
 // policy: a limit above one, or none, is the ceiling, with a warning if
 // the flag was given.
-func (m *merger) limits() error {
+func (m *merger) limits() {
 	if m.f.timeoutUsed {
 		m.warnings = append(m.warnings, "--timeout is now --max-time, and --read-timeout limits too, 30s unless given; the old name will go away")
 	}
@@ -178,7 +195,6 @@ func (m *merger) limits() error {
 		}
 		*l.limit, *l.from = l.max, "the policy's limits."+l.ceiling
 	}
-	return nil
 }
 
 // tls reads the files of the TLS flags and of the policy's hosts. Without

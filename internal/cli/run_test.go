@@ -130,7 +130,7 @@ more/plain.http#1  GET     {{host}}/plain
 		t.Run(tt.name, func(t *testing.T) {
 			args := tt.args
 			if args[0] == "run" {
-				args = append(args, "-e", "test")
+				args = append(args, "-e", "test", "--confirm")
 			}
 			code, stdout, stderr := runCLI(t, true, args...)
 			stderr = port.ReplaceAllString(normalize(fx, stderr), "127.0.0.1:PORT")
@@ -149,7 +149,7 @@ func TestRunJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	// One request: one result.
-	code, stdout, _ := runCLI(t, false, "run", fx.path("api.http#echo"), "-e", "test")
+	code, stdout, _ := runCLI(t, false, "run", fx.path("api.http#echo"), "-e", "test", "--confirm")
 	validateJSON(t, stdout)
 	var one output.Document
 	decode(t, stdout, &one)
@@ -229,7 +229,7 @@ plain\x1b]0;title\x07 \u202etext\u200b
 
 	// JSON: the outcomes next to the response, actual values masked.
 	for _, mode := range [][]string{nil, {"--json"}, {"--json", "-v"}} {
-		code, stdout, stderr = runCLI(t, len(mode) > 0, append([]string{"run", "checks.http#echo", "-e", "test"}, mode...)...)
+		code, stdout, stderr = runCLI(t, len(mode) > 0, append([]string{"run", "checks.http#echo", "-e", "test", "--confirm"}, mode...)...)
 		validateJSON(t, stdout)
 		var doc output.Document
 		decode(t, stdout, &doc)
@@ -253,8 +253,8 @@ plain\x1b]0;title\x07 \u202etext\u200b
 		args []string
 		code int
 	}{
-		{[]string{"run", "checks.http", "-e", "test"}, exitAssert},
-		{[]string{"run", "checks.http", "-e", "test", "--fail"}, exitStatus},
+		{[]string{"run", "checks.http", "-e", "test", "--confirm"}, exitAssert},
+		{[]string{"run", "checks.http", "-e", "test", "--fail", "--confirm"}, exitStatus},
 		{[]string{"run", "checks.http", "-e", "test", "--dry-run"}, exitOK},
 	} {
 		code, stdout, _ := runCLI(t, false, tt.args...)
@@ -342,8 +342,12 @@ func TestDirectivesSummary(t *testing.T) {
 		{Kind: "capture", Value: "t = $.t"},
 		{Kind: "assert", Value: "duration < 1s"},
 		{Kind: "tag", Value: "b"},
+		{Kind: "note", Value: "Deletes the user, for good"},
 	})
-	if want := "2 @assert, 1 @capture, @tag a b, @no-log"; got != want {
+	if want := "2 @assert, 1 @capture, @tag a b, @no-log, @note Deletes the user, for good"; got != want {
 		t.Errorf("directives = %q, want %q", got, want)
+	}
+	if got := directives([]output.Directive{{Kind: "note"}}); got != "@note" {
+		t.Errorf("an empty note: %q", got)
 	}
 }

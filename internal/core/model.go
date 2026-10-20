@@ -56,11 +56,11 @@ type Header struct {
 }
 
 // Directive is an "# @assert", "# @capture", "# @tag", "# @no-log",
-// "# @no-cookie-jar" or time limit comment, kept as written for the stages
-// that act on it.
+// "# @no-cookie-jar", "# @note" or time limit comment, kept as written for
+// the stages that act on it.
 type Directive struct {
-	Kind  string // "assert", "capture", "tag", NoLog, NoCookieJar, Timeout, ConnectionTimeout or MaxTime
-	Value string // "" for NoLog and NoCookieJar
+	Kind  string // "assert", "capture", "tag", NoLog, NoCookieJar, Note, Timeout, ConnectionTimeout or MaxTime
+	Value string // "" for NoLog and NoCookieJar, and may be for Note
 	Line  int
 }
 
@@ -78,6 +78,21 @@ const NoLog = "no-log"
 // NoLog reports whether r has an "# @no-log" directive.
 func (r *Request) NoLog() bool {
 	return slices.ContainsFunc(r.Directives, func(d Directive) bool { return d.Kind == NoLog })
+}
+
+// Note is the kind of the "# @note" directive, as httpyac has it: the
+// request is not sent without a confirmation, and the text after the
+// directive, which may be empty, says why.
+const Note = "note"
+
+// Note returns the text of the "# @note" directive of r, and whether it
+// has one.
+func (r *Request) Note() (string, bool) {
+	i := slices.IndexFunc(r.Directives, func(d Directive) bool { return d.Kind == Note })
+	if i < 0 {
+		return "", false
+	}
+	return r.Directives[i].Value, true
 }
 
 // NoCookieJar is the kind of the "# @no-cookie-jar" directive, which

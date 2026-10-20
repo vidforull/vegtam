@@ -54,13 +54,13 @@ func TestHistoryNoSecrets(t *testing.T) {
 		{"run", fx.dir, "--max-time", "100ms", "--max-body", "106"},
 	}
 	for _, args := range runs {
-		if _, _, stderr := runCLI(t, true, append(args, "-e", "test")...); strings.Contains(stderr, "history") {
+		if _, _, stderr := runCLI(t, true, append(args, "-e", "test", "--confirm")...); strings.Contains(stderr, "history") {
 			t.Fatalf("%q: %s", args, stderr)
 		}
 	}
 	flow, _ := newFlowFixture(t)
 	t.Chdir(flow)
-	if code, _, stderr := runCLI(t, true, "run", "login.http", "-e", "test"); code != exitOK {
+	if code, _, stderr := runCLI(t, true, "run", "login.http", "-e", "test", "--confirm"); code != exitOK {
 		t.Fatalf("the flow: exit code %d\n%s", code, stderr)
 	}
 
@@ -105,10 +105,10 @@ func TestRunNoHistory(t *testing.T) {
 	file := historyOn(t)
 	fx := newFixture(t)
 	echo := fx.path("api.http") + "#echo"
-	runCLI(t, true, "run", echo, "-e", "test", "--no-history")
+	runCLI(t, true, "run", echo, "-e", "test", "--no-history", "--confirm")
 	runCLI(t, true, "run", echo, "-e", "test", "--dry-run")
 	t.Setenv("VEGTAM_NO_HISTORY", "1")
-	runCLI(t, true, "run", echo, "-e", "test")
+	runCLI(t, true, "run", echo, "-e", "test", "--confirm")
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Errorf("history file: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestRunNoHistory(t *testing.T) {
 	if err := os.WriteFile(filepath.Dir(file), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, _, stderr := runCLI(t, true, "run", fx.path("api.http"), "-e", "test", "--max-time", "100ms")
+	code, _, stderr := runCLI(t, true, "run", fx.path("api.http"), "-e", "test", "--max-time", "100ms", "--confirm")
 	if code != exitNetwork || strings.Count(stderr, "vegtam: history: ") != 1 || !strings.Contains(stderr, "VEGTAM_NO_HISTORY=1 turns it off") {
 		t.Errorf("exit code %d\n%s", code, stderr)
 	}
