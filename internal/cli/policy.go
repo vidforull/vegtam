@@ -29,8 +29,14 @@ vegtam does what it does on its own. Every field may be left out:
     "limits": {"max_time_ceiling": "5m", "read_timeout_ceiling": "2m",
                "connect_timeout_ceiling": "30s"},
     "network": {"allow": ["127.0.0.1:8080", "localhost:3000", "10.0.0.0/8"],
-                "proxy": "http://proxy.example:3128", "no_proxy": ["localhost"],
-                "insecure_hosts": ["dev.example:8443"]}
+                "proxy": "http://proxy.example:3128",
+                "proxy_auth": "$env PROXY_AUTH", "no_proxy": ["localhost"],
+                "insecure_hosts": ["dev.example:8443"],
+                "resolve": ["api.example:443:127.0.0.1"],
+                "connect_to": ["api.example:443:staging.example:8443"],
+                "unix_sockets": ["/var/run/docker.sock"]},
+    "hosts": {"api.internal.example:443": {"cacert": "~/certs/corp.pem",
+              "cert": "~/certs/me.pem", "key": "~/certs/me.key"}}
   }
 
 limits are ceilings on the time limits of every request: on the flags,
@@ -44,14 +50,22 @@ terminal, or --json is given), it connects to them only as network.allow
 names them: host:port, an IP address with a port or without, or a CIDR
 prefix. Such a run also takes nothing else that weakens a check from a
 flag: --insecure leaves unchecked only the hosts of
-network.insecure_hosts.
+network.insecure_hosts, --resolve and --connect-to must be ones that
+network.resolve and network.connect_to list, as the flags write them,
+and --unix-socket one of network.unix_sockets.
 
 network.proxy is the proxy of every request, or "environment" for that
 of HTTPS_PROXY, HTTP_PROXY and NO_PROXY; without it, a person's run uses
 the environment's, and a run with no person none. The proxy's user and
-password are never written in the policy. no_proxy lists hosts that go
-direct. Through a proxy, the target of each request is checked here, as
-the connection would be, before the proxy gets it.`,
+password are never written in the policy: proxy_auth names the
+environment variable that holds them, as user:password. no_proxy lists
+hosts that go direct. Through a proxy, the target of each request is
+checked here, as the connection would be, before the proxy gets it.
+
+hosts gives an origin, host or host:port (443 if not given), CAs trusted
+for it alone, on top of the system's and --cacert's, and a client
+certificate offered to it alone. The paths are absolute, or ~/path; a
+key must be private to its owner.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			pol, err := cfg.loadPolicy()
@@ -59,7 +73,7 @@ the connection would be, before the proxy gets it.`,
 				return err
 			}
 			run := output.PolicyRun{Unattended: cfg.unattended()}
-			if proxy, _ := proxyOf(pol, run.Unattended, httpproxy.FromEnvironment()); proxy != nil {
+			if proxy, _ := proxyOf(pol, run.Unattended, httpproxy.FromEnvironment(), "", nil); proxy != nil {
 				run.HTTPSProxy, run.HTTPProxy, run.NoProxy = output.ProxyURL(proxy.HTTPSProxy), output.ProxyURL(proxy.HTTPProxy), proxy.NoProxy
 			}
 			p := output.NewPolicy(pol, run)
@@ -101,13 +115,26 @@ func policyText(p *output.Policy) string {
 		for _, row := range [][2]string{
 			{"allow", strings.Join(n.Allow, ", ")},
 			{"proxy", n.Proxy},
+			{"proxy auth", n.ProxyAuth},
 			{"no proxy", strings.Join(n.NoProxy, ", ")},
 			{"insecure hosts", strings.Join(n.InsecureHosts, ", ")},
+			{"resolve", strings.Join(n.Resolve, ", ")},
+			{"connect to", strings.Join(n.ConnectTo, ", ")},
+			{"unix sockets", strings.Join(n.UnixSockets, ", ")},
 		} {
 			if row[1] != "" {
 				fmt.Fprintf(tw, "%s\t%s\n", row[0], row[1])
 			}
 		}
+	}
+	for _, h := range p.Hosts {
+		var parts []string
+		for _, f := range [][2]string{{"cacert", h.CACert}, {"cert", h.Cert}, {"key", h.Key}} {
+			if f[1] != "" {
+				parts = append(parts, f[0]+" "+f[1])
+			}
+		}
+		fmt.Fprintf(tw, "host %s\t%s\n", h.Host, strings.Join(parts, ", "))
 	}
 	tw.Flush()
 	r := p.Run

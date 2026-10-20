@@ -157,10 +157,14 @@ from the policy alone:
 |---|---|---|---|---|
 | time limits | lower only: `@connection-timeout`, `@timeout`, `@max-time` | `--connect-timeout`, `--read-timeout`, `--max-time` | the same | `limits`: ceilings on flags and directives |
 | HTTP version | the request line | `--http1.1`, `--http2`, `--http2-prior-knowledge` | the same | |
-| CAs | no | `--cacert` | the same | |
-| client certificate | no | `--cert`, `--key` | the same | |
+| CAs | no | `--cacert` | the same | `hosts`: for one origin |
+| client certificate | no | `--cert`, `--key` | the same | `hosts`: for one origin |
 | unchecked certificates | no: an error | `--insecure`, every host | `--insecure`, only the hosts of `network.insecure_hosts` | `network.insecure_hosts` |
-| proxy | no: an error | the environment's, unless the policy names one | the policy's only | `network.proxy`, `network.no_proxy` |
+| proxy | no: an error | `--proxy`, or the policy's, or the environment's | the policy's only; `--proxy` is an error | `network.proxy`, `network.no_proxy` |
+| hosts that go direct | no | `--noproxy` | the same | `network.no_proxy` |
+| the proxy's user and password | no | `--proxy-auth '$env NAME'` | the policy's only; `--proxy-auth` is an error | `network.proxy_auth: "$env NAME"`, for `network.proxy` alone |
+| another address for a host | no: an error | `--resolve`, `--connect-to` | only those that the policy lists | `network.resolve`, `network.connect_to` |
+| a unix socket | no: an error | `--unix-socket`, `--abstract-unix-socket` | only those that the policy lists | `network.unix_sockets` |
 | loopback and private addresses | no | connected to | only those of `network.allow` | `network.allow` |
 | cloud metadata, link-local, multicast, unspecified addresses | no | never | never | never |
 | cookie jar | `@no-cookie-jar` | `--no-cookies` | the same | |
@@ -175,8 +179,10 @@ be left out:
 {
   "limits":  {"max_time_ceiling": "5m", "read_timeout_ceiling": "2m", "connect_timeout_ceiling": "30s"},
   "network": {"allow": ["127.0.0.1:8080", "localhost:3000", "10.0.0.0/8"],
-              "proxy": "http://proxy.example:3128", "no_proxy": ["localhost"],
-              "insecure_hosts": ["dev.example:8443"]}
+              "proxy": "http://proxy.example:3128", "proxy_auth": "$env PROXY_AUTH", "no_proxy": ["localhost"],
+              "insecure_hosts": ["dev.example:8443"], "resolve": ["api.example:443:127.0.0.1"],
+              "connect_to": ["api.example:443:staging.example:8443"], "unix_sockets": ["/var/run/docker.sock"]},
+  "hosts":   {"api.internal.example:443": {"cacert": "~/certs/corp.pem", "cert": "~/certs/me.pem", "key": "~/certs/me.key"}}
 }
 ```
 
@@ -204,6 +210,12 @@ The flags:
 | `--max-time <time>` | 2m | curl has no limit by default; `--timeout` is the old name |
 | `--http1.1`, `--http2`, `--http2-prior-knowledge` | as negotiated | `--http2` is HTTP/2 over TLS or an error: no fallback, no upgrade of `http` |
 | `--no-cookies` | a jar for the run | curl keeps no cookies unless asked; vegtam keeps them in memory, never on disk |
+| `--proxy <url>` | the policy's, or the environment's | for a person at a terminal; http, https, socks5 or socks5h; no user or password in it |
+| `--proxy-auth '$env NAME'` | none | for a person at a terminal: the proxy's user and password from a variable that holds `user:password`, never in the arguments; no request may read the variable |
+| `--noproxy <hosts>` | `NO_PROXY` | in its place, and the policy's; `*` for all |
+| `--resolve host:port:addr[,addr]` | none | as curl's; Host and TLS keep the name, the guard checks the address; not through a proxy |
+| `--connect-to host:port:to_host:to_port` | none | as curl's; an empty part is any, or the one asked for |
+| `--unix-socket <path>`, `--abstract-unix-socket <name>` | none | every request to the socket, the host of the URL in `Host`; no proxy |
 
 A time is in seconds (`5`, `0.5`) or has a unit (`500ms`, `2m`, `1m30s`);
 `0` or `none` is no limit. Directives may lower the limits of a request, and the
@@ -230,9 +242,11 @@ curl's `-w` names them, and the cookies sent and set:
 * cookies: sent session
 ```
 
-With `--json` the same is in `timing`, `remote_addr`, `tls`, `proxy`,
-`redirects` and `cookies`, and after an error too, as far as the request
-got. There is no mode that prints the exchange unmasked.
+With `--json` the same is in `timing`, `remote_addr`, `resolved_by`,
+`tls`, `proxy`, `redirects` and `cookies`, and after an error too, as far
+as the request got. `resolved_by` names the flag that sent a connection
+elsewhere than its host: `* connected to 127.0.0.1:8443 · resolved by
+--resolve`. There is no mode that prints the exchange unmasked.
 
 A run keeps the cookies that responses set for the requests after it,
 in memory: a request that signs in and one that uses the session work in

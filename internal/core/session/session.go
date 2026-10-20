@@ -74,7 +74,7 @@ func New(opts Options) *Session {
 	return &Session{
 		opts:   opts,
 		warned: map[string]bool{},
-		loader: env.NewLoader(env.Options{Env: opts.Env, DryRun: opts.DryRun, Trust: opts.Trust, EnvHint: opts.EnvHint}),
+		loader: env.NewLoader(env.Options{Env: opts.Env, DryRun: opts.DryRun, Trust: opts.Trust, EnvHint: opts.EnvHint, Hidden: opts.Transport.HiddenEnv}),
 		client: exec.New(exec.Options{MaxBody: opts.MaxBody, UserAgent: opts.UserAgent, Transport: opts.Transport}),
 	}
 }

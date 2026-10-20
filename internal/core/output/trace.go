@@ -49,6 +49,7 @@ type Redirect struct {
 	// the redirect leaves the origin of the request.
 	Dropped    []string `json:"dropped,omitempty"`
 	RemoteAddr string   `json:"remote_addr,omitempty"`
+	ResolvedBy string   `json:"resolved_by,omitempty"`
 	Proxy      string   `json:"proxy,omitempty"`
 	Timing     *Timing  `json:"timing"`
 }
@@ -102,7 +103,7 @@ func Diagnose(res *Result, t *exec.Trace, m *core.Masker) {
 		if i < len(t.Hops)-1 || h.Redirect {
 			res.Redirects = append(res.Redirects, Redirect{
 				Status: h.Status, Location: m.Mask(h.Location), Dropped: h.Dropped,
-				RemoteAddr: remoteAddr(h, m), Proxy: proxy(h.Proxy, m), Timing: timing([]exec.Hop{h}, h.Total),
+				RemoteAddr: remoteAddr(h, m), ResolvedBy: h.ResolvedBy, Proxy: proxy(h.Proxy, m), Timing: timing([]exec.Hop{h}, h.Total),
 			})
 		}
 	}
@@ -113,7 +114,7 @@ func Diagnose(res *Result, t *exec.Trace, m *core.Masker) {
 		return
 	}
 	last := t.Hops[len(t.Hops)-1]
-	res.RemoteAddr, res.Proxy, res.last = remoteAddr(last, m), proxy(last.Proxy, m), timing([]exec.Hop{last}, last.Total)
+	res.RemoteAddr, res.ResolvedBy, res.Proxy, res.last = remoteAddr(last, m), last.ResolvedBy, proxy(last.Proxy, m), timing([]exec.Hop{last}, last.Total)
 	if i := last.TLS; i != nil {
 		res.TLS = &TLS{ALPN: m.Mask(i.ALPN), Verified: i.Verified}
 		if i.Version != 0 {

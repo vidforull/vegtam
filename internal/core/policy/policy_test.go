@@ -10,16 +10,23 @@ import (
 	"time"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/netguard"
 )
 
 // The policy of the task's example, all of it.
 const fullPolicy = `{
   "limits":  {"max_time_ceiling": "5m", "read_timeout_ceiling": "2m", "connect_timeout_ceiling": "30s"},
   "network": {"allow": ["127.0.0.1:8080", "localhost:3000", "10.0.0.0/8"], "proxy": "http://proxy.example:3128",
-              "no_proxy": ["localhost"], "insecure_hosts": ["Dev.Example.:8443"]}
+              "proxy_auth": "$env PROXY_AUTH", "no_proxy": ["localhost"], "insecure_hosts": ["Dev.Example.:8443"]},
+  "hosts":   {"api.internal.example:443": {"cacert": "~/certs/corp.pem", "cert": "/certs/me.pem", "key": "/certs/me.key"},
+              "ca.example": {"cacert": "/certs/ca.pem"}}
 }`
 
 func TestParse(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	p, err := Parse("policy.json", []byte(fullPolicy))
 	if err != nil {
 		t.Fatal(err)
@@ -32,9 +39,26 @@ func TestParse(t *testing.T) {
 	for _, e := range n.Allow {
 		allow = append(allow, e.String())
 	}
-	if strings.Join(allow, " ") != "127.0.0.1:8080 localhost:3000 10.0.0.0/8" || n.Proxy != "http://proxy.example:3128" ||
+	if strings.Join(allow, " ") != "127.0.0.1:8080 localhost:3000 10.0.0.0/8" || n.Proxy != "http://proxy.example:3128" || n.ProxyAuth != "PROXY_AUTH" ||
 		strings.Join(n.NoProxy, " ") != "localhost" || strings.Join(n.InsecureHosts, " ") != "dev.example:8443" {
 		t.Errorf("network %+v", n)
+	}
+	want := []Host{
+		{Origin: "https://api.internal.example:443", Name: "api.internal.example:443", CACert: filepath.Join(home, "certs", "corp.pem"), Cert: "/certs/me.pem", Key: "/certs/me.key"},
+		{Origin: "https://ca.example:443", Name: "ca.example", CACert: "/certs/ca.pem"},
+	}
+	if len(p.Hosts) != 2 || p.Hosts[0] != want[0] || p.Hosts[1] != want[1] {
+		t.Errorf("hosts %+v; want %+v", p.Hosts, want)
+	}
+	if h, ok := p.HostFor("https://ca.example:443"); !ok || h != want[1] {
+		t.Errorf("HostFor = %+v, %v", h, ok)
+	}
+	if _, ok := p.HostFor("https://other.example:443"); ok {
+		t.Error("HostFor found a host the policy does not name")
+	}
+	if p, err := Parse("policy.json", []byte(`{"network": {"unix_sockets": ["/var/run/docker.sock", "~/run/api.sock", "@vegtam"]}}`)); err != nil ||
+		strings.Join(p.Network.UnixSockets, " ") != "/var/run/docker.sock "+filepath.Join(home, "run", "api.sock")+" @vegtam" {
+		t.Errorf("unix_sockets: %+v, %v", p, err)
 	}
 	for _, other := range []string{`{}`, `{"limits": {}, "network": {}}`, `{"network": {"proxy": "environment", "insecure_hosts": ["[::1]:8443"]}}`} {
 		if p, err := Parse("policy.json", []byte(other)); err != nil || p.Limits != (Limits{}) || len(p.Network.Allow) != 0 {
@@ -50,18 +74,29 @@ func TestParseErrors(t *testing.T) {
 		`{} {}`:                     "data after the policy",
 		`{"limit": {}}`:             `unknown field "limit"`,
 		`{"network": {"alow": []}}`: `unknown field "alow"`,
-		`{"limits": {"max_time_ceiling": "soon"}}`:           `limits.max_time_ceiling "soon": want a time`,
-		`{"limits": {"read_timeout_ceiling": "0"}}`:          "a ceiling of none is no ceiling",
-		`{"network": {"allow": ["localhost"]}}`:              "network.allow: \"localhost\": name the port too",
-		`{"network": {"proxy": "proxy.example:3128"}}`:       "network.proxy: \"proxy.example:3128\": want an http, https, socks5 or socks5h URL",
-		`{"network": {"proxy": "ftp://proxy.example"}}`:      "want an http, https, socks5 or socks5h URL",
-		`{"network": {"proxy": "http://u:p@proxy.example"}}`: "holds a user or password",
-		`{"network": {"proxy": "http://proxy.example/x"}}`:   "nothing more",
-		`{"network": {"proxy": "http://"}}`:                  "nothing more",
-		`{"network": {"no_proxy": ["a,b"]}}`:                 "no_proxy: \"a,b\": want one host",
-		`{"network": {"insecure_hosts": ["dev.example"]}}`:   "insecure_hosts: \"dev.example\": want host:port",
-		`{"network": {"insecure_hosts": ["dev.example:0"]}}`: "want host:port",
-		`{"hosts": {}}`: `unknown field "hosts"`,
+		`{"limits": {"max_time_ceiling": "soon"}}`:                         `limits.max_time_ceiling "soon": want a time`,
+		`{"limits": {"read_timeout_ceiling": "0"}}`:                        "a ceiling of none is no ceiling",
+		`{"network": {"allow": ["localhost"]}}`:                            "network.allow: \"localhost\": name the port too",
+		`{"network": {"proxy": "proxy.example:3128"}}`:                     "network.proxy: \"proxy.example:3128\": want an http, https, socks5 or socks5h URL",
+		`{"network": {"proxy": "ftp://proxy.example"}}`:                    "want an http, https, socks5 or socks5h URL",
+		`{"network": {"proxy": "http://u:p@proxy.example"}}`:               "holds a user or password",
+		`{"network": {"proxy": "http://proxy.example/x"}}`:                 "nothing more",
+		`{"network": {"proxy": "http://"}}`:                                "nothing more",
+		`{"network": {"no_proxy": ["a,b"]}}`:                               "no_proxy: \"a,b\": want one host",
+		`{"network": {"insecure_hosts": ["dev.example"]}}`:                 "insecure_hosts: \"dev.example\": want host:port",
+		`{"network": {"insecure_hosts": ["dev.example:0"]}}`:               "want host:port",
+		`{"network": {"proxy": "http://p", "proxy_auth": "u:p"}}`:          "proxy_auth: want \"$env NAME\"",
+		`{"network": {"proxy": "http://p", "proxy_auth": "$env 1"}}`:       "proxy_auth: want",
+		`{"network": {"proxy_auth": "$env AUTH"}}`:                         "proxy_auth without a proxy",
+		`{"network": {"proxy": "environment", "proxy_auth": "$env AUTH"}}`: "proxy_auth goes with the policy's proxy, a URL",
+		`{"hosts": {"api.example": {}}}`:                                   "hosts.api.example: give cacert, or cert, or both",
+		`{"hosts": {"api.example": {"key": "/k"}}}`:                        "key needs cert",
+		`{"hosts": {"api.example": {"cacert": "certs/ca.pem"}}}`:           `cacert: "certs/ca.pem": want an absolute path`,
+		`{"hosts": {"api.example:0": {"cacert": "/ca.pem"}}}`:              "want host:port",
+		`{"hosts": {"http://api.example": {"cacert": "/ca.pem"}}}`:         "want host:port",
+		`{"hosts": {"api.example": {"cacert": "/ca.pem", "pass": "x"}}}`:   `unknown field "pass"`,
+		`{"network": {"unix_sockets": ["api.sock"]}}`:                      `network.unix_sockets: "api.sock": want an absolute path`,
+		`{"network": {"unix_sockets": ["@"]}}`:                             `network.unix_sockets: "@": want an absolute path`,
 	} {
 		_, err := Parse("policy.json", []byte(in))
 		if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != core.KindPolicy || !strings.Contains(err.Error(), want) {
@@ -175,7 +210,10 @@ func TestLoad(t *testing.T) {
 // FuzzParsePolicy checks that no policy file makes Parse panic, and that
 // what it takes is as the rest of vegtam reads it.
 func FuzzParsePolicy(f *testing.F) {
-	for _, s := range []string{fullPolicy, `{}`, `{"network": {"allow": ["[::1]:80", "fd00::/8"]}}`, `{"network": {"insecure_hosts": ["[::1]:8443"]}}`} {
+	for _, s := range []string{
+		fullPolicy, `{}`, `{"network": {"allow": ["[::1]:80", "fd00::/8"]}}`, `{"network": {"insecure_hosts": ["[::1]:8443"]}}`, `{"hosts": {"[::1]:8443": {"cacert": "/x"}}}`,
+		`{"network": {"resolve": ["a.example:443:[::1],10.0.0.1"], "connect_to": ["[::1]:80::8080", ":::"]}}`,
+	} {
 		f.Add([]byte(s))
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
@@ -190,6 +228,25 @@ func FuzzParsePolicy(f *testing.F) {
 		}
 		if px := p.Network.Proxy; px != "" && px != ProxyEnvironment && CheckProxy(px) != nil {
 			t.Errorf("proxy %q", px)
+		}
+		for _, h := range p.Hosts {
+			if !strings.HasPrefix(h.Origin, "https://") || h.CACert == "" && h.Cert == "" || h.Key != "" && h.Cert == "" {
+				t.Errorf("host %+v", h)
+			}
+		}
+		if p.Network.ProxyAuth != "" && p.Network.Proxy == "" {
+			t.Errorf("proxy_auth without a proxy: %+v", p.Network)
+		}
+		// A route lists as the flag that it allows is written.
+		for _, r := range p.Network.Resolve {
+			if again, err := netguard.ParseResolve(r.String()); err != nil || again.String() != r.String() {
+				t.Errorf("resolve %s: %s, %v", r, again, err)
+			}
+		}
+		for _, c := range p.Network.ConnectTo {
+			if again, err := netguard.ParseConnectTo(c.String()); err != nil || again != c {
+				t.Errorf("connect_to %s: %s, %v", c, again, err)
+			}
 		}
 	})
 }

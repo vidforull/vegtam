@@ -143,6 +143,7 @@ clients are errors that say what to use:
 | `@no-reject-unauthorized` | httpyac | `--insecure`, at a terminal |
 | `@proxy`, `@no-proxy` | httpyac | the policy's `network.proxy`; for a person at a terminal, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` |
 | `@kulala-curl-...`, and `@curl-...` before kulala 6 | kulala | the flags of `vegtam run` |
+| `@resolve`, `@connect-to`, `@unix-socket`, `@abstract-unix-socket` | curl's names | the flags of the same names, for a person at a terminal or as the operator's policy lists them |
 | `@setting insecure`, `proxy`, `http-root-cas`, `http-client-cert`, `http-client-key` | resterm | `--insecure`, the policy or the environment, `--cacert`, `--cert` and `--key` |
 
 `@note`, `@prompt`, `@sleep`, `@ratelimit` and resterm's other

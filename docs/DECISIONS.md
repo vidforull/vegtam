@@ -925,3 +925,62 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   not in the policy; the policy's TLS by host, the credentials of its
   proxy, `--proxy`, `--resolve`, `--connect-to` and unix sockets come
   next.
+
+## 2026-10-20: routes, sockets, and TLS by host
+
+- **The policy's TLS is by origin.** `hosts` gives an origin CAs trusted
+  for it alone, on top of the system's and `--cacert`'s, and a client
+  certificate offered to it alone, as Postman, Bruno and REST Client
+  bind a certificate to a host. It goes to that origin on any hop,
+  since the operator bound it there; the certificate of `--cert` keeps
+  its place on the request as written. Each is part of the key of the
+  transport: no connection is shared across them. Paths are absolute or
+  `~/path`, and a key others can read is refused, as ssh refuses one.
+- **The proxy's credentials never in a file or the arguments.**
+  `network.proxy_auth` and `--proxy-auth` name an environment variable,
+  `$env NAME`, that holds `user:password`; a proxy URL with a user or
+  password is refused, in the policy and in `--proxy`. They go to the
+  proxy alone, as net/http sends them: on CONNECT for https, to the proxy
+  for http. The policy's go to the policy's proxy and to no other, not to
+  a person's `--proxy` nor to the environment's, which whoever sets the
+  environment chooses; `--proxy-auth` is for a person at a terminal. No
+  request may read the variable: `{{$env NAME}}` of it is a policy
+  error, since a file could otherwise send the credentials anywhere,
+  masked in the output. A test proxy shows that the server never gets them through
+  the tunnel, and that a proxy that refuses CONNECT ends the request
+  there, where curl's CVE-2026-86414 sent them on to the server. The
+  output hides the pair whatever its length, and its base64, and each
+  part alone from 8 bytes.
+- **`--proxy` for a person, `--noproxy` for all.** Without a person,
+  requests go through the operator's proxy or none, so `--proxy` is a
+  usage error. `--noproxy` is taken in every mode: a request that goes
+  direct is one the guard sees whole. In Go, `socks5` is `socks5h`: the
+  proxy looks the name up.
+- **Routes as curl has them, and only as flags.** `--resolve` and
+  `--connect-to` keep the URL's host for the Host header and TLS, and the
+  guard checks the address connected to. A route on a file would send a
+  trusted host's requests, and their secrets, to another address, so
+  `@resolve` and its kin are refused, and without a person a route must
+  be one that the policy lists, compared as the flag writes it. A
+  request to a routed host does not go through a proxy, which would look
+  the name up itself: an error says to pass `--noproxy`. Routes are for
+  the hosts of requests, not for the proxy, which the guard lets be as
+  the proxy alone. A port and a name match as net/http dials them,
+  leading zeros dropped and a name not in ASCII as IDNA writes it.
+  `resolved_by` says in the output which flag sent a connection where it
+  went.
+- **The policy's CAs do not vouch for a proxy.** net/http checks an https
+  proxy with the config of the request's origin, so a request to an
+  origin that the policy gives CAs of its own does not go through an
+  https proxy, as one with a client certificate or `--insecure` does
+  not.
+- **Sockets.** `--unix-socket` sends every request to the socket, as
+  curl does, with the URL's host in `Host` and no proxy; on Linux,
+  `--abstract-unix-socket` names one of the abstract namespace. Docker's
+  socket is root on the machine, so a socket is never from a file, and
+  without a person it must be one that `network.unix_sockets` lists,
+  compared by the path its links lead to, which is then the path
+  connected to, so that a link changed after the check leads nowhere
+  new. `--unix-socket @x` is a file, as curl reads it; only
+  `--abstract-unix-socket` names an abstract socket. The guard has no
+  address to check there.

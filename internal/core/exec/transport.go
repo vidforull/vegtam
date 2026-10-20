@@ -28,6 +28,11 @@ import (
 // (see Client.Settings).
 type Transport struct {
 	TLS TLS
+	// Hosts are the TLS of the origins that the policy names, by origin
+	// (https://host:port): TLS's CAs and those trusted for the origin
+	// alone, and the client certificate offered to it alone, which TLS's
+	// takes the place of for the request as written.
+	Hosts map[string]TLS
 	// InsecureOrigins are origins whose certificates are not checked, as
 	// TLS.Insecure leaves those of every origin.
 	InsecureOrigins []string
@@ -37,9 +42,19 @@ type Transport struct {
 	// Guard says what each connection may go to: the address connected
 	// to, and the target of a request that goes to a proxy.
 	Guard netguard.Rules
+	// Routes send the connections to some hosts elsewhere, as --resolve
+	// and --connect-to say. A request to such a host does not go through
+	// a proxy, which would look the name up itself: that is an error.
+	Routes netguard.Routes
+	// Socket is a unix socket that every connection goes to, through no
+	// proxy, whatever the host of its URL: a path, or "@name" for one of
+	// Linux's abstract namespace. "" for none.
+	Socket string
 	// Secrets are values that no output may show, such as the password of
-	// the proxy.
-	Secrets []string
+	// the proxy; HiddenEnv the environment variables that no request may
+	// read, such as the one that holds it.
+	Secrets   []string
+	HiddenEnv []string
 	// Version is the HTTP version of every request, over what its line
 	// says: one of core.HTTP11, core.HTTP2 and core.HTTP2PriorKnowledge.
 	// With none, a request speaks HTTP/2 when the server offers it over
@@ -75,8 +90,9 @@ type TLS struct {
 // that differ in any of it never share a connection. The rest of the
 // configuration is the client's own, the same for every key.
 type transportKey struct {
-	cert     bool // offers the client certificate
-	insecure bool // does not check the server's certificate
+	cert     bool   // offers the client certificate of the flags
+	host     string // the origin whose TLS of the policy it has; "" for none
+	insecure bool   // does not check the server's certificate
 	connect  time.Duration
 	version  string
 }
@@ -84,11 +100,13 @@ type transportKey struct {
 // key returns the key of the transport for a hop to u. cert is set until
 // a redirect has led elsewhere.
 func (c *Client) key(u *url.URL, cert bool, st Settings) transportKey {
-	t := c.opts.Transport
-	return transportKey{
-		cert: cert, connect: st.Connect, version: st.Version,
-		insecure: t.TLS.Insecure || slices.Contains(t.InsecureOrigins, origin(u)),
+	o, t := origin(u), c.opts.Transport
+	k := transportKey{cert: cert, connect: st.Connect, version: st.Version}
+	if _, ok := t.Hosts[o]; ok {
+		k.host = o
 	}
+	k.insecure = t.TLS.Insecure || slices.Contains(t.InsecureOrigins, o)
+	return k
 }
 
 // transport returns the transport for k, made on first use.
@@ -135,6 +153,12 @@ func (c *Client) newTransport(k transportKey) *http.Transport {
 	if !k.cert {
 		cert = nil
 	}
+	if h, ok := c.opts.Transport.Hosts[k.host]; ok {
+		o.Roots = h.Roots
+		if cert == nil {
+			cert = h.Cert
+		}
+	}
 	cfg := &tls.Config{RootCAs: o.Roots}
 	if k.insecure {
 		cfg.InsecureSkipVerify = true
@@ -163,35 +187,65 @@ func (c *Client) newTransport(k transportKey) *http.Transport {
 		// net/http checks the proxy's certificate with the same config.
 		proxy = noTLSProxy(proxy, "and --insecure would leave its certificate unchecked too: a request that --insecure leaves unchecked does not go through an https proxy")
 	}
+	if h, ok := c.opts.Transport.Hosts[k.host]; ok && h.Roots != c.opts.Transport.TLS.Roots {
+		proxy = noTLSProxy(proxy, "and the CAs that the policy trusts for "+k.host+" alone would vouch for it too: a request to that origin does not go through an https proxy")
+	}
 	t.Proxy = c.checkProxy(proxy, k.connect)
 	t.TLSClientConfig = cfg
 	return t
 }
 
 // dialer returns the dial function of a transport, which makes its
-// connections with d, and says to the guard what each is for.
+// connections with d, to where the routes send each, and says to the
+// guard what each is for: the name it is made to, and whether it is the
+// proxy of its hop.
 func (c *Client) dialer(d *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, _, _ := net.SplitHostPort(addr)
+		if s := c.opts.Transport.Socket; s != "" {
+			return d.DialContext(ctx, "unix", s)
+		}
 		h, _ := ctx.Value(hopKey{}).(*hopTrace)
-		to := dialTo{host: host, proxy: h != nil && h.proxyAddr() == addr}
-		return d.DialContext(context.WithValue(ctx, dialKey{}, to), network, addr)
+		proxy := h != nil && h.proxyAddr() == addr
+		host, port, _ := net.SplitHostPort(addr)
+		to, addrs := host, []string{addr}
+		if !proxy { // the routes are for the hosts of requests, as curl's
+			to, addrs, _ = c.opts.Transport.Routes.Route(host, port)
+		}
+		ctx = context.WithValue(ctx, dialKey{}, dialTo{host: to, proxy: proxy})
+		var first error
+		for _, a := range addrs {
+			conn, err := d.DialContext(ctx, network, a)
+			if err == nil {
+				return conn, nil
+			}
+			if first == nil {
+				first = err
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		return nil, first
 	}
 }
 
 // checkProxy returns the proxy function of a transport, which takes the
 // proxy that proxy gives, if any, once it has checked the request's
-// target: the proxy connects to it where the guard does not see it. The
-// target is looked up here, within the time of getting a connection, and
-// out of the hop's trace, whose lookup it is not.
+// target: the proxy connects to it where the guard does not see it, and
+// would look up a name that the routes send elsewhere. The target is
+// looked up here, within the time of getting a connection, and out of
+// the hop's trace, whose lookup it is not.
 func (c *Client) checkProxy(proxy func(*http.Request) (*url.URL, error), connect time.Duration) func(*http.Request) (*url.URL, error) {
 	return func(r *http.Request) (*url.URL, error) {
-		if proxy == nil {
+		if proxy == nil || c.opts.Transport.Socket != "" {
 			return nil, nil
 		}
 		u, err := proxy(r)
 		if err != nil || u == nil {
 			return u, err
+		}
+		if by := c.routedBy(r.URL); by != "" {
+			return nil, &routeError{by: by, host: r.URL.Hostname()}
 		}
 		ctx := context.Context(valueless{r.Context()})
 		if connect > 0 {
@@ -214,6 +268,31 @@ func (c *Client) checkProxy(proxy func(*http.Request) (*url.URL, error), connect
 // check it before the proxy, within the connect timeout.
 var errLookup = errors.New("no answer to the lookup of the target, which vegtam checks before the proxy")
 
+// routedBy returns the flag that sends the connections to the host of u
+// elsewhere, "" for none.
+func (c *Client) routedBy(u *url.URL) string {
+	switch s := c.opts.Transport.Socket; {
+	case strings.HasPrefix(s, "@"):
+		return "--abstract-unix-socket"
+	case s != "":
+		return "--unix-socket"
+	}
+	host, err := netguard.ASCII(u.Hostname()) // as net/http dials it
+	if err != nil {
+		return ""
+	}
+	_, _, by := c.opts.Transport.Routes.Route(host, strconv.Itoa(int(port(u))))
+	return by
+}
+
+// routeError is a request to a host that --resolve or --connect-to sends
+// elsewhere, which would go through a proxy.
+type routeError struct{ by, host string }
+
+func (e *routeError) Error() string {
+	return fmt.Sprintf("%s does not apply through a proxy, which looks %s up itself: pass --noproxy %s to go direct", e.by, e.host, e.host)
+}
+
 // valueless is a context without the values of its parent, the trace of
 // a hop among them.
 type valueless struct{ context.Context }
@@ -235,6 +314,9 @@ type dialTo struct {
 // hop is the operator's or the person's: only what vegtam never connects
 // to is refused there.
 func (c *Client) check(ctx context.Context, network, address string, raw syscall.RawConn) error {
+	if network == "unix" { // a socket that a flag or the policy names: no address to check
+		return c.hook(ctx, network, address, raw)
+	}
 	addr, err := netip.ParseAddrPort(address)
 	if err != nil {
 		return fmt.Errorf("the guard cannot check %s: %w", address, err)
@@ -247,6 +329,11 @@ func (c *Client) check(ctx context.Context, network, address string, raw syscall
 	if err := rules.Check(to.host, addr); err != nil {
 		return err
 	}
+	return c.hook(ctx, network, address, raw)
+}
+
+// hook calls the control of the tests, if any.
+func (c *Client) hook(ctx context.Context, network, address string, raw syscall.RawConn) error {
 	if c.control != nil {
 		return c.control(ctx, network, address, raw)
 	}
@@ -337,6 +424,7 @@ func (h *hops) RoundTrip(r *http.Request) (*http.Response, error) {
 			}
 		}
 	}
+	ht.routed(h.c.routedBy(r.URL))
 	k := h.c.key(r.URL, !h.left, h.st)
 	h.insecure = h.insecure || k.insecure && r.URL.Scheme == "https"
 	resp, err := h.c.transport(k).RoundTrip(r)
@@ -371,16 +459,10 @@ func LoadTLS(caFile, certFile, keyFile string, insecure bool) (TLS, error) {
 	usage := func(format string, args ...any) error {
 		return core.Errorf(core.KindUsage, core.Source{}, format, args...)
 	}
+	var err error
 	if caFile != "" {
-		b, err := readFlagFile(caFile)
-		if err != nil {
-			return TLS{}, usage("--cacert: %v", err)
-		}
-		if cfg.Roots, err = x509.SystemCertPool(); err != nil {
-			return TLS{}, usage("--cacert: the system's certificates: %v", err)
-		}
-		if !cfg.Roots.AppendCertsFromPEM(b) {
-			return TLS{}, usage("--cacert %s: no PEM certificate in it", caFile)
+		if cfg.Roots, err = addRoots(nil, caFile, "--cacert"); err != nil {
+			return TLS{}, usage("%v", err)
 		}
 	}
 	switch {
@@ -389,29 +471,91 @@ func LoadTLS(caFile, certFile, keyFile string, insecure bool) (TLS, error) {
 	case certFile == "":
 		return cfg, nil
 	}
+	if cfg.Cert, err = loadCert(certFile, keyFile, "--cert", "--key", "pass --cert <(openssl pkcs12 -in FILE -nodes)"); err != nil {
+		return TLS{}, usage("%v", err)
+	}
+	return cfg, nil
+}
+
+// HostTLS returns the TLS of an origin that the operator's policy names
+// as name: base, the flags', with the CAs of caFile trusted on top of
+// base's, and the client certificate of certFile and keyFile, if given,
+// in place of base's. The policy's key must be private to its owner.
+func HostTLS(base TLS, name, caFile, certFile, keyFile string) (TLS, error) {
+	fail := func(err error) error {
+		return core.Errorf(core.KindPolicy, core.Source{}, "policy hosts.%s: %v", name, err)
+	}
+	h := TLS{Roots: base.Roots, Insecure: base.Insecure}
+	var err error
+	if caFile != "" {
+		if h.Roots, err = addRoots(base.Roots, caFile, "cacert"); err != nil {
+			return TLS{}, fail(err)
+		}
+	}
+	if certFile == "" {
+		return h, nil
+	}
+	key := keyFile
+	if key == "" {
+		key = certFile
+	}
+	if fi, serr := os.Stat(key); serr == nil && fi.Mode().Perm()&0o077 != 0 {
+		return TLS{}, fail(fmt.Errorf("others can read the key %s; make it private: chmod 600 %s", key, key))
+	}
+	if h.Cert, err = loadCert(certFile, keyFile, "cert", "key", "convert it: openssl pkcs12 -in FILE -nodes"); err != nil {
+		return TLS{}, fail(err)
+	}
+	return h, nil
+}
+
+// addRoots returns base, or the system's certificates if nil, with the
+// PEM certificates of file added; name names file in errors.
+func addRoots(base *x509.CertPool, file, name string) (*x509.CertPool, error) {
+	b, err := readFlagFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	roots := base
+	if roots == nil {
+		if roots, err = x509.SystemCertPool(); err != nil {
+			return nil, fmt.Errorf("%s: the system's certificates: %w", name, err)
+		}
+	} else {
+		roots = roots.Clone()
+	}
+	if !roots.AppendCertsFromPEM(b) {
+		return nil, fmt.Errorf("%s %s: no PEM certificate in it", name, file)
+	}
+	return roots, nil
+}
+
+// loadCert reads the PEM client certificate of certFile and its key, in
+// keyFile or in certFile if keyFile is "". certName and keyName name them
+// in errors, and pkcs12 says what to do with a certificate that is not
+// PEM. An error never quotes the key.
+func loadCert(certFile, keyFile, certName, keyName, pkcs12 string) (*tls.Certificate, error) {
 	certPEM, err := readFlagFile(certFile)
 	if err != nil {
-		return TLS{}, usage("--cert: %v", err)
+		return nil, fmt.Errorf("%s: %w", certName, err)
 	}
-	keyPEM, name := certPEM, "--cert "+certFile
+	keyPEM, name := certPEM, certName+" "+certFile
 	if keyFile != "" {
 		if keyPEM, err = readFlagFile(keyFile); err != nil {
-			return TLS{}, usage("--key: %v", err)
+			return nil, fmt.Errorf("%s: %w", keyName, err)
 		}
-		name = "--key " + keyFile
+		name = keyName + " " + keyFile
 	}
 	if err = checkKey(keyPEM); err != nil {
-		return TLS{}, usage("%s: %v", name, err)
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		if b, _ := pem.Decode(certPEM); b == nil {
-			return TLS{}, usage("--cert %s: not PEM; for PKCS#12 (.p12, .pfx), pass --cert <(openssl pkcs12 -in FILE -nodes)", certFile)
+			return nil, fmt.Errorf("%s %s: not PEM; for PKCS#12 (.p12, .pfx), %s", certName, certFile, pkcs12)
 		}
-		return TLS{}, usage("--cert %s: %v", certFile, err)
+		return nil, fmt.Errorf("%s %s: %w", certName, certFile, err)
 	}
-	cfg.Cert = &cert
-	return cfg, nil
+	return &cert, nil
 }
 
 // checkKey refuses an encrypted PEM key: Go reads none, and its error

@@ -12,6 +12,7 @@
     "response": {"$ref": "#/$defs/response"},
     "timing": {"$ref": "#/$defs/timing"},
     "remote_addr": {"$ref": "#/$defs/remote_addr"},
+    "resolved_by": {"$ref": "#/$defs/resolved_by"},
     "proxy": {"$ref": "#/$defs/proxy"},
     "tls": {"$ref": "#/$defs/tls"},
     "redirects": {"$ref": "#/$defs/redirects"},
@@ -61,6 +62,7 @@
         "response": {"$ref": "#/$defs/response"},
         "timing": {"$ref": "#/$defs/timing"},
         "remote_addr": {"$ref": "#/$defs/remote_addr"},
+        "resolved_by": {"$ref": "#/$defs/resolved_by"},
         "proxy": {"$ref": "#/$defs/proxy"},
         "tls": {"$ref": "#/$defs/tls"},
         "redirects": {"$ref": "#/$defs/redirects"},
@@ -221,13 +223,17 @@
         "reused": {"type": "boolean", "description": "True when no connection was made for the request: each hop went on one that an earlier request of the run had made, so the time has no DNS, connect or TLS in it."}
       }
     },
+    "resolved_by": {
+      "type": "string",
+      "description": "The flag that sent the connection elsewhere than its host: --resolve or --connect-to, or --unix-socket or --abstract-unix-socket for a unix socket. Absent if none did: the host was looked up as usual, or a proxy did."
+    },
     "remote_addr": {
       "type": "string",
       "description": "The IP address and port connected to, those of the proxy if there was one: of the last hop, after redirects. *** if the host of the request holds a secret, since the address would tell it. Absent if no connection was made."
     },
     "proxy": {
       "type": "string",
-      "description": "The proxy the request went through, as scheme://host:port: the operator's policy's, or for a person at a terminal that of HTTPS_PROXY, HTTP_PROXY and NO_PROXY; a user and password in it are shown as ***@. Absent without a proxy."
+      "description": "The proxy the request went through, as scheme://host:port: the operator's policy's, or for a person at a terminal that of --proxy or of HTTPS_PROXY, HTTP_PROXY and NO_PROXY; a user and password in it are shown as ***@. Absent without a proxy."
     },
     "tls": {
       "type": "object",
@@ -261,6 +267,7 @@
           "location": {"type": "string", "description": "The Location header as the server wrote it, with secret values masked as ***."},
           "dropped": {"type": "array", "items": {"type": "string"}, "description": "The headers of the request that were not sent on, since the redirect leaves the origin (scheme, host and port) of the request: Authorization, Cookie, Proxy-Authorization, Referer and every header that holds a secret. Absent if none was."},
           "remote_addr": {"$ref": "#/$defs/remote_addr"},
+          "resolved_by": {"$ref": "#/$defs/resolved_by"},
           "proxy": {"$ref": "#/$defs/proxy"},
           "timing": {"$ref": "#/$defs/timing"}
         }
@@ -355,8 +362,27 @@
           "properties": {
             "allow": {"type": "array", "items": {"type": "string"}, "description": "The loopback and private addresses a run without a person at a terminal may connect to: host:port, an IP address with a port or without, or a CIDR prefix."},
             "proxy": {"type": "string", "description": "The proxy of every request, a URL; environment for that of HTTPS_PROXY, HTTP_PROXY and NO_PROXY."},
+            "proxy_auth": {"type": "string", "description": "$env NAME: the environment variable that holds the proxy's user and password. Its value is never shown."},
             "no_proxy": {"type": "array", "items": {"type": "string"}, "description": "Hosts that bypass the proxy."},
-            "insecure_hosts": {"type": "array", "items": {"type": "string"}, "description": "The hosts, host:port, whose certificates --insecure may leave unchecked without a person at a terminal."}
+            "insecure_hosts": {"type": "array", "items": {"type": "string"}, "description": "The hosts, host:port, whose certificates --insecure may leave unchecked without a person at a terminal."},
+            "resolve": {"type": "array", "items": {"type": "string"}, "description": "The --resolve, host:port:addr[,addr], that a run without a person at a terminal may give."},
+            "connect_to": {"type": "array", "items": {"type": "string"}, "description": "The --connect-to, host:port:to_host:to_port, that a run without a person at a terminal may give."},
+            "unix_sockets": {"type": "array", "items": {"type": "string"}, "description": "The sockets that --unix-socket may name without a person at a terminal, absolute paths; @name for --abstract-unix-socket."}
+          }
+        },
+        "hosts": {
+          "type": "array",
+          "description": "The TLS of each origin the policy names: CAs trusted for it alone, and a client certificate offered to it alone.",
+          "items": {
+            "type": "object",
+            "required": ["host", "origin"],
+            "properties": {
+              "host": {"type": "string", "description": "As the file writes it."},
+              "origin": {"type": "string", "description": "https://host:port."},
+              "cacert": {"type": "string", "description": "The path of a PEM file of CAs."},
+              "cert": {"type": "string", "description": "The path of a PEM client certificate."},
+              "key": {"type": "string", "description": "The path of its key, if not in cert."}
+            }
           }
         },
         "run": {

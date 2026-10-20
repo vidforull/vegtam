@@ -59,7 +59,8 @@ func newPKI(t *testing.T) *pki {
 }
 
 // issue returns a certificate named name and its key, in PEM: a client's,
-// or a server's for 127.0.0.1 and localhost.
+// or a server's for 127.0.0.1, localhost and api.example.test, a name that
+// the tests send to with --resolve or --connect-to and never look up.
 func (p *pki) issue(t *testing.T, name string, client bool) (certPEM, keyPEM []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -74,7 +75,7 @@ func (p *pki) issue(t *testing.T, name string, client bool) (certPEM, keyPEM []b
 		SerialNumber: serial, Subject: pkix.Name{CommonName: name},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}, DNSNames: []string{"localhost"},
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}, DNSNames: []string{"localhost", "api.example.test"},
 	}
 	if client {
 		tmpl.ExtKeyUsage, tmpl.IPAddresses, tmpl.DNSNames = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil, nil
@@ -518,5 +519,151 @@ func TestInsecureOrigins(t *testing.T) {
 	}
 	if _, err := do(t, opts, prepared(http.MethodGet, lit(other.URL), nil)); err == nil || !strings.Contains(err.Error(), "unknown authority") {
 		t.Errorf("another origin: %v", err)
+	}
+}
+
+// TestHostTLS checks the TLS that the operator's policy gives an origin:
+// its CA trusted for it alone, and its client certificate offered to it
+// alone, on any hop, but not in the place of that of the flags on the
+// request as written; each on a connection of its own.
+func TestHostTLS(t *testing.T) {
+	p, q := newPKI(t), newPKI(t)
+	type hit struct{ path, cert, conn string }
+	var mu sync.Mutex
+	var hits []hit
+	record := func(r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		hits = append(hits, hit{r.URL.Path, peer(r), r.RemoteAddr})
+	}
+	var host *httptest.Server
+	host = p.server(t, tls.VerifyClientCertIfGiven, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		if r.URL.Path == "/flag" {
+			http.Redirect(w, r, host.URL+"/again", http.StatusFound) // the same origin: the flag's certificate still
+		}
+	}))
+	// Of q's CA, and it asks for a certificate, which it records: so the
+	// policy's for host would show if it were offered there.
+	elsewhere := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		http.Redirect(w, r, host.URL+"/redirected", http.StatusFound)
+	}))
+	serverCert, err := tls.X509KeyPair(q.issue(t, "server", false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := q.pool()
+	clients.AddCert(p.cert)
+	elsewhere.TLS = &tls.Config{Certificates: []tls.Certificate{serverCert}, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: clients}
+	elsewhere.Config.ErrorLog = log.New(io.Discard, "", 0)
+	elsewhere.StartTLS()
+	t.Cleanup(elsewhere.Close)
+	unnamed := p.server(t, tls.NoClientCert, http.NotFoundHandler()) // of p's CA, and not in the policy
+	u, err := url.Parse(host.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hosts := map[string]TLS{origin(u): {Roots: p.pool(), Cert: p.client(t, "policy")}}
+	c := New(Options{MaxBody: 1 << 20, Transport: Transport{TLS: TLS{Roots: q.pool()}, Hosts: hosts}})
+	send := func(c *Client, u string) error {
+		_, _, err := c.Do(t.Context(), prepared(http.MethodGet, lit(u), nil), testSecrets)
+		return err
+	}
+	for _, u := range []string{host.URL + "/first", elsewhere.URL + "/away"} {
+		if err := send(c, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := send(c, unnamed.URL); err == nil || !strings.Contains(err.Error(), "unknown authority") {
+		t.Errorf("a server of the policy's CA, not named in it: %v", err)
+	}
+	// The flags' certificate goes to the request as written; the policy's
+	// to its origin after a redirect has led away.
+	flag := New(Options{MaxBody: 1 << 20, Transport: Transport{TLS: TLS{Roots: q.pool(), Cert: p.client(t, "flag")}, Hosts: hosts}})
+	for _, u := range []string{host.URL + "/flag", elsewhere.URL + "/again"} {
+		if err := send(flag, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := []hit{
+		{"/first", "policy", ""},
+		{"/away", "", ""},
+		{"/redirected", "policy", ""},
+		{"/flag", "flag", ""},
+		{"/again", "flag", ""},
+		{"/again", "flag", ""}, // elsewhere, as written: the flags' certificate
+		{"/redirected", "policy", ""},
+	}
+	if len(hits) != len(want) {
+		t.Fatalf("hits = %v", hits)
+	}
+	for i, h := range hits {
+		if h.path != want[i].path || h.cert != want[i].cert {
+			t.Errorf("hit %d = %s with %q, want %s with %q", i, h.path, h.cert, want[i].path, want[i].cert)
+		}
+	}
+	if hits[3].conn != hits[4].conn || hits[6].conn == hits[3].conn {
+		t.Errorf("connections: %v; want the flag's certificate on a connection of its own", hits)
+	}
+}
+
+func TestHostTLSFiles(t *testing.T) {
+	p := newPKI(t)
+	dir := t.TempDir()
+	write := func(name string, b []byte, mode os.FileMode) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	certPEM, keyPEM := p.issue(t, "me", true)
+	ca, cert, key := write("ca.pem", p.pem, 0o644), write("me.pem", certPEM, 0o644), write("me.key", keyPEM, 0o600)
+	base, err := LoadTLS(ca, "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := HostTLS(base, "api.example:443", ca, cert, key)
+	if err != nil || h.Cert == nil || h.Roots == base.Roots || h.Roots.Equal(x509.NewCertPool()) {
+		t.Errorf("HostTLS = %+v, %v", h, err)
+	}
+	if h, err = HostTLS(base, "api.example:443", "", cert, key); err != nil || h.Roots != base.Roots {
+		t.Errorf("without a CA, the flags' roots: %+v, %v", h, err)
+	}
+	for _, tt := range []struct {
+		name, ca, cert, key, want string
+	}{
+		{"a key others can read", "", cert, write("open.key", keyPEM, 0o640), "policy hosts.api.example:443: others can read the key " + filepath.Join(dir, "open.key") + "; make it private: chmod 600"},
+		{"in the certificate's file", "", write("both.pem", append(append([]byte{}, certPEM...), keyPEM...), 0o644), "", "others can read the key"},
+		{"no CA file", filepath.Join(dir, "none.pem"), "", "", "policy hosts.api.example:443: cacert: open "},
+		{"not PEM", "", write("me.p12", []byte("binary"), 0o600), key, "convert it: openssl pkcs12 -in FILE -nodes"},
+	} {
+		_, err := HostTLS(base, "api.example:443", tt.ca, tt.cert, tt.key)
+		if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != core.KindPolicy || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: %v; want a policy error with %q", tt.name, err, tt.want)
+		}
+	}
+}
+
+// TestHostCAProxy checks that a request to an origin whose CAs the policy
+// trusts does not go through an https proxy, which they would vouch for
+// too: net/http checks the proxy with the same config.
+func TestHostCAProxy(t *testing.T) {
+	p := newPKI(t)
+	via, err := url.Parse("https://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := New(Options{MaxBody: 1, Transport: Transport{Hosts: map[string]TLS{"https://api.example.test:443": {Roots: p.pool()}}}})
+	c.proxy, c.resolver = func(*http.Request) (*url.URL, error) { return via, nil }, tableResolver{"api.example.test": {"93.184.216.34"}}
+	if _, _, err := c.Do(t.Context(), prepared(http.MethodGet, lit("https://api.example.test/"), nil), testSecrets); !isUsage(err, "the CAs that the policy trusts for https://api.example.test:443 alone would vouch for it too") {
+		t.Errorf("%v", err)
 	}
 }

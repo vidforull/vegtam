@@ -34,6 +34,7 @@ type Hop struct {
 
 	Reused     bool     // the request went on a connection used before
 	RemoteAddr string   // the address connected to, the proxy's through one; "" if no connection was made
+	ResolvedBy string   // the flag that sent the connection elsewhere than the host: --resolve, --connect-to, --unix-socket or --abstract-unix-socket; "" for none
 	Proxy      *url.URL // the proxy the hop went through; nil for none
 	TLS        *TLSInfo // nil over http, and if no handshake got far enough
 	Status     int      // 0 without a response
@@ -172,6 +173,14 @@ func (h *hopTrace) proxyAddr() string {
 		return ""
 	}
 	return proxyHostPort(h.hop.Proxy)
+}
+
+// routed records the flag that sends the connection of the hop
+// elsewhere than its host, if any.
+func (h *hopTrace) routed(by string) {
+	if by != "" {
+		h.record(func(hop *Hop, _ time.Duration) { hop.ResolvedBy = by })
+	}
 }
 
 // proxied records the proxy u that the hop of r goes through.

@@ -310,7 +310,7 @@ func foreign(kind, value string) (msg string, refused, ok bool) {
 		return fmt.Sprintf("@%s (%s) %s, which a file may not do: %s", kind, client, what, instead), true, true
 	}
 	insecure := "--insecure does it, for a person at a terminal or for the hosts of the operator's policy"
-	proxy := "the proxy is the operator's to choose: network.proxy in the policy, or the environment's for a person at a terminal"
+	proxy := "the proxy is the operator's to choose: network.proxy in the policy, or --proxy and the environment's for a person at a terminal"
 	switch kind {
 	case "no-reject-unauthorized":
 		return refuse("httpyac", "turns off the check of server certificates", insecure)
@@ -329,6 +329,11 @@ func foreign(kind, value string) (msg string, refused, ok bool) {
 		return fmt.Sprintf("@%s (httpyac) is not supported: ignored", kind), false, true
 	case "prompt":
 		return "@prompt (JetBrains, httpyac) is not supported: ignored", false, true
+	}
+	if flag, ok := map[string]string{
+		"resolve": "--resolve", "connect-to": "--connect-to", "unix-socket": "--unix-socket", "abstract-unix-socket": "--abstract-unix-socket",
+	}[kind]; ok {
+		return refuse("curl", "sends requests to another address than their host", "pass "+flag+", for a person at a terminal or as the operator's policy allows")
 	}
 	if strings.HasPrefix(kind, "kulala-curl-") || strings.HasPrefix(kind, "curl-") { // since v6, and before
 		return refuse("kulala", "passes an option to curl", "use the flags of vegtam run, such as --cacert or --insecure")

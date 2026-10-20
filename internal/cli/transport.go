@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"golang.org/x/net/http/httpproxy"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/netguard"
 	"github.com/vidforull/vegtam/internal/core/policy"
@@ -27,6 +30,10 @@ type netFlags struct {
 	connect, read, maxTime timeout
 	timeoutUsed            bool // --timeout was given, the old name of --max-time
 	noCookies              bool
+	proxy, noProxy         string
+	proxyAuth              string // "$env NAME"
+	resolve, connectTo     []string
+	unixSocket, abstract   string
 	set                    *pflag.FlagSet // to tell a flag given from its default
 }
 
@@ -56,6 +63,13 @@ func (f *netFlags) add(fl *pflag.FlagSet) {
 	fl.StringVar(&f.key, "key", "", "the unencrypted PEM key of --cert, if it is not in the --cert file")
 	fl.BoolVar(&f.insecure, "insecure", false, "do not check server certificates; only for a person at a terminal, or for the hosts the policy names")
 	fl.BoolVar(&f.noCookies, "no-cookies", false, "keep no cookie jar: send no cookie that a response set, keep none")
+	fl.StringVar(&f.proxy, "proxy", "", "send through this proxy, http, https, socks5 or socks5h://host:port; only for a person at a terminal: without one, the policy's")
+	fl.StringVar(&f.noProxy, "noproxy", "", "hosts that go direct, in place of NO_PROXY and the policy's no_proxy: host,.domain,10.0.0.0/8; * for all")
+	fl.StringVar(&f.proxyAuth, "proxy-auth", "", "the proxy's user and password, from the environment: '$env NAME' for a variable that holds user:password")
+	fl.StringArrayVar(&f.resolve, "resolve", nil, "connect to host:port at these addresses, as host:port:addr[,addr], keeping the host for Host and TLS; again for more")
+	fl.StringArrayVar(&f.connectTo, "connect-to", nil, "connect to host:port at another host and port, as host:port:to_host:to_port, keeping the host for Host and TLS; again for more")
+	fl.StringVar(&f.unixSocket, "unix-socket", "", "send every request to this unix socket, the host of its URL going in Host, as for http://docker/v1.43/info")
+	fl.StringVar(&f.abstract, "abstract-unix-socket", "", "the same, to a socket of Linux's abstract namespace, named without its @")
 }
 
 // given reports whether the flag name was given.
@@ -82,7 +96,7 @@ func (f *netFlags) transport(cfg *Config, pol *policy.Policy) (exec.Transport, e
 
 // merged is merge for this process: its mode and its environment.
 func (f *netFlags) merged(cfg *Config, pol *policy.Policy) (exec.Transport, []string, error) {
-	return merge(pol, f, cfg.unattended(), httpproxy.FromEnvironment())
+	return merge(pol, f, cfg.unattended(), httpproxy.FromEnvironment(), env.Lookup)
 }
 
 // merge makes the transport of a run, in one order for every setting:
@@ -91,14 +105,15 @@ func (f *netFlags) merged(cfg *Config, pol *policy.Policy) (exec.Transport, []st
 // nothing else (see exec.Client.Settings). With unattended, no person is
 // at a terminal: what weakens a check then comes from the policy alone,
 // and a flag that would is an error that names the entry of the policy
-// to write. proxyEnv is the proxy that the environment names. It returns
+// to write. proxyEnv is the proxy that the environment names; lookup
+// reads the variable that holds the credentials of the proxy. It returns
 // the warnings to print.
-func merge(pol *policy.Policy, f *netFlags, unattended bool, proxyEnv *httpproxy.Config) (exec.Transport, []string, error) {
+func merge(pol *policy.Policy, f *netFlags, unattended bool, proxyEnv *httpproxy.Config, lookup func(string) (string, bool)) (exec.Transport, []string, error) {
 	m := &merger{pol: pol, f: f, unattended: unattended, tr: exec.Transport{
 		Connect: time.Duration(f.connect), Read: time.Duration(f.read), Total: time.Duration(f.maxTime),
 		NoCookies: f.noCookies, Guard: netguard.Rules{Unattended: unattended, Allow: slices.Clone(pol.Network.Allow)},
 	}}
-	for _, step := range []func() error{m.version, m.limits, m.tls, func() error { return m.proxy(proxyEnv) }} {
+	for _, step := range []func() error{m.version, m.limits, m.tls, m.routes, m.socket, func() error { return m.proxy(proxyEnv, lookup) }} {
 		if err := step(); err != nil {
 			return exec.Transport{}, nil, err
 		}
@@ -166,8 +181,9 @@ func (m *merger) limits() error {
 	return nil
 }
 
-// tls reads the files of the TLS flags. Without a person at a terminal,
-// --insecure leaves unchecked only the hosts the policy names for it.
+// tls reads the files of the TLS flags and of the policy's hosts. Without
+// a person at a terminal, --insecure leaves unchecked only the hosts the
+// policy names for it.
 func (m *merger) tls() error {
 	insecure, hosts := m.f.insecure, m.pol.Network.InsecureHosts
 	switch {
@@ -186,18 +202,124 @@ func (m *merger) tls() error {
 		m.warnings = append(m.warnings, insecureWarning)
 	}
 	var err error
-	m.tr.TLS, err = exec.LoadTLS(m.f.cacert, m.f.cert, m.f.key, insecure)
-	return err
+	if m.tr.TLS, err = exec.LoadTLS(m.f.cacert, m.f.cert, m.f.key, insecure); err != nil {
+		return err
+	}
+	for _, h := range m.pol.Hosts {
+		if m.tr.Hosts == nil {
+			m.tr.Hosts = map[string]exec.TLS{}
+		}
+		if m.tr.Hosts[h.Origin], err = exec.HostTLS(m.tr.TLS, h.Name, h.CACert, h.Cert, h.Key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// proxy sets the proxy of the run (see proxyOf). The guard connects to
-// it as the proxy, whatever its address, and to nothing else there.
-func (m *merger) proxy(proxyEnv *httpproxy.Config) error {
-	proxy, warning := proxyOf(m.pol, m.unattended, proxyEnv)
+// routes sets the routes of --resolve and --connect-to. Without a person
+// at a terminal, each must be one the policy lists: it sends the requests
+// of a host, and its secrets, to another address.
+func (m *merger) routes() error {
+	n := m.pol.Network
+	for _, s := range m.f.resolve {
+		r, err := netguard.ParseResolve(s)
+		switch {
+		case err != nil:
+			return usage("--resolve %v", err)
+		case m.unattended && !slices.ContainsFunc(n.Resolve, func(p netguard.Resolve) bool { return p.String() == r.String() }):
+			return usage("--resolve %s needs a person at a terminal, or the operator's policy to list it: network.resolve (see vegtam policy --help)", r)
+		}
+		m.tr.Routes.Resolve = append(m.tr.Routes.Resolve, r)
+	}
+	for _, s := range m.f.connectTo {
+		c, err := netguard.ParseConnectTo(s)
+		switch {
+		case err != nil:
+			return usage("--connect-to %v", err)
+		case m.unattended && !slices.Contains(n.ConnectTo, c):
+			return usage("--connect-to %s needs a person at a terminal, or the operator's policy to list it: network.connect_to (see vegtam policy --help)", c)
+		}
+		m.tr.Routes.ConnectTo = append(m.tr.Routes.ConnectTo, c)
+	}
+	return nil
+}
+
+// socket sets the unix socket that every request goes to, if a flag names
+// one. Without a person at a terminal, it must be one the policy lists: a
+// socket such as Docker's is root on the machine.
+func (m *merger) socket() error {
+	f, path, flag := m.f, m.f.unixSocket, "--unix-socket"
+	switch {
+	case f.unixSocket != "" && f.abstract != "":
+		return usage("--unix-socket and --abstract-unix-socket exclude each other")
+	case f.abstract != "" && runtime.GOOS != "linux":
+		return usage("--abstract-unix-socket: abstract sockets are Linux's")
+	case f.abstract != "":
+		path, flag = "@"+f.abstract, "--abstract-unix-socket"
+	case path == "":
+		return nil
+	default:
+		// A path, @ and all, as curl reads it: the socket is the file its
+		// links lead to now, which is what is checked and connected to.
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return usage("%s: %v", flag, err)
+		}
+		if path, err = filepath.EvalSymlinks(abs); err != nil {
+			path = abs
+		}
+	}
+	if f.proxy != "" || len(f.resolve) > 0 || len(f.connectTo) > 0 {
+		return usage("%s goes with no --proxy, --resolve or --connect-to: every request goes to the socket", flag)
+	}
+	if m.unattended && !slices.ContainsFunc(m.pol.Network.UnixSockets, func(s string) bool { return sameSocket(s, path) }) {
+		return usage("%s %s needs a person at a terminal, or the operator's policy to list it: network.unix_sockets (see vegtam policy --help)", flag, path)
+	}
+	m.tr.Socket = path
+	return nil
+}
+
+// sameSocket reports whether entry, a socket of the policy, an absolute
+// path or @name, is socket, a path whose links are resolved or @name.
+func sameSocket(entry, socket string) bool {
+	if strings.HasPrefix(entry, "@") || strings.HasPrefix(socket, "@") {
+		return entry == socket
+	}
+	if r, err := filepath.EvalSymlinks(entry); err == nil {
+		entry = r
+	}
+	return filepath.Clean(entry) == socket
+}
+
+// proxy sets the proxy of the run (see proxyOf), with the credentials
+// that the flags or the policy name. The guard connects to it as the
+// proxy, whatever its address, and to nothing else there.
+func (m *merger) proxy(proxyEnv *httpproxy.Config, lookup func(string) (string, bool)) error {
+	f := m.f
+	if f.proxy != "" {
+		u, err := url.Parse(f.proxy)
+		switch {
+		case m.unattended:
+			return usage("--proxy needs a person at a terminal: without one, requests go through the proxy of the operator's policy, network.proxy (see vegtam policy --help)")
+		case err == nil && u.User != nil:
+			return usage("--proxy: the URL holds a user or password, which other processes can read in the arguments of a command: pass --proxy-auth '$env NAME', for a variable that holds user:password")
+		}
+		if err = policy.CheckProxy(f.proxy); err != nil {
+			return usage("--proxy: %v", err)
+		}
+	}
+	var noProxy *string
+	if f.given("noproxy") {
+		noProxy = &f.noProxy
+	}
+	proxy, warning := proxyOf(m.pol, m.unattended, proxyEnv, f.proxy, noProxy)
 	if warning != "" {
 		m.warnings = append(m.warnings, warning)
 	}
 	if proxy == nil {
+		if f.proxyAuth != "" {
+			return usage("--proxy-auth without a proxy")
+		}
 		return nil
 	}
 	for _, s := range []string{proxy.HTTPProxy, proxy.HTTPSProxy} {
@@ -206,32 +328,88 @@ func (m *merger) proxy(proxyEnv *httpproxy.Config) error {
 			m.tr.Secrets = append(m.tr.Secrets, credentials(u.User.Username(), pw)...)
 		}
 	}
+	user, err := m.proxyUser(lookup)
+	if err != nil {
+		return err
+	}
 	find := proxy.ProxyFunc()
-	m.tr.Proxy = func(r *http.Request) (*url.URL, error) { return find(r.URL) }
+	m.tr.Proxy = func(r *http.Request) (*url.URL, error) {
+		u, err := find(r.URL)
+		if u != nil && user != nil {
+			with := *u
+			with.User = user
+			u = &with
+		}
+		return u, err
+	}
 	return nil
 }
 
-// proxyOf returns the proxy of a run, as the policy pol says, or nil for
-// none; and a warning when the environment names a proxy that is not
-// used. Without a person at a terminal, the environment's proxy is used
-// only if the policy says so: whoever sets the environment of a script
-// or an agent would choose where its requests go.
-func proxyOf(pol *policy.Policy, unattended bool, proxyEnv *httpproxy.Config) (*httpproxy.Config, string) {
-	noProxy := strings.Join(pol.Network.NoProxy, ",")
-	switch p := pol.Network.Proxy; {
-	case p == policy.ProxyEnvironment, p == "" && !unattended:
-		cfg := *proxyEnv
-		if noProxy != "" {
-			cfg.NoProxy = strings.Trim(cfg.NoProxy+","+noProxy, ",")
+// proxyUser returns the user and password of the proxy, from the
+// variable that --proxy-auth names, or the policy for its own proxy; nil
+// for none. No request may read the variable: the credentials go to the
+// proxy alone.
+func (m *merger) proxyUser(lookup func(string) (string, bool)) (*url.Userinfo, error) {
+	name, fail := "", func(format string, args ...any) error {
+		return core.Errorf(core.KindPolicy, core.Source{File: m.pol.Path}, "network.proxy_auth: "+format, args...)
+	}
+	switch p := m.pol.Network.Proxy; {
+	case m.f.proxyAuth != "" && m.unattended:
+		return nil, usage("--proxy-auth needs a person at a terminal: without one, the policy gives its proxy's credentials, network.proxy_auth (see vegtam policy --help)")
+	case m.f.proxyAuth != "":
+		var ok bool
+		if name, ok = policy.EnvRef(m.f.proxyAuth); !ok {
+			return nil, usage("--proxy-auth: want '$env NAME', for an environment variable that holds user:password: the credentials never go in the arguments of a command")
 		}
-		return &cfg, ""
+		fail = func(format string, args ...any) error { return usage("--proxy-auth: "+format, args...) }
+	case m.f.proxy == "" && p != "" && p != policy.ProxyEnvironment:
+		name = m.pol.Network.ProxyAuth // the policy's proxy, and no other, gets them
+	}
+	if name == "" {
+		return nil, nil
+	}
+	m.tr.HiddenEnv = append(m.tr.HiddenEnv, name)
+	v, ok := lookup(name)
+	u, pw, colon := strings.Cut(v, ":")
+	if !ok || !colon || u == "" {
+		return nil, fail("$env %s must hold the proxy's user and password, as user:password", name)
+	}
+	m.tr.Secrets = append(m.tr.Secrets, credentials(u, pw)...)
+	return url.UserPassword(u, pw), nil
+}
+
+// proxyOf returns the proxy of a run, or nil for none; and a warning when
+// the environment names a proxy that is not used. A person at a terminal
+// may name one, flag; the policy pol names that of a run without one, or
+// "environment" for the environment's, and a person's run otherwise takes
+// the environment's. Without a person, the environment's is used only if
+// the policy says so: whoever sets the environment of a script or an
+// agent would choose where its requests go. noProxy, if given, takes the
+// place of NO_PROXY and of the policy's no_proxy.
+func proxyOf(pol *policy.Policy, unattended bool, proxyEnv *httpproxy.Config, flag string, noProxy *string) (*httpproxy.Config, string) {
+	list := strings.Join(pol.Network.NoProxy, ",")
+	var cfg *httpproxy.Config
+	switch p := pol.Network.Proxy; {
+	case flag != "":
+		cfg = &httpproxy.Config{HTTPProxy: flag, HTTPSProxy: flag, NoProxy: list}
+	case p == policy.ProxyEnvironment, p == "" && !unattended:
+		env := *proxyEnv
+		if list != "" {
+			env.NoProxy = strings.Trim(env.NoProxy+","+list, ",")
+		}
+		cfg = &env
 	case p != "":
-		return &httpproxy.Config{HTTPProxy: p, HTTPSProxy: p, NoProxy: noProxy}, ""
+		cfg = &httpproxy.Config{HTTPProxy: p, HTTPSProxy: p, NoProxy: list}
 	case proxyEnv.HTTPProxy != "" || proxyEnv.HTTPSProxy != "":
 		return nil, "the proxy of the environment (HTTPS_PROXY, HTTP_PROXY) is not used without a person at a terminal: " +
 			"the operator's policy names the proxy, network.proxy, or \"environment\" for that one (see vegtam policy --help)"
+	default:
+		return nil, ""
 	}
-	return nil, ""
+	if noProxy != nil {
+		cfg.NoProxy = *noProxy
+	}
+	return cfg, ""
 }
 
 // proxyURL returns the URL of a proxy as the environment writes it, with a

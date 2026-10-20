@@ -158,6 +158,8 @@ func TestParseErrors(t *testing.T) {
 		{"kulala curl option", "# @kulala-curl--insecure\nGET https://example.com", 1, "@kulala-curl--insecure (kulala) passes an option to curl"},
 		{"old kulala curl option", "# @curl-insecure\nGET https://example.com", 1, "@curl-insecure (kulala) passes an option to curl"},
 		{"resterm TLS setting", "# @setting http-root-cas ./ca.pem\nGET https://example.com", 1, "@setting (resterm) sets http-root-cas, which a file may not do: pass --cacert"},
+		{"a route in a file", "# @resolve example.com:443:127.0.0.1\nGET https://example.com", 1, "@resolve (curl) sends requests to another address than their host, which a file may not do: pass --resolve"},
+		{"a socket in a file", "GET https://example.com\n# @unix-socket /var/run/docker.sock", 2, "pass --unix-socket"},
 		{"unknown directive of no client", "# @asert status == 200\nGET https://example.com", 1, "unknown directive @asert"},
 		{"bad time limit", "# @timeout soon\nGET https://example.com", 1, "@timeout soon: want a time such as 30 (seconds)"},
 		{"time limit twice", "# @max-time 5\nGET https://example.com\n# @max-time 6", 3, "@max-time given twice"},

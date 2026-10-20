@@ -269,12 +269,12 @@ func WriteTrace(b *strings.Builder, res *Result) {
 		if len(r.Dropped) > 0 {
 			parts = append(parts, "dropped "+strings.Join(r.Dropped, ", "))
 		}
-		writeHop(b, append(parts, hop(r.RemoteAddr, r.Proxy, nil, r.Timing)...))
+		writeHop(b, append(parts, hop(r.RemoteAddr, r.ResolvedBy, r.Proxy, nil, r.Timing)...))
 		if i < last {
 			writeCookies(b, res.Cookies, i)
 		}
 	}
-	writeHop(b, hop(res.RemoteAddr, res.Proxy, res.TLS, cmp.Or(res.last, res.Timing)))
+	writeHop(b, hop(res.RemoteAddr, res.ResolvedBy, res.Proxy, res.TLS, cmp.Or(res.last, res.Timing)))
 	if t := res.TLS; t != nil && t.Peer != nil {
 		fmt.Fprintf(b, "* certificate %s, issuer %s, expires %s\n", t.Peer.Subject, t.Peer.Issuer, t.Peer.NotAfter)
 	}
@@ -316,9 +316,10 @@ func writeCookies(b *strings.Builder, c *Cookies, hop int) {
 	}
 }
 
-// hop describes a hop that went to addr, through proxy if it is not "",
-// with the TLS of t if it is not nil, and took tm.
-func hop(addr, proxy string, t *TLS, tm *Timing) []string {
+// hop describes a hop that went to addr, where the flag by sent it if it
+// is not "", through proxy if it is not "", with the TLS of t if it is not
+// nil, and took tm.
+func hop(addr, by, proxy string, t *TLS, tm *Timing) []string {
 	var parts []string
 	switch {
 	case addr == "":
@@ -327,6 +328,9 @@ func hop(addr, proxy string, t *TLS, tm *Timing) []string {
 		parts = append(parts, "connected to "+addr+" (reused)")
 	default:
 		parts = append(parts, "connected to "+addr)
+	}
+	if by != "" {
+		parts = append(parts, "resolved by "+by)
 	}
 	if proxy != "" {
 		parts = append(parts, "through "+proxy)

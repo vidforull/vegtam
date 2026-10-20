@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +33,7 @@ type Policy struct {
 	Found    bool
 	Limits   Limits
 	Network  Network
+	Hosts    []Host   // by origin
 	Warnings []string // about the file itself
 }
 
@@ -47,16 +51,38 @@ type Network struct {
 	// Proxy is the proxy of every request, a URL; ProxyEnvironment for
 	// the environment's (HTTPS_PROXY, HTTP_PROXY, NO_PROXY); "" for none
 	// without a person at a terminal, and the environment's with one.
-	Proxy   string
-	NoProxy []string // hosts that bypass Proxy, as NO_PROXY writes them
+	Proxy string
+	// ProxyAuth names the environment variable that holds the user and
+	// password of the proxy, as user:password; "" for none.
+	ProxyAuth string
+	NoProxy   []string // hosts that bypass Proxy, as NO_PROXY writes them
 	// InsecureHosts are the hosts, host:port, whose certificates --insecure
 	// may leave unchecked without a person at a terminal.
 	InsecureHosts []string
+	// Resolve and ConnectTo are the --resolve and --connect-to that a run
+	// without a person at a terminal may give.
+	Resolve   []netguard.Resolve
+	ConnectTo []netguard.ConnectTo
+	// UnixSockets are the sockets that --unix-socket may name without a
+	// person at a terminal: absolute paths, and "@name" for those of
+	// --abstract-unix-socket.
+	UnixSockets []string
 }
 
 // ProxyEnvironment is the value of network.proxy that takes the proxy
 // from the environment.
 const ProxyEnvironment = "environment"
+
+// Host is the TLS of one origin: CAs trusted for it alone, on top of the
+// system's, and a client certificate offered to it alone. The paths are
+// absolute.
+type Host struct {
+	Origin string // https://host:port
+	Name   string // as the file writes it
+	CACert string
+	Cert   string
+	Key    string // "" if in Cert
+}
 
 // PolicyFile is the name of the policy's file, in vegtam's configuration
 // directory.
@@ -180,9 +206,18 @@ type file struct {
 	Network *struct {
 		Allow         []string `json:"allow"`
 		Proxy         string   `json:"proxy"`
+		ProxyAuth     string   `json:"proxy_auth"`
 		NoProxy       []string `json:"no_proxy"`
 		InsecureHosts []string `json:"insecure_hosts"`
+		Resolve       []string `json:"resolve"`
+		ConnectTo     []string `json:"connect_to"`
+		UnixSockets   []string `json:"unix_sockets"`
 	} `json:"network"`
+	Hosts map[string]struct {
+		CACert string `json:"cacert"`
+		Cert   string `json:"cert"`
+		Key    string `json:"key"`
+	} `json:"hosts"`
 }
 
 // Parse parses b, the contents of the policy file at path.
@@ -219,15 +254,49 @@ func Parse(path string, b []byte) (*Policy, error) {
 		}
 	}
 	if n := f.Network; n != nil {
-		if err := p.network(n.Allow, n.Proxy, n.NoProxy, n.InsecureHosts); err != nil {
+		if err := p.network(n.Allow, n.Proxy, n.ProxyAuth, n.NoProxy, n.InsecureHosts); err != nil {
 			return nil, fail("network.%v", err)
 		}
+		if err := p.routes(n.Resolve, n.ConnectTo); err != nil {
+			return nil, fail("network.%v", err)
+		}
+		for _, s := range n.UnixSockets {
+			if name, ok := strings.CutPrefix(s, "@"); ok && name != "" {
+				p.Network.UnixSockets = append(p.Network.UnixSockets, s)
+				continue
+			}
+			path, err := expand(s)
+			if err != nil {
+				return nil, fail("network.unix_sockets: %v; or @name for an abstract one", err)
+			}
+			p.Network.UnixSockets = append(p.Network.UnixSockets, path)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(f.Hosts)) {
+		h := f.Hosts[name]
+		host, err := p.host(name, h.CACert, h.Cert, h.Key)
+		if err != nil {
+			return nil, fail("hosts.%s: %v", name, err)
+		}
+		p.Hosts = append(p.Hosts, host)
 	}
 	return p, nil
 }
 
+var envName = regexp.MustCompile(`^\$env ([A-Za-z_][A-Za-z0-9_]*)$`)
+
+// EnvRef returns the name of the environment variable that s, "$env
+// NAME", names, as network.proxy_auth and --proxy-auth do.
+func EnvRef(s string) (string, bool) {
+	m := envName.FindStringSubmatch(s)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
 // network sets the network of p from the fields of the file.
-func (p *Policy) network(allow []string, proxy string, noProxy, insecure []string) error {
+func (p *Policy) network(allow []string, proxy, auth string, noProxy, insecure []string) error {
 	n := &p.Network
 	for _, s := range allow {
 		e, err := netguard.ParseEntry(s)
@@ -242,6 +311,18 @@ func (p *Policy) network(allow []string, proxy string, noProxy, insecure []strin
 		}
 	}
 	n.Proxy = proxy
+	if auth != "" {
+		name, ok := EnvRef(auth)
+		switch {
+		case !ok:
+			return fmt.Errorf("proxy_auth: want \"$env NAME\", an environment variable that holds user:password; the credentials are never written in the policy")
+		case proxy == "":
+			return fmt.Errorf("proxy_auth without a proxy")
+		case proxy == ProxyEnvironment:
+			return fmt.Errorf("proxy_auth goes with the policy's proxy, a URL, not the environment's, which whoever sets the environment chooses")
+		}
+		n.ProxyAuth = name
+	}
 	for _, s := range noProxy {
 		if s == "" || strings.ContainsAny(s, ", \t") {
 			return fmt.Errorf("no_proxy: %q: want one host, domain or prefix for each entry", s)
@@ -249,11 +330,31 @@ func (p *Policy) network(allow []string, proxy string, noProxy, insecure []strin
 		n.NoProxy = append(n.NoProxy, s)
 	}
 	for _, s := range insecure {
-		hp, err := hostPort(s)
+		hp, err := hostPort(s, "")
 		if err != nil {
 			return fmt.Errorf("insecure_hosts: %w", err)
 		}
 		n.InsecureHosts = append(n.InsecureHosts, hp)
+	}
+	return nil
+}
+
+// routes sets the routes of p from the fields of the file.
+func (p *Policy) routes(resolve, connectTo []string) error {
+	n := &p.Network
+	for _, s := range resolve {
+		r, err := netguard.ParseResolve(s)
+		if err != nil {
+			return fmt.Errorf("resolve: %w", err)
+		}
+		n.Resolve = append(n.Resolve, r)
+	}
+	for _, s := range connectTo {
+		c, err := netguard.ParseConnectTo(s)
+		if err != nil {
+			return fmt.Errorf("connect_to: %w", err)
+		}
+		n.ConnectTo = append(n.ConnectTo, c)
 	}
 	return nil
 }
@@ -270,24 +371,79 @@ func CheckProxy(s string) error {
 	case u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h":
 		return fmt.Errorf("%q: want an http, https, socks5 or socks5h URL, such as http://proxy.example:3128", s)
 	case u.User != nil:
-		return errors.New("the URL holds a user or password, which is never written there")
+		return errors.New("the URL holds a user or password, which is never written there: name an environment variable that holds them, \"$env NAME\"")
 	case u.Hostname() == "", u.Path != "" && u.Path != "/", u.RawQuery != "", u.Fragment != "":
 		return fmt.Errorf("%q: want a scheme, a host and a port, and nothing more", s)
 	}
 	return nil
 }
 
+// host returns the TLS of the host name, host or host:port, from the
+// paths of the file.
+func (p *Policy) host(name, ca, cert, key string) (Host, error) {
+	hp, err := hostPort(name, "443")
+	if err != nil {
+		return Host{}, err
+	}
+	h := Host{Origin: "https://" + hp, Name: name}
+	switch {
+	case key != "" && cert == "":
+		return Host{}, errors.New("key needs cert")
+	case ca == "" && cert == "":
+		return Host{}, errors.New("give cacert, or cert, or both")
+	}
+	for _, f := range []struct {
+		name, path string
+		to         *string
+	}{{"cacert", ca, &h.CACert}, {"cert", cert, &h.Cert}, {"key", key, &h.Key}} {
+		if f.path == "" {
+			continue
+		}
+		if *f.to, err = expand(f.path); err != nil {
+			return Host{}, fmt.Errorf("%s: %w", f.name, err)
+		}
+	}
+	return h, nil
+}
+
 // hostPort returns s, host:port, with the host in lower case and without
-// a final dot, as exec writes the host of an origin.
-func hostPort(s string) (string, error) {
+// a final dot; with a port of def if s has none and def is not "".
+func hostPort(s, def string) (string, error) {
 	host, port, err := net.SplitHostPort(s)
+	if err != nil && def != "" {
+		host, port, err = s, def, nil
+	}
 	n, perr := strconv.ParseUint(port, 10, 16)
-	name := netguard.Name(host)
-	if ip := net.ParseIP(host); ip != nil {
+	name := netguard.Name(strings.Trim(host, "[]"))
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
 		name = ip.String()
 	}
 	if err != nil || perr != nil || n == 0 || name == "" {
 		return "", fmt.Errorf("%q: want host:port, such as api.example:443", s)
 	}
 	return net.JoinHostPort(name, port), nil
+}
+
+// expand returns path, absolute or under the home directory as ~/path.
+func expand(path string) (string, error) {
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, rest), nil
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("%q: want an absolute path, or ~/path for one in the home directory", path)
+	}
+	return filepath.Clean(path), nil
+}
+
+// HostFor returns the TLS of the policy for origin, if it has one.
+func (p *Policy) HostFor(origin string) (Host, bool) {
+	i := slices.IndexFunc(p.Hosts, func(h Host) bool { return h.Origin == origin })
+	if i < 0 {
+		return Host{}, false
+	}
+	return p.Hosts[i], true
 }

@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"encoding/base64"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -67,8 +70,11 @@ func TestMerge(t *testing.T) {
 		insecure           bool
 		insecureOrigins    []string
 		allow              []string
+		vars               map[string]string // of the environment, for proxy_auth
 		secrets            []string
+		hidden             []string // environment variables no request may read
 		warnings, errorHas []string
+		kind               core.Kind // of the error; usage if not given
 	}{
 		{
 			name: "on its own", policy: `{}`,
@@ -147,6 +153,47 @@ func TestMerge(t *testing.T) {
 			httpsProxy: "socks5h://proxy.example", plain: "socks5h://proxy.example",
 			direct: []string{"https://api.example/", "http://sub.api.example/"},
 		},
+		{
+			name: "the policy's proxy, with credentials", policy: `{"network": {"proxy": "http://proxy.example:3128", "proxy_auth": "$env AUTH"}}`,
+			unattended: true, vars: map[string]string{"AUTH": "vegtam:pa55:word"},
+			httpsProxy: "http://vegtam:pa55%3Aword@proxy.example:3128", plain: "http://vegtam:pa55%3Aword@proxy.example:3128",
+			secrets: []string{"vegtam:pa55:word", "pa55:word"}, hidden: []string{"AUTH"},
+		},
+		{
+			name: "the policy's proxy, credentials not set", policy: `{"network": {"proxy": "http://proxy.example:3128", "proxy_auth": "$env AUTH"}}`,
+			errorHas: []string{"network.proxy_auth: $env AUTH must hold the proxy's user and password"}, kind: core.KindPolicy,
+		},
+		{
+			name: "--proxy with a person", policy: `{"network": {"proxy": "http://proxy.example:3128"}}`, env: env,
+			args:       []string{"--proxy", "socks5://flag-proxy.example"},
+			httpsProxy: "socks5://flag-proxy.example", plain: "socks5://flag-proxy.example",
+		},
+		{name: "--proxy alone", policy: `{}`, args: []string{"--proxy", "http://p.example:1"}, unattended: true, errorHas: []string{"--proxy needs a person at a terminal", "network.proxy"}},
+		{name: "--proxy with a password", policy: `{}`, args: []string{"--proxy", "http://u:p@p.example:1"}, errorHas: []string{"--proxy-auth '$env NAME'"}},
+		{name: "--proxy of another kind", policy: `{}`, args: []string{"--proxy", "ftp://p.example"}, errorHas: []string{"--proxy: \"ftp://p.example\": want an http, https, socks5 or socks5h URL"}},
+		{
+			name: "--noproxy", policy: `{}`, env: env, args: []string{"--noproxy", "api.example.test"},
+			direct: []string{"https://api.example.test/", "http://sub.api.example.test/"},
+		},
+		{
+			name: "--noproxy for all", policy: `{"network": {"proxy": "http://proxy.example:3128"}}`, args: []string{"--noproxy", "*"}, unattended: true,
+			direct: []string{"https://api.example.test/", "http://other.example/"},
+		},
+		{
+			name: "--proxy-auth", policy: `{"network": {"proxy": "http://proxy.example:3128", "proxy_auth": "$env POLICY"}}`,
+			args: []string{"--proxy-auth", "$env AUTH"}, vars: map[string]string{"AUTH": "me:s3cret"},
+			httpsProxy: "http://me:s3cret@proxy.example:3128", plain: "http://me:s3cret@proxy.example:3128", secrets: []string{"me:s3cret"}, // s3cret is too short to hide on its own
+			hidden: []string{"AUTH"},
+		},
+		{
+			name: "--proxy, and the policy's credentials", policy: `{"network": {"proxy": "http://proxy.example:3128", "proxy_auth": "$env POLICY"}}`,
+			args: []string{"--proxy", "http://debug-proxy.example:8080"}, vars: map[string]string{"POLICY": "corp:C0rpS3cretPass"},
+			httpsProxy: "http://debug-proxy.example:8080", plain: "http://debug-proxy.example:8080", // the policy's are its proxy's alone
+		},
+		{name: "--proxy-auth alone", policy: `{"network": {"proxy": "http://proxy.example:3128"}}`, args: []string{"--proxy-auth", "$env AUTH"}, unattended: true, errorHas: []string{"--proxy-auth needs a person at a terminal", "network.proxy_auth"}},
+		{name: "--proxy-auth not a variable", policy: `{}`, args: []string{"--proxy", "http://p.example:1", "--proxy-auth", "me:s3cret"}, errorHas: []string{"--proxy-auth: want '$env NAME'"}},
+		{name: "--proxy-auth not set", policy: `{}`, args: []string{"--proxy", "http://p.example:1", "--proxy-auth", "$env AUTH"}, errorHas: []string{"--proxy-auth: $env AUTH must hold the proxy's user and password"}},
+		{name: "--proxy-auth without a proxy", policy: `{}`, args: []string{"--proxy-auth", "$env AUTH"}, unattended: true, errorHas: []string{"--proxy-auth without a proxy"}},
 		{name: "versions", policy: `{}`, args: []string{"--http1.1", "--http2"}, errorHas: []string{"exclude each other"}},
 	}
 	for _, tt := range tests {
@@ -159,12 +206,17 @@ func TestMerge(t *testing.T) {
 			if proxyEnv == nil {
 				proxyEnv = &httpproxy.Config{}
 			}
-			tr, warnings, err := merge(pol, flagsOf(t, tt.args...), tt.unattended, proxyEnv)
+			lookup := func(name string) (string, bool) { v, ok := tt.vars[name]; return v, ok }
+			tr, warnings, err := merge(pol, flagsOf(t, tt.args...), tt.unattended, proxyEnv, lookup)
 			if tt.errorHas != nil {
+				kind := tt.kind
+				if kind == "" {
+					kind = core.KindUsage
+				}
 				e, ok := errors.AsType[*core.Error](err)
 				for _, want := range tt.errorHas {
-					if !ok || e.Kind != core.KindUsage || !strings.Contains(err.Error(), want) {
-						t.Errorf("%v; want a usage error with %q", err, want)
+					if !ok || e.Kind != kind || !strings.Contains(err.Error(), want) {
+						t.Errorf("%v; want an error of kind %s with %q", err, kind, want)
 					}
 				}
 				return
@@ -172,8 +224,8 @@ func TestMerge(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !slices.Equal(tr.Secrets, tt.secrets) {
-				t.Errorf("secrets %q, want %q", tr.Secrets, tt.secrets)
+			if !slices.Equal(tr.Secrets, tt.secrets) || !slices.Equal(tr.HiddenEnv, tt.hidden) {
+				t.Errorf("secrets %q, hidden %q; want %q, %q", tr.Secrets, tr.HiddenEnv, tt.secrets, tt.hidden)
 			}
 			if got := [3]time.Duration{tr.Connect, tr.Read, tr.Total}; got != tt.limits && tt.limits != ([3]time.Duration{}) {
 				t.Errorf("limits %v, want %v", got, tt.limits)
@@ -387,15 +439,7 @@ func TestPolicyCeilings(t *testing.T) {
 func TestInsecureHosts(t *testing.T) {
 	fx := newFixture(t)
 	file := fx.transportFile(t)
-	var env struct {
-		Test map[string]string `json:"test"`
-	}
-	b, err := os.ReadFile(fx.path("http-client.env.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	decode(t, string(b), &env)
-	tlsHost := strings.TrimPrefix(env.Test["tls"], "https://")
+	tlsHost := strings.TrimPrefix(fx.env(t, "tls"), "https://")
 	writePolicy(t, `{"network": {"allow": ["127.0.0.1"], "insecure_hosts": ["`+tlsHost+`"]}}`)
 	code, stdout, stderr := runCLI(t, false, "run", file+"#untrusted", "-e", "test", "--insecure")
 	if code != exitOK || !strings.Contains(stdout, `"tls_verified":false`) ||
@@ -439,5 +483,234 @@ func TestEnvironmentProxy(t *testing.T) {
 	code, _, stderr = runCLI(t, false, echo...)
 	if code != exitOK || !strings.Contains(stderr, "warning: the proxy of the environment (HTTPS_PROXY, HTTP_PROXY) is not used without a person at a terminal") {
 		t.Errorf("%q = %d, %s", echo, code, stderr)
+	}
+}
+
+// TestHostTLSPolicy checks the TLS that the policy gives one origin: its
+// CA, which no other origin is checked with, and its client certificate.
+func TestHostTLSPolicy(t *testing.T) {
+	fx := newFixture(t)
+	file := fx.transportFile(t)
+	cert, key := clientCert(t, t.TempDir())
+	tlsHost, mtlsHost := strings.TrimPrefix(fx.env(t, "tls"), "https://"), strings.TrimPrefix(fx.env(t, "mtls"), "https://")
+	writePolicy(t, fmt.Sprintf(`{"network": {"allow": ["127.0.0.1"]}, "hosts": {%q: {"cacert": %q}, %q: {"cacert": %q, "cert": %q, "key": %q}}}`,
+		tlsHost, fx.ca, mtlsHost, fx.ca, cert, key))
+	for _, tt := range []struct {
+		ref  string
+		code int
+		want string
+	}{
+		{"#untrusted", exitOK, `"tls_verified":true`},
+		{"#mtls", exitOK, `"status":200`},
+	} {
+		if code, stdout, stderr := runCLI(t, false, "run", file+tt.ref, "-e", "test"); code != tt.code || !strings.Contains(stdout, tt.want) {
+			t.Errorf("%s = %d\n%s\n%s", tt.ref, code, stdout, stderr)
+		}
+	}
+	// The certificate of one origin is not offered to the other.
+	writePolicy(t, fmt.Sprintf(`{"network": {"allow": ["127.0.0.1"]}, "hosts": {%q: {"cacert": %q, "cert": %q, "key": %q}, %q: {"cacert": %q}}}`,
+		tlsHost, fx.ca, cert, key, mtlsHost, fx.ca))
+	if code, _, stderr := runCLI(t, false, "run", file+"#mtls", "-e", "test"); code != exitNetwork || !strings.Contains(stderr, "certificate required") {
+		t.Errorf("the certificate of another origin = %d, %s", code, stderr)
+	}
+	// The CA of one origin is not trusted for the other.
+	writePolicy(t, fmt.Sprintf(`{"network": {"allow": ["127.0.0.1"]}, "hosts": {%q: {"cacert": %q}}}`, tlsHost, fx.ca))
+	if code, _, stderr := runCLI(t, false, "run", file+"#mtls", "-e", "test"); code != exitNetwork || !strings.Contains(stderr, "unknown authority") {
+		t.Errorf("another origin = %d, %s", code, stderr)
+	}
+	if err := os.Chmod(key, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	writePolicy(t, fmt.Sprintf(`{"hosts": {%q: {"cert": %q, "key": %q}}}`, mtlsHost, cert, key))
+	if code, _, stderr := runCLI(t, false, "run", file+"#mtls", "-e", "test"); code != exitPolicy || !strings.Contains(stderr, "others can read the key") {
+		t.Errorf("a key others can read = %d, %s", code, stderr)
+	}
+}
+
+// TestProxyAuth sends through the policy's proxy with the credentials
+// that an environment variable holds: the proxy gets them, and no output
+// shows them, in any form, though the proxy echoes them.
+func TestProxyAuth(t *testing.T) {
+	fx := newFixture(t)
+	const credentials = "vegtam:Pr0xy/P4ss+word"
+	var mu sync.Mutex
+	var got []string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got = append(got, r.Header.Get("Proxy-Authorization"))
+		mu.Unlock()
+		w.Header().Set("X-Proxy-Authorization", r.Header.Get("Proxy-Authorization"))
+		fmt.Fprintf(w, `{"proxy_authorization": %q, "url": %q}`, r.Header.Get("Proxy-Authorization"), r.URL.String())
+	}))
+	defer proxy.Close()
+	// An address of the documentation's, which the proxy answers itself:
+	// nothing is looked up, and nothing leaves the machine.
+	if err := os.WriteFile(fx.path("proxied.http"), []byte("GET http://192.0.2.1/x?key={{token}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writePolicy(t, `{"network": {"proxy": "`+proxy.URL+`", "proxy_auth": "$env VEGTAM_TEST_PROXY_AUTH"}}`)
+	t.Setenv("VEGTAM_TEST_PROXY_AUTH", credentials)
+	forms := []string{"Pr0xy/P4ss+word", base64.StdEncoding.EncodeToString([]byte(credentials)), url.QueryEscape("Pr0xy/P4ss+word"), url.PathEscape("Pr0xy/P4ss+word")}
+	for _, args := range [][]string{{"--json"}, {"--verbose"}} {
+		code, stdout, stderr := runCLI(t, args[0] == "--verbose", append([]string{"run", fx.path("proxied.http") + "#1", "-e", "test"}, args...)...)
+		if code != exitOK || !strings.Contains(stdout, "http://***@"+strings.TrimPrefix(proxy.URL, "http://")) {
+			t.Errorf("%q = %d\n%s\n%s", args, code, stdout, stderr)
+		}
+		for _, f := range forms {
+			if strings.Contains(stdout+stderr, f) {
+				t.Errorf("%q: %q in the output\n%s\n%s", args, f, stdout, stderr)
+			}
+		}
+	}
+	mu.Lock()
+	if len(got) != 2 || got[0] != "Basic "+base64.StdEncoding.EncodeToString([]byte(credentials)) {
+		t.Errorf("the proxy got %q", got)
+	}
+	mu.Unlock()
+	// No request may read the variable, which would send the credentials
+	// wherever its file says.
+	if err := os.WriteFile(fx.path("steal.http"), []byte("GET http://192.0.2.1/?c={{$env VEGTAM_TEST_PROXY_AUTH}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, stderr := runCLI(t, false, "run", fx.path("steal.http")+"#1", "-e", "test"); code != exitPolicy ||
+		!strings.Contains(stderr, "{{$env VEGTAM_TEST_PROXY_AUTH}} holds the credentials of the proxy, which go to the proxy alone") || strings.Contains(stdout+stderr, "P4ss") {
+		t.Errorf("a request that reads the credentials = %d\n%s\n%s", code, stdout, stderr)
+	}
+	mu.Lock()
+	if len(got) != 2 {
+		t.Errorf("the proxy got %q", got)
+	}
+	mu.Unlock()
+	t.Setenv("VEGTAM_TEST_PROXY_AUTH", "no colon")
+	if code, _, stderr := runCLI(t, false, "run", fx.path("proxied.http")+"#1", "-e", "test"); code != exitPolicy ||
+		!strings.Contains(stderr, "network.proxy_auth: $env VEGTAM_TEST_PROXY_AUTH must hold the proxy's user and password, as user:password") {
+		t.Errorf("credentials that are not user:password = %d, %s", code, stderr)
+	}
+}
+
+// TestProxyFlag sends through --proxy, which a person at a terminal may
+// give and a run without one may not.
+func TestProxyFlag(t *testing.T) {
+	fx := newFixture(t)
+	var mu sync.Mutex
+	var got []string
+	proxy := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, r.URL.String())
+	}))
+	defer proxy.Close()
+	if err := os.WriteFile(fx.path("proxied.http"), []byte("GET http://192.0.2.1/x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"run", fx.path("proxied.http") + "#1", "--proxy", proxy.URL}
+	code, stdout, stderr := runAt(t, append(args, "--verbose")...)
+	if code != exitOK || !strings.Contains(stdout, "through "+proxy.URL) {
+		t.Errorf("--proxy with a person = %d\n%s\n%s", code, stdout, stderr)
+	}
+	mu.Lock()
+	if !slices.Equal(got, []string{"http://192.0.2.1/x"}) {
+		t.Errorf("the proxy got %q", got)
+	}
+	mu.Unlock()
+	if code, _, stderr := runCLI(t, false, args...); code != exitUsage || !strings.Contains(stderr, "--proxy needs a person at a terminal") {
+		t.Errorf("--proxy alone = %d, %s", code, stderr)
+	}
+}
+
+// TestRouteFlags sends to api.example.test, which is never looked up,
+// at the address that --resolve or --connect-to gives: for a person at a
+// terminal, and without one as the policy lists the flag.
+func TestRouteFlags(t *testing.T) {
+	fx := newFixture(t)
+	port := fx.host[strings.LastIndex(fx.host, ":")+1:]
+	if err := os.WriteFile(fx.path("routed.http"), []byte("GET http://api.example.test:"+port+"/echo?key={{token}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolve := "api.example.test:" + port + ":127.0.0.1"
+	connect := "api.example.test:" + port + ":127.0.0.1:"
+	run := []string{"run", fx.path("routed.http") + "#1", "-e", "test"}
+	for _, tt := range []struct {
+		name     string
+		terminal bool
+		policy   string
+		args     []string
+		code     int
+		want     string // in stdout or stderr
+	}{
+		{"--resolve, a person, --json", true, "", []string{"--resolve", resolve, "--json"}, exitUsage, "network.resolve"},
+		{"--resolve, a person, --verbose", true, "", []string{"--resolve", resolve, "--verbose"}, exitOK, "connected to 127.0.0.1:" + port + " · resolved by --resolve"},
+		{"--resolve alone", false, "", []string{"--resolve", resolve}, exitUsage, "--resolve " + resolve + " needs a person at a terminal, or the operator's policy to list it: network.resolve"},
+		{"--resolve alone, listed", false, `{"network": {"allow": ["127.0.0.1"], "resolve": ["API.example.test:` + port + `:127.0.0.1"]}}`, []string{"--resolve", resolve}, exitOK, `"resolved_by":"--resolve"`},
+		{"--connect-to alone, listed", false, `{"network": {"allow": ["127.0.0.1"], "connect_to": ["` + connect + `"]}}`, []string{"--connect-to", connect}, exitOK, `"resolved_by":"--connect-to"`},
+		{"--connect-to alone, another listed", false, `{"network": {"connect_to": ["api.example.test:1:127.0.0.1:"]}}`, []string{"--connect-to", connect}, exitUsage, "network.connect_to"},
+		{"a bad --resolve", true, "", []string{"--resolve", "api.example.test:127.0.0.1"}, exitUsage, "want host:port:address"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.policy != "" {
+				setPolicy(t, fx, tt.policy)
+			}
+			args := append(append([]string{}, run...), tt.args...)
+			code, stdout, stderr := runCLI(t, false, args...)
+			if tt.terminal {
+				code, stdout, stderr = runAt(t, args...)
+			}
+			if code != tt.code || !strings.Contains(stdout+stderr, tt.want) || strings.Contains(stdout+stderr, privateSecret) {
+				t.Errorf("%q = %d\n%s\n%s", tt.args, code, stdout, stderr)
+			}
+		})
+	}
+}
+
+// TestUnixSocketFlag sends to a server on a unix socket that --unix-socket
+// names: for a person at a terminal, and without one as the policy lists
+// the socket, by the path its links lead to.
+func TestUnixSocketFlag(t *testing.T) {
+	fx := newFixture(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api.sock")
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(fx.handler())
+	srv.Listener = l
+	srv.Start()
+	defer srv.Close()
+	link := filepath.Join(dir, "link.sock")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fx.path("socket.http"), []byte("GET http://docker/echo?key={{token}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := []string{"run", fx.path("socket.http") + "#1", "-e", "test"}
+	for _, tt := range []struct {
+		name     string
+		terminal bool
+		policy   string
+		args     []string
+		code     int
+		want     string
+	}{
+		{"a person", true, "", []string{"--unix-socket", path, "--verbose"}, exitOK, "connected to " + path + " · resolved by --unix-socket"},
+		{"alone", false, "", []string{"--unix-socket", path}, exitUsage, "--unix-socket " + path + " needs a person at a terminal, or the operator's policy to list it: network.unix_sockets"},
+		{"alone, listed", false, `{"network": {"unix_sockets": ["` + link + `"]}}`, []string{"--unix-socket", path}, exitOK, `"resolved_by":"--unix-socket"`},
+		{"with --proxy", true, "", []string{"--unix-socket", path, "--proxy", "http://127.0.0.1:1"}, exitUsage, "--unix-socket goes with no --proxy"},
+		{"both kinds", true, "", []string{"--unix-socket", path, "--abstract-unix-socket", "x"}, exitUsage, "exclude each other"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.policy != "" {
+				setPolicy(t, fx, tt.policy)
+			}
+			args := append(append([]string{}, run...), tt.args...)
+			code, stdout, stderr := runCLI(t, false, args...)
+			if tt.terminal {
+				code, stdout, stderr = runAt(t, args...)
+			}
+			if code != tt.code || !strings.Contains(stdout+stderr, tt.want) || strings.Contains(stdout+stderr, privateSecret) {
+				t.Errorf("%q = %d\n%s\n%s", tt.args, code, stdout, stderr)
+			}
+		})
 	}
 }

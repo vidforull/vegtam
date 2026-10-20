@@ -60,6 +60,7 @@ type Result struct {
 	Response   *Response  `json:"response,omitempty"`  // nil on an error and for a dry run
 	Timing     *Timing    `json:"timing,omitempty"`
 	RemoteAddr string     `json:"remote_addr,omitempty"` // of the last hop; *** if its host holds a secret
+	ResolvedBy string     `json:"resolved_by,omitempty"` // the flag that sent the last hop elsewhere than its host
 	Proxy      string     `json:"proxy,omitempty"`       // of the last hop, its user and password shown as ***
 	TLS        *TLS       `json:"tls,omitempty"`         // of the last hop
 	Redirects  []Redirect `json:"redirects,omitempty"`

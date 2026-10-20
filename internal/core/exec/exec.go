@@ -370,6 +370,9 @@ func (c *Client) netError(ctx context.Context, p *core.Prepared, s core.Secrets,
 	if errors.Is(err, errLookup) {
 		return timeout(core.PhaseConnect, "%s: %v, within %s (connect timeout)", where, errLookup, core.FormatTimeout(st.Connect))
 	}
+	if re, ok := errors.AsType[*routeError](err); ok {
+		return core.Errorf(core.KindUsage, p.Request.Source, "%s: %s", where, hide(p, s, wire, re.Error()))
+	}
 	if ge, ok := errors.AsType[*netguard.Error](err); ok {
 		return core.Errorf(core.KindPolicy, p.Request.Source, "%s: %s", where, hide(p, s, wire, ge.Error()))
 	}

@@ -70,6 +70,9 @@ type Options struct {
 	// EnvHint says how to select an environment, in the error of a
 	// variable that none is selected for: "use -e <name>" if empty.
 	EnvHint string
+	// Hidden are environment variables that no {{$env NAME}} may read:
+	// those that hold the proxy's credentials, which go to the proxy alone.
+	Hidden []string
 }
 
 // captured is a value an @capture took.
@@ -189,6 +192,11 @@ func (l *Loader) Fill(p *core.Prepared) (*core.Prepared, error) {
 	}
 	return &q, nil
 }
+
+// Lookup returns the value of the environment variable name of the
+// process, as {{$env NAME}} reads it: the operator's policy names the
+// credentials of its proxy so.
+func Lookup(name string) (string, bool) { return os.LookupEnv(name) }
 
 func (l *Loader) getenv(name string) (string, bool) {
 	v, ok := os.LookupEnv(name)
@@ -640,6 +648,8 @@ func (rs *resolver) ref(ctx context.Context, r core.Ref) core.Segment {
 	case "$env":
 		if !envVarName.MatchString(r.Name) {
 			err = fmt.Errorf("%s: want {{$env NAME}}", r)
+		} else if slices.Contains(rs.vars.loader.opts.Hidden, r.Name) {
+			err = core.Errorf(core.KindPolicy, rs.src, "%s holds the credentials of the proxy, which go to the proxy alone: no request may send them", r)
 		} else if _, ok := rs.vars.loader.getenv(r.Name); ok {
 			return secret("$env " + r.Name)
 		} else {

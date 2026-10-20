@@ -56,8 +56,8 @@ func DefaultStore() *Store {
 // $XDG_DATA_HOME/vegtam, or ~/.local/share/vegtam if XDG_DATA_HOME is not
 // set; or "" if the operator keeps no history: VEGTAM_NO_HISTORY is set
 // to anything but "". The process environment is read here, for
-// {{$env NAME}}, and for the proxy of the environment, and nowhere
-// else.
+// {{$env NAME}} and the credentials of the proxy (see env.Lookup), and
+// for the proxy of the environment, and nowhere else.
 func HistoryDir() (string, error) {
 	if os.Getenv("VEGTAM_NO_HISTORY") != "" {
 		return "", nil

@@ -36,7 +36,7 @@ command and on its argument, never on what happens at run time:
 
 | Command | Document |
 |---|---|
-| `run <file>#<ref>` | one result: `ref`, `request`, `transport`, `response`, `timing`, `remote_addr`, `proxy`, `tls`, `redirects`, `cookies`, `asserts`, `captures`, `warnings`, `error` |
+| `run <file>#<ref>` | one result: `ref`, `request`, `transport`, `response`, `timing`, `remote_addr`, `resolved_by`, `proxy`, `tls`, `redirects`, `cookies`, `asserts`, `captures`, `warnings`, `error` |
 | `run <file>`, `run <dir>` | `results`: one result per request, in file order |
 | `show <file>#<ref>` | one result with `ref`, `request`, `transport` and `warnings` only |
 | `list <file>`, `list <dir>` | `requests` |
@@ -136,10 +136,14 @@ A result for `run api/users.http#list -e dev` looks like this (shortened):
   `issuer` and `not_after`. `remote_addr` is `***` when the host of the
   request holds a secret, since the address would tell it, and so is the
   certificate's `subject`, which names the host or its address.
+  **`resolved_by`** names the flag that sent the connection elsewhere
+  than its host: `--resolve`, `--connect-to`, `--unix-socket` or
+  `--abstract-unix-socket`, whose `remote_addr` is the socket; it is
+  absent when the host was looked up as usual, or a proxy took it.
 - **`redirects`** lists each redirect the request followed, and the last
   one if it was refused: the `status`, the `location` as the server wrote
   it, masked, the headers `dropped` as it left the origin of the request,
-  and the `remote_addr`, `proxy` and `timing` of that hop.
+  and the `remote_addr`, `resolved_by`, `proxy` and `timing` of that hop.
 - **`cookies`** names the cookies the jar of the run `sent` and those the
   responses `set`, with their `domain`, `path` and flags, and for each
   one set, whether the jar `stored` it and, if not, the `reason`. `hop`
@@ -349,6 +353,20 @@ run goes through and the addresses never connected to; `vegtam policy
 - **Unchecked certificates.** `--insecure` without a person leaves
   unchecked the hosts of `network.insecure_hosts` only, and is a
   `usage` error without them.
+- **Routes and sockets.** `--proxy` without a person is a `usage` error:
+  requests go through the policy's proxy. `--resolve`, `--connect-to`
+  and `--unix-socket` are taken only as `network.resolve`,
+  `network.connect_to` and `network.unix_sockets` list them: a route as
+  the flag writes it, its host in lower case; a socket by the file its
+  links lead to, which is then what is connected to. Another is a
+  `usage` error that names the entry. None of them comes from a file,
+  and routes do not apply to the proxy. `--noproxy` is taken: going
+  direct is what the guard sees. `--proxy-auth` is not: the policy gives
+  its proxy's credentials, `network.proxy_auth`, and no request may read
+  the variable that holds them (`{{$env NAME}}` of it is a `policy`
+  error), so that a file cannot send them elsewhere.
+- **TLS by host.** `hosts` gives an origin CAs trusted for it alone and a
+  client certificate offered to it alone, in every mode.
 - **Limits.** `limits.*_ceiling` hold every flag and directive.
 
 The policy is the operator's to write. A program that gets a `policy`

@@ -123,6 +123,20 @@ func newFixture(t *testing.T) *fixture {
 
 func (fx *fixture) path(name string) string { return filepath.Join(fx.dir, name) }
 
+// env returns the value of name in the public environment file.
+func (fx *fixture) env(t *testing.T, name string) string {
+	t.Helper()
+	var env struct {
+		Test map[string]string `json:"test"`
+	}
+	b, err := os.ReadFile(fx.path("http-client.env.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decode(t, string(b), &env)
+	return env.Test[name]
+}
+
 // loopbackPolicy allows the servers of the tests, on loopback.
 const loopbackPolicy = `{"network": {"allow": ["127.0.0.1", "::1"]}}`
 
