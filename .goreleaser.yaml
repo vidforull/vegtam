@@ -1,0 +1,62 @@
+# How a release of vegtam is built. docs/RELEASE.md says how to use it,
+# and docs/DECISIONS.md why it is as it is.
+#
+# Nothing is published: the release step is off, and there is no
+# signing, no package manager and no image. Built from the same commit
+# with the same Go, the binaries and the archives come out the same, byte
+# for byte: every time in them is the commit's.
+version: 2
+
+project_name: vegtam
+
+builds:
+  - id: vegtam
+    main: ./cmd/vegtam
+    binary: vegtam
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .FullCommit }} -X main.date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: vegtam
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    builds_info:
+      owner: root
+      group: root
+      mode: 0o755
+      mtime: "{{ .CommitDate }}"
+    files:
+      - src: LICENSE
+        info:
+          owner: root
+          group: root
+          mode: 0o644
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        info:
+          owner: root
+          group: root
+          mode: 0o644
+          mtime: "{{ .CommitDate }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  disable: true
+
+release:
+  disable: true

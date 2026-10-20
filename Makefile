@@ -2,18 +2,23 @@
 #
 #   TZ=UTC git commit
 #
-# Override the version with: make build VERSION=v0.1.0
+# Override the version with: make build VERSION=0.1.0. The commit and its
+# date, in UTC, are stamped as well: the same commit builds the same
+# binary, as with goreleaser (docs/RELEASE.md).
 #
 # The gate: `make check-fast` while working, `make check` before every pull
 # request. CONTRIBUTING.md says what each step is for and how to install
 # the tools at these versions.
 
 BINARY  := vegtam
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS  = -s -w -X main.version=$(VERSION)
+VERSION ?= $(patsubst v%,%,$(shell git describe --tags --always --dirty 2>/dev/null || echo dev))
+COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null)
+DATE    ?= $(shell TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+LDFLAGS  = -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
 GOLANGCI_LINT_VERSION := 2.15.0
 GOVULNCHECK_VERSION   := v1.9.0
+GORELEASER_VERSION    := 2.18.3
 FUZZTIME              ?= 30s
 
 # Suppressions: //nolint, //exhaustive:ignore, `_ =` and t.Skip in Go files.
@@ -22,7 +27,7 @@ SUPPRESSIONS := //nolint|//exhaustive:ignore|^[[:space:]]*_(, _)* = |\bt\.Skip
 # The files of the gate, which a pull request changes only on its own.
 GATE_FILES   := .golangci.yml Makefile .gate
 
-.PHONY: build test vet fmt lint check-fast check suppressions gate-files vuln fuzz tools clean
+.PHONY: build test vet fmt lint check-fast check release-check suppressions gate-files vuln fuzz tools clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/vegtam
@@ -53,6 +58,22 @@ check: check-fast suppressions gate-files
 	go mod tidy -diff
 	go mod verify
 	@$(MAKE) --no-print-directory vuln
+
+# What a release needs before its tag: the gate, then goreleaser check of
+# .goreleaser.yaml. Without goreleaser, or before there is a
+# .goreleaser.yaml, that step is skipped, and says so.
+release-check: check
+	@if ! command -v goreleaser >/dev/null 2>&1; then \
+		echo "SKIPPED goreleaser check: not installed (go install github.com/goreleaser/goreleaser/v2@v$(GORELEASER_VERSION))"; \
+	elif [ ! -f .goreleaser.yaml ]; then \
+		echo "SKIPPED goreleaser check: no .goreleaser.yaml"; \
+	else \
+		v=$$(goreleaser --version 2>/dev/null | sed -n 's/^GitVersion: *v\{0,1\}//p'); \
+		if [ "$$v" != "$(GORELEASER_VERSION)" ]; then \
+			echo "goreleaser $$v found, the gate wants $(GORELEASER_VERSION)"; exit 1; \
+		fi; \
+		echo "goreleaser check"; goreleaser check; \
+	fi
 
 # Fails if the Go files hold more suppressions than the baseline. The
 # baseline is taken from origin/main when it has one, so that a pull
@@ -98,6 +119,7 @@ fuzz:
 	go test -run '^$$' -fuzz '^FuzzMaskJSON$$' -fuzztime $(FUZZTIME) ./internal/core
 	go test -run '^$$' -fuzz '^FuzzPrintable$$' -fuzztime $(FUZZTIME) ./internal/cli
 	go test -run '^$$' -fuzz '^FuzzFormatJSON$$' -fuzztime $(FUZZTIME) ./internal/core/output
+	go test -run '^$$' -fuzz '^FuzzParsePolicy$$' -fuzztime $(FUZZTIME) ./internal/core/policy
 
 tools:
 	@v=$$(golangci-lint version --short 2>/dev/null) || { \

@@ -1078,3 +1078,57 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   holds, decides how the header goes: `Basic {{credentials}}`, a
   secret, is sent as it is, as before. A plain variable's value is text
   by then, as in REST Client.
+
+## 2026-10-20: releases
+
+- **GoReleaser v2, with the release step off.** One file says how each
+  target is built, packed and summed, and `goreleaser check` checks it;
+  a script of `go build` and `tar` would have to get each of those
+  right by hand, file times and owners included. GoReleaser is a tool
+  of the maintainer's, like golangci-lint, and not in `go.mod`. For now
+  `release.disable` is on and the changelog off: a build of a tag writes
+  `dist/` and stops, with no token, and a maintainer puts the archives
+  on the release on GitHub. docs/RELEASE.md names the version the
+  configuration was checked with, v2.18.3.
+- **No signing, no Homebrew, no images yet.** Each needs what does not
+  exist yet: a signature a key, and a place where users find its public
+  half; notarization an Apple developer account; a Homebrew tap or a
+  Scoop bucket a repository of its own; an image a registry, and a
+  reason, for a client that runs on the operator's machine. The first
+  to come are a signature of `checksums.txt`, so that a download can be
+  traced to the maintainer and not only to the sums, and a tap. Until
+  then an archive is checked by its sum, and RELEASE.md says how
+  to run a binary that macOS holds in quarantine.
+- **Reproducible from the commit.** The date stamped is the commit's,
+  `{{ .CommitDate }}`, not the build's: a build date makes every build
+  differ, and says nothing about the code. The binaries' file times
+  (`mod_timestamp`) and those of the files in the archives are the
+  commit's too, and the archives name root as the owner and fix the
+  modes, so that neither the clock, nor the user, nor the umask of the
+  build reaches them. `-trimpath` keeps out the path of the checkout.
+  With cgo off no C toolchain of the machine takes part, and a binary
+  runs on any Linux, with no C library to match. Neither the path of
+  the clone, nor its umask or file times, nor the build cache changes a
+  byte: what is left to match is the version of Go and of GoReleaser,
+  which RELEASE.md names.
+- **Stamped, else what Go recorded.** The linker flags stamp the
+  version, the commit and its date. A binary of `go build` or
+  `go install` has none of them, yet the go command records the
+  module's version (`go install ...@v0.1.0`) and, in a git checkout,
+  the commit, its time and whether files had changes. `vegtam version`
+  takes each value not stamped from there, so that a bug report names a
+  commit however the binary was made. The function that does so is
+  given the `debug.BuildInfo`, so that the tests give it every case by
+  hand; the test binary records no commit. "+dirty" after the commit
+  says the files built had changes, as Go marks a version, and the date
+  and "+dirty" are taken for the commit the build information names
+  only, not for one stamped by hand. A release says `0.1.0`, GoReleaser's
+  version, without the tag's `v`; `go install` of the tag says
+  `v0.1.0`, as Go writes it. Each is left as its tool writes it.
+- **The version document only grows.** `commit` and `date` join
+  `name`, `version`, `go`, `os` and `arch`, which keep their names and
+  values, and a value that is not known is absent, as elsewhere in the
+  JSON: a program that read the old document reads the new one. It has
+  no `schema_version`, and the JSON Schema does not describe it. The
+  text stays one line, for a bug report, with the commit cut to the 12
+  characters of Go's pseudo-versions; the JSON has all of it.

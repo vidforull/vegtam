@@ -128,6 +128,9 @@ type Config struct {
 	// alone then opens the terminal interface.
 	Interactive bool
 	Version     string
+	// Commit and Date name the commit vegtam was built from and its date,
+	// for vegtam version; either may be empty, when the build did not say.
+	Commit, Date string
 
 	json   bool         // --json
 	masker *core.Masker // the secrets the command has read
