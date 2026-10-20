@@ -110,7 +110,7 @@ func TestTimeoutPhases(t *testing.T) {
 				c.control = hang
 			}
 			start := time.Now()
-			r, err := c.Do(t.Context(), prepared(http.MethodGet, lit(tt.url), nil), testSecrets)
+			r, _, err := c.Do(t.Context(), prepared(http.MethodGet, lit(tt.url), nil), testSecrets)
 			if tt.phase == "" {
 				if err != nil || string(r.Body) != "xxxxxxxxxx" {
 					t.Errorf("Do = %+v, %v", r, err)
@@ -203,7 +203,7 @@ func TestReadTimeoutRedirect(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	r, err := New(Options{MaxBody: 1 << 20, Transport: Transport{Read: read}}).Do(t.Context(), prepared(http.MethodGet, lit(srv.URL+"/moved"), nil), testSecrets)
+	r, _, err := New(Options{MaxBody: 1 << 20, Transport: Transport{Read: read}}).Do(t.Context(), prepared(http.MethodGet, lit(srv.URL+"/moved"), nil), testSecrets)
 	if err != nil || string(r.Body) != "here" {
 		t.Errorf("Do = %+v, %v", r, err)
 	}
@@ -217,7 +217,7 @@ func TestConnectTimeout(t *testing.T) {
 	defer cancel(nil)
 	w := &watch{connect: 50 * time.Millisecond, read: time.Hour, cancel: cancel}
 	defer w.stop()
-	w.trace().GetConn("proxy.example.test:3128")
+	w.trace(&hopTrace{t: &tracer{}}).GetConn("proxy.example.test:3128")
 	select {
 	case <-ctx.Done():
 	case <-time.After(2 * time.Second):
@@ -229,7 +229,7 @@ func TestConnectTimeout(t *testing.T) {
 	ctx, cancel = context.WithCancelCause(t.Context())
 	defer cancel(nil)
 	w = &watch{connect: 50 * time.Millisecond, cancel: cancel}
-	tr := w.trace()
+	tr := w.trace(&hopTrace{t: &tracer{}})
 	tr.GetConn("api.example.test:443")
 	tr.GotConn(httptrace.GotConnInfo{})
 	time.Sleep(100 * time.Millisecond)

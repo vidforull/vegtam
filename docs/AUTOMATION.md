@@ -36,7 +36,7 @@ command and on its argument, never on what happens at run time:
 
 | Command | Document |
 |---|---|
-| `run <file>#<ref>` | one result: `ref`, `request`, `transport`, `response`, `timing`, `asserts`, `captures`, `warnings`, `error` |
+| `run <file>#<ref>` | one result: `ref`, `request`, `transport`, `response`, `timing`, `remote_addr`, `proxy`, `tls`, `redirects`, `cookies`, `asserts`, `captures`, `warnings`, `error` |
 | `run <file>`, `run <dir>` | `results`: one result per request, in file order |
 | `show <file>#<ref>` | one result with `ref`, `request`, `transport` and `warnings` only |
 | `list <file>`, `list <dir>` | `requests` |
@@ -66,7 +66,18 @@ A result for `run api/users.http#list -e dev` looks like this (shortened):
     "untrusted": true,
     "tls_verified": true
   },
-  "timing": {"total_ms": 84.215},
+  "timing": {"total_ms": 84.215, "name_lookup_ms": 1.902, "connect_ms": 12.318, "app_connect_ms": 31.04, "start_transfer_ms": 83.77, "reused": false},
+  "remote_addr": "192.0.2.10:443",
+  "tls": {
+    "version": "TLS 1.3",
+    "cipher": "TLS_AES_128_GCM_SHA256",
+    "alpn": "http/1.1",
+    "verified": true,
+    "peer": {"subject": "CN=api.example.test", "issuer": "CN=Example CA,O=Example", "not_after": "2027-01-31T23:59:59Z"}
+  },
+  "cookies": {
+    "sent": [{"hop": 0, "name": "session", "domain": "api.example.test", "path": "/", "host_only": true, "secure": true, "http_only": true}]
+  },
   "asserts": [
     {"expression": "status == 200", "passed": true, "actual": "200"},
     {"expression": "jsonpath $[0].name == \"Grace\"", "passed": false, "actual": "\"Ada\""}
@@ -102,8 +113,42 @@ A result for `run api/users.http#list -e dev` looks like this (shortened):
   and the limits in milliseconds, `0` for none: `connect_timeout_ms`,
   `read_timeout_ms` and `max_time_ms`, each the flag's or lower, if the
   request's directive says so.
-- **`timing.total_ms`** runs from sending the request to the end of the
-  body.
+- **`timing`** says how long the request took, in milliseconds.
+  `total_ms` runs from sending the request to the end of the body, or to
+  the error. The phases have the names of curl's `-w` and of Hurl's
+  report, each running from the start of the request to the end of its
+  phase: `name_lookup_ms` (DNS), `connect_ms` (TCP, to the proxy if there
+  is one), `app_connect_ms` (the TLS handshake) and `start_transfer_ms`
+  (the first byte of the response). A phase that did not happen is
+  absent: the lookup of an IP address, TLS over `http`, and all three on
+  a connection used before. `reused` is `true` when no connection was made
+  for the request: every hop went on one that an earlier request of the
+  run had made, so the time has no DNS, connect or TLS in it. With
+  redirects, each phase is the sum over the hops, as curl adds them up,
+  and each redirect has its own `timing`.
+- **`remote_addr`**, **`proxy`** and **`tls`** describe the connection of
+  the last hop: the IP address and port connected to (the proxy's if
+  there is one), the proxy, as `scheme://host:port` with a user and
+  password shown as `***@`, and what the TLS handshake agreed on: the
+  `version`, the `cipher`, the `alpn` protocol, whether the server's
+  certificate was `verified`, and the `peer` certificate's `subject`,
+  `issuer` and `not_after`. `remote_addr` is `***` when the host of the
+  request holds a secret, since the address would tell it, and so is the
+  certificate's `subject`, which names the host or its address.
+- **`redirects`** lists each redirect the request followed, and the last
+  one if it was refused: the `status`, the `location` as the server wrote
+  it, masked, the headers `dropped` as it left the origin of the request,
+  and the `remote_addr`, `proxy` and `timing` of that hop.
+- **`cookies`** names the cookies the jar of the run `sent` and those the
+  responses `set`, with their `domain`, `path` and flags, and for each
+  one set, whether the jar `stored` it and, if not, the `reason`. `hop`
+  is 0 for the request as written and n after the n-th redirect. No
+  value is ever shown (see [Cookies](#cookies)).
+- These come after an error too, as far as the request got, which says
+  where it stopped: a `connect` timeout with `connect_ms` and no
+  `app_connect_ms` stopped in the TLS handshake; a handshake that failed
+  still has `tls.peer`, the certificate that did not pass, whose issuer
+  says what CA to trust. They are absent for a dry run.
 - **`asserts`** has the outcome of each `# @assert` of the request, in
   order: the `expression` as written, whether it `passed`, and the
   `actual` value checked, masked like the response and cut off after 200
@@ -277,6 +322,22 @@ in seconds (`5`) or with a unit (`500ms`, `2m`, `1m30s`), `0` or `none` for none
 The directives `# @connection-timeout`, `# @timeout` and `# @max-time`
 may lower them for a request, never raise them.
 
+## Cookies
+
+A run keeps the cookies that responses set, in memory, for the requests
+after them in the same run, as `.http` files that sign in expect; each
+run starts without any, so that a run does what its files say whatever
+ran before. Which cookie goes where follows RFC 6265 with the public
+suffix list, and RFC 6265bis's rules on `Secure`, `__Secure-` and
+`__Host-` and its limits (see [FORMAT.md](FORMAT.md#cookies)). The
+cookies are never written to disk. `--no-cookies` turns them off for a
+run, `# @no-cookie-jar` for a request: it neither sends the cookies of
+the run nor keeps those its response sets.
+
+A cookie's value is a secret: `cookies` in the output names the cookies,
+a `Set-Cookie` header shows `***` for the value, and a value of 8 bytes or
+more is masked wherever else it appears.
+
 ## TLS and the HTTP version
 
 `--cacert <file>` trusts the CA certificates of a PEM file as well as
@@ -301,13 +362,15 @@ them:
 - requests are shown with the placeholder, `Bearer {{token}}`;
 - in everything else, such as response headers and bodies and error
   messages, every secret value is replaced with `***`, including its URL-
-  and JSON-escaped forms. A JSON body is also masked in its decoded
+  and JSON-escaped and base64-encoded forms. So are the credentials of
+  `Authorization: Basic {{user}} {{password}}`, which go in base64, and
+  the values of cookies. A JSON body is also masked in its decoded
   strings, so a value is found however the server escaped it. A body cut
   off by `--max-body` in the middle of a value has that part masked too;
   a binary body is masked before it is base64-encoded;
 - a value that is a URL, such as a base URL kept in the private file,
   also hides its host, and an error message hides the host and port of a
-  request whose host comes from a secret;
+  request whose host comes from a secret, and `remote_addr` its address;
 - a captured value is masked from the moment it is taken, in the
   response it comes from too, and in the `actual` values of assertions;
 - this holds for every command and mode: text and JSON, `--verbose`,

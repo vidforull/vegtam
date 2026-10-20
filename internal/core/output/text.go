@@ -2,6 +2,7 @@ package output
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -18,14 +19,16 @@ import (
 // through Printable.
 
 // WriteResponse writes the response of res: the status and the time, the
-// headers if headers is set, the body, JSON formatted by FormatJSON with
-// fold, and the outcomes of its directives.
+// headers and what the request went through (WriteTrace) if headers is
+// set, the body, JSON formatted by FormatJSON with fold, and the outcomes
+// of its directives.
 func WriteResponse(b *strings.Builder, res *Result, headers bool, fold int) {
 	r := res.Response
 	status := strings.TrimSpace(fmt.Sprintf("%s %d %s", r.Proto, r.Status, r.Reason))
 	fmt.Fprintf(b, "%s (%s)\n", status, duration(res.Timing))
 	if headers {
 		writeHeaders(b, r.Headers)
+		WriteTrace(b, res)
 	}
 	if r.Body != "" {
 		body := r.Body
@@ -251,12 +254,120 @@ func Printable(s string) string {
 	return b.String()
 }
 
+// WriteTrace writes what the request of res went through, in lines that
+// start with "* ", as curl -v writes its own: each redirect, then the
+// connection of the last hop, its TLS, the server's certificate, the time
+// each phase of each hop ended, and the cookies of each hop, without their
+// values. It writes nothing for a request that was not sent.
+func WriteTrace(b *strings.Builder, res *Result) {
+	if res.Timing == nil {
+		return
+	}
+	last := max(res.hops-1, 0)
+	for i, r := range res.Redirects {
+		parts := []string{fmt.Sprintf("%d → %s", r.Status, r.Location)}
+		if len(r.Dropped) > 0 {
+			parts = append(parts, "dropped "+strings.Join(r.Dropped, ", "))
+		}
+		writeHop(b, append(parts, hop(r.RemoteAddr, r.Proxy, nil, r.Timing)...))
+		if i < last {
+			writeCookies(b, res.Cookies, i)
+		}
+	}
+	writeHop(b, hop(res.RemoteAddr, res.Proxy, res.TLS, cmp.Or(res.last, res.Timing)))
+	if t := res.TLS; t != nil && t.Peer != nil {
+		fmt.Fprintf(b, "* certificate %s, issuer %s, expires %s\n", t.Peer.Subject, t.Peer.Issuer, t.Peer.NotAfter)
+	}
+	writeCookies(b, res.Cookies, last)
+}
+
+// writeCookies writes the names of the cookies of the hop-th hop: those
+// sent, and those set, with why one was not kept.
+func writeCookies(b *strings.Builder, c *Cookies, hop int) {
+	if c == nil {
+		return
+	}
+	var sent, set []string
+	for _, s := range c.Sent {
+		if s.Hop == hop {
+			sent = append(sent, s.Name)
+		}
+	}
+	for _, s := range c.Set {
+		switch {
+		case s.Hop != hop:
+		case s.Stored:
+			set = append(set, s.Name)
+		case s.Reason == "removed":
+			set = append(set, s.Name+" (removed)")
+		default:
+			set = append(set, s.Name+" (not kept: "+s.Reason+")")
+		}
+	}
+	var parts []string
+	if sent != nil {
+		parts = append(parts, "sent "+strings.Join(sent, ", "))
+	}
+	if set != nil {
+		parts = append(parts, "set "+strings.Join(set, ", "))
+	}
+	if parts != nil {
+		b.WriteString("* cookies: " + strings.Join(parts, " · ") + "\n")
+	}
+}
+
+// hop describes a hop that went to addr, through proxy if it is not "",
+// with the TLS of t if it is not nil, and took tm.
+func hop(addr, proxy string, t *TLS, tm *Timing) []string {
+	var parts []string
+	switch {
+	case addr == "":
+		parts = append(parts, "no connection")
+	case tm.Reused:
+		parts = append(parts, "connected to "+addr+" (reused)")
+	default:
+		parts = append(parts, "connected to "+addr)
+	}
+	if proxy != "" {
+		parts = append(parts, "through "+proxy)
+	}
+	if t != nil {
+		v := cmp.Or(t.Version, "TLS")
+		if !t.Verified {
+			v += " (not verified)"
+		}
+		parts = append(parts, v)
+		if t.ALPN != "" {
+			parts = append(parts, t.ALPN)
+		}
+	}
+	var times []string
+	for _, p := range []struct {
+		name string
+		ms   *float64
+	}{{"dns", tm.NameLookupMS}, {"connect", tm.ConnectMS}, {"tls", tm.AppConnectMS}, {"ttfb", tm.StartTransferMS}, {"total", &tm.TotalMS}} {
+		if p.ms != nil {
+			times = append(times, p.name+" "+formatMS(*p.ms))
+		}
+	}
+	return append(parts, strings.Join(times, " "))
+}
+
+func writeHop(b *strings.Builder, parts []string) {
+	b.WriteString("* " + strings.Join(parts, " · ") + "\n")
+}
+
 // duration formats the total time of t.
 func duration(t *Timing) string {
 	if t == nil {
 		return "?"
 	}
-	d := time.Duration(t.TotalMS * float64(time.Millisecond))
+	return formatMS(t.TotalMS)
+}
+
+// formatMS formats a time in milliseconds.
+func formatMS(ms float64) string {
+	d := time.Duration(ms * float64(time.Millisecond))
 	if d < time.Millisecond {
 		return d.Round(time.Microsecond).String()
 	}

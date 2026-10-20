@@ -38,6 +38,11 @@ func TestCommand(t *testing.T) {
 			"curl --path-as-is 'https://x.test/a?b=1&c=it'\\''s'\n",
 		},
 		{
+			"Basic, user and password", request("GET", core.Text{lit("https://x.test/")},
+				[]core.PreparedHeader{{Name: "Authorization", Value: core.Text{lit("Basic alice "), secret("password")}}}, nil),
+			"# Set first: password for {{password}}\n: \"${password?}\" && curl --path-as-is 'https://x.test/' \\\n  -u 'alice:'\"$password\"\n",
+		},
+		{
 			"secrets everywhere", request("POST",
 				core.Text{lit("https://x.test/u/"), secret("token"), lit("?k="), secret("$env API_KEY")},
 				[]core.PreparedHeader{

@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http/httptrace"
-	"net/textproto"
 	"sync"
 	"time"
 
@@ -135,21 +133,6 @@ func (w *watch) isConnecting() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.connecting
-}
-
-// trace returns the hooks that drive w. Getting a connection, for each
-// hop of a redirect too, is the connect timeout's; waiting for a response
-// once the request is written is the read timeout's, which starts anew
-// when the response begins, so that net/http reading the body of a
-// redirect counts as data coming.
-func (w *watch) trace() *httptrace.ClientTrace {
-	return &httptrace.ClientTrace{
-		GetConn:              func(string) { w.idle(); w.setConnecting(true) },
-		GotConn:              func(httptrace.GotConnInfo) { w.setConnecting(false) },
-		WroteRequest:         func(httptrace.WroteRequestInfo) { w.wait() },
-		GotFirstResponseByte: w.wait,
-		Got1xxResponse:       func(int, textproto.MIMEHeader) error { w.wait(); return nil },
-	}
 }
 
 // watched is a response body whose reads w watches.

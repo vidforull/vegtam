@@ -15,18 +15,27 @@ import (
 )
 
 // leaks returns the forms of the test secrets that s contains: the value,
-// its escaped forms, its first four characters, which is what a cut-off
-// value would leave, and the host and port of the base URL in the private
-// file.
+// its escaped and base64 forms, its first four characters, which is what
+// a cut-off value would leave, and the hosts and ports of the base URLs in
+// the private file, with the address of the one that answers.
 func (fx *fixture) leaks(s string) []string {
 	_, port, _ := strings.Cut(fx.hidden, ":")
-	found := slices.DeleteFunc([]string{fx.hidden, ":" + port}, func(h string) bool { return !strings.Contains(s, h) })
-	for _, secret := range []string{privateSecret, envSecret} {
+	_, live, _ := strings.Cut(fx.live, ":")
+	found := slices.DeleteFunc([]string{fx.hidden, ":" + port, fx.live, ":" + live}, func(h string) bool { return !strings.Contains(s, h) })
+	// The credentials of Basic, which the user, alice, does not give away.
+	basic := "alice:" + privateSecret
+	for _, f := range []string{basic, base64.StdEncoding.EncodeToString([]byte(basic)), base64.RawURLEncoding.EncodeToString([]byte(basic))} {
+		if strings.Contains(s, f) {
+			found = append(found, f)
+		}
+	}
+	for _, secret := range []string{privateSecret, envSecret, cookieSecret} {
 		j, _ := json.Marshal(secret)
 		forms := []string{
 			secret, url.QueryEscape(secret), url.PathEscape(secret), string(j[1 : len(j)-1]),
 			strings.ReplaceAll(secret, "/", `\/`), strings.ReplaceAll(secret, "+", `\u002B`),
 			strings.ReplaceAll(secret, "+", " "), secret[:4],
+			base64.StdEncoding.EncodeToString([]byte(secret)), base64.RawURLEncoding.EncodeToString([]byte(secret)),
 		}
 		for _, f := range forms {
 			if strings.Contains(s, f) {
@@ -79,6 +88,9 @@ func TestNoSecretInOutput(t *testing.T) {
 		{"binary body", []string{"run", api + "#binary"}, exitOK, ""},
 		{"truncated body", []string{"run", api + "#big", "--max-body", "106"}, exitOK, "xx***"},
 		{"secret host", []string{"run", api + "#hidden"}, exitNetwork, "{{base}}/?key={{token}}"},
+		{"secret host that redirects", []string{"run", transport + "#moved"}, exitOK, "***"},
+		{"session cookie", []string{"run", fx.cookieFile(t)}, exitOK, "***"},
+		{"Basic", []string{"run", transport + "#basic"}, exitOK, "Basic ***"},
 		{"redirect error", []string{"run", api + "#hops"}, exitNetwork, "stopped after 10 redirects"},
 		{"unknown CA", []string{"run", transport + "#untrusted"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}"},
 		{"no client certificate", []string{"run", transport + "#mtls", "--cacert", fx.ca}, exitNetwork, "pass --cert and --key"},

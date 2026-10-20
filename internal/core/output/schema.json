@@ -11,6 +11,11 @@
     "transport": {"$ref": "#/$defs/transport"},
     "response": {"$ref": "#/$defs/response"},
     "timing": {"$ref": "#/$defs/timing"},
+    "remote_addr": {"$ref": "#/$defs/remote_addr"},
+    "proxy": {"$ref": "#/$defs/proxy"},
+    "tls": {"$ref": "#/$defs/tls"},
+    "redirects": {"$ref": "#/$defs/redirects"},
+    "cookies": {"$ref": "#/$defs/cookies"},
     "asserts": {"$ref": "#/$defs/asserts"},
     "captures": {"$ref": "#/$defs/captures"},
     "warnings": {"$ref": "#/$defs/warnings"},
@@ -54,6 +59,11 @@
         "transport": {"$ref": "#/$defs/transport"},
         "response": {"$ref": "#/$defs/response"},
         "timing": {"$ref": "#/$defs/timing"},
+        "remote_addr": {"$ref": "#/$defs/remote_addr"},
+        "proxy": {"$ref": "#/$defs/proxy"},
+        "tls": {"$ref": "#/$defs/tls"},
+        "redirects": {"$ref": "#/$defs/redirects"},
+        "cookies": {"$ref": "#/$defs/cookies"},
         "asserts": {"$ref": "#/$defs/asserts"},
         "captures": {"$ref": "#/$defs/captures"},
         "warnings": {"$ref": "#/$defs/warnings"},
@@ -69,6 +79,48 @@
         "connect_timeout_ms": {"type": "number", "description": "To get a connection: DNS, TCP, a proxy's CONNECT and the TLS handshake, all of it: --connect-timeout, # @connection-timeout. 0 for no limit."},
         "read_timeout_ms": {"type": "number", "description": "For each wait for data from the server once the request is sent, for the headers and during the body: --read-timeout, # @timeout. 0 for no limit."},
         "max_time_ms": {"type": "number", "description": "For the whole exchange, redirects and body included: --max-time, # @max-time. 0 for no limit."}
+      }
+    },
+    "cookies": {
+      "type": "object",
+      "description": "The cookies of the request, in the order of its hops: those the cookie jar of the run sent, and those the responses set. Their values are never shown, and are masked as *** wherever else they appear: in Set-Cookie headers whatever their length, elsewhere from 8 bytes on. Absent if there were none.",
+      "properties": {
+        "sent": {"type": "array", "items": {"$ref": "#/$defs/cookie"}, "description": "The cookies the jar added to the request. Cookie headers of the request itself are in request.headers."},
+        "set": {"type": "array", "items": {"$ref": "#/$defs/set_cookie"}, "description": "The cookies the responses set, kept by the jar or not."}
+      }
+    },
+    "set_cookie": {
+      "type": "object",
+      "description": "A cookie a response set, without its value, and what became of it. The fields up to expires are those of cookie.",
+      "required": ["hop", "name", "host_only", "secure", "http_only", "stored"],
+      "properties": {
+        "hop": {"type": "integer"},
+        "name": {"type": "string"},
+        "domain": {"type": "string"},
+        "path": {"type": "string"},
+        "host_only": {"type": "boolean"},
+        "secure": {"type": "boolean"},
+        "http_only": {"type": "boolean"},
+        "same_site": {"type": "string"},
+        "expires": {"type": "string"},
+        "stored": {"type": "boolean", "description": "The jar keeps it, for the requests after it in the run."},
+        "reason": {"type": "string", "description": "Why the jar does not: removed for a cookie that removes one (Max-Age=0, an Expires in the past); the jar is off (--no-cookies, @no-cookie-jar); or why it was refused, such as a Domain that is a public suffix or another site, Secure set over http, a __Secure- or __Host- prefix without what it needs, or a limit: 4096 bytes of name and value, 50 cookies a site, 300 in all."}
+      }
+    },
+    "cookie": {
+      "type": "object",
+      "description": "A cookie, without its value.",
+      "required": ["hop", "name", "host_only", "secure", "http_only"],
+      "properties": {
+        "hop": {"type": "integer", "description": "0 for the request as written, n for the request after the n-th redirect: redirects[n-1] is the response that led to it."},
+        "name": {"type": "string"},
+        "domain": {"type": "string", "description": "The host it goes to, and the hosts below it unless host_only. *** if the host of the request holds a secret."},
+        "path": {"type": "string", "description": "The path it goes to, and the paths below it."},
+        "host_only": {"type": "boolean"},
+        "secure": {"type": "boolean", "description": "It goes over https only."},
+        "http_only": {"type": "boolean"},
+        "same_site": {"type": "string", "description": "Strict, Lax or None, as set; absent if not."},
+        "expires": {"type": "string", "description": "RFC 3339, UTC. Absent for a cookie of the run alone, without Max-Age or Expires."}
       }
     },
     "warnings": {
@@ -157,9 +209,60 @@
     },
     "timing": {
       "type": "object",
-      "required": ["total_ms"],
+      "description": "How long the request took, in milliseconds. The phases are those of curl -w and Hurl: each runs from the start of the request to the end of the phase, and is absent if the phase did not happen. With redirects, each phase is the sum over the hops, as curl adds them up. Present once the request is sent, after a network error or a timeout too, up to it; absent for a dry run and if nothing was sent.",
+      "required": ["total_ms", "reused"],
       "properties": {
-        "total_ms": {"type": "number", "description": "Milliseconds from sending the request to the end of the response body."}
+        "total_ms": {"type": "number", "description": "From sending the request to the end of the response body, or to the error."},
+        "name_lookup_ms": {"type": "number", "description": "Until the DNS lookup ended. Absent for an IP address and on a connection used before."},
+        "connect_ms": {"type": "number", "description": "Until the TCP connection was made, to the proxy if there is one. Absent on a connection used before."},
+        "app_connect_ms": {"type": "number", "description": "Until the TLS handshake ended. Absent over http and on a connection used before."},
+        "start_transfer_ms": {"type": "number", "description": "Until the first byte of the response came. Absent if none came."},
+        "reused": {"type": "boolean", "description": "True when no connection was made for the request: each hop went on one that an earlier request of the run had made, so the time has no DNS, connect or TLS in it."}
+      }
+    },
+    "remote_addr": {
+      "type": "string",
+      "description": "The IP address and port connected to, those of the proxy if there was one: of the last hop, after redirects. *** if the host of the request holds a secret, since the address would tell it. Absent if no connection was made."
+    },
+    "proxy": {
+      "type": "string",
+      "description": "The proxy the request went through, as scheme://host:port, from HTTPS_PROXY, HTTP_PROXY and NO_PROXY; a user and password in it are shown as ***@. Absent without a proxy."
+    },
+    "tls": {
+      "type": "object",
+      "description": "What the TLS handshake of the response agreed on: of the last hop. Also after a handshake that failed, as far as it went: peer then says which certificate the server sent, and so which CA to trust. Absent over http.",
+      "required": ["verified"],
+      "properties": {
+        "version": {"type": "string", "description": "Such as TLS 1.3. Absent if the handshake failed."},
+        "cipher": {"type": "string", "description": "The cipher suite, such as TLS_AES_128_GCM_SHA256. Absent if the handshake failed."},
+        "alpn": {"type": "string", "description": "The protocol agreed on, h2 or http/1.1. Absent if none was."},
+        "verified": {"type": "boolean", "description": "The server's certificate was checked, and passed: false with --insecure and after a failed check. response.tls_verified says it of every hop."},
+        "peer": {
+          "type": "object",
+          "description": "The server's certificate. Absent if it sent none.",
+          "required": ["subject", "issuer", "not_after"],
+          "properties": {
+            "subject": {"type": "string", "description": "As RFC 2253 writes it, such as CN=api.example.com,O=Example. *** if the host of the request holds a secret: it names the host, or its address."},
+            "issuer": {"type": "string", "description": "The subject of the CA that signed it; *** too if the certificate signed itself for a host that holds a secret."},
+            "not_after": {"type": "string", "description": "When it expires, RFC 3339 in UTC."}
+          }
+        }
+      }
+    },
+    "redirects": {
+      "type": "array",
+      "description": "The redirects the request got, in order: each followed, and the last one also when it was refused, which an error then says. Absent without a redirect.",
+      "items": {
+        "type": "object",
+        "required": ["status", "location", "timing"],
+        "properties": {
+          "status": {"type": "integer"},
+          "location": {"type": "string", "description": "The Location header as the server wrote it, with secret values masked as ***."},
+          "dropped": {"type": "array", "items": {"type": "string"}, "description": "The headers of the request that were not sent on, since the redirect leaves the origin (scheme, host and port) of the request: Authorization, Cookie, Proxy-Authorization, Referer and every header that holds a secret. Absent if none was."},
+          "remote_addr": {"$ref": "#/$defs/remote_addr"},
+          "proxy": {"$ref": "#/$defs/proxy"},
+          "timing": {"$ref": "#/$defs/timing"}
+        }
       }
     },
     "error": {
@@ -196,7 +299,7 @@
             "type": "object",
             "required": ["kind", "value"],
             "properties": {
-              "kind": {"type": "string", "description": "assert, capture, tag, no-log, timeout, connection-timeout or max-time."},
+              "kind": {"type": "string", "description": "assert, capture, tag, no-log, no-cookie-jar, timeout, connection-timeout or max-time."},
               "value": {"type": "string"}
             }
           }

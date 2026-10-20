@@ -157,6 +157,7 @@ sets what weakens a check or belongs to the machine.
 | `--read-timeout <time>` | 30s | no counterpart: how long the server may send nothing, once the request is sent |
 | `--max-time <time>` | 2m | curl has no limit by default; `--timeout` is the old name |
 | `--http1.1`, `--http2`, `--http2-prior-knowledge` | as negotiated | `--http2` is HTTP/2 over TLS or an error: no fallback, no upgrade of `http` |
+| `--no-cookies` | a jar for the run | curl keeps no cookies unless asked; vegtam keeps them in memory, never on disk |
 
 A time is in seconds (`5`, `0.5`) or has a unit (`500ms`, `2m`, `1m30s`);
 `0` or `none` is no limit. Directives may lower the limits of a request, and the
@@ -166,6 +167,31 @@ More differences: the proxy comes from `HTTPS_PROXY`, `HTTP_PROXY` and
 where curl uses 1080; `--verbose` masks secrets, where curl's `-v`
 prints `Authorization` and `Cookie` as they are; `SSLKEYLOGFILE` is not
 read; HTTP/3 is not supported.
+
+`--verbose` also says what each request went through, after the
+response headers, with every secret masked: each redirect and the
+headers it dropped, the address connected to, the TLS version and
+protocol agreed on, the server's certificate, when each phase ended, as
+curl's `-w` names them, and the cookies sent and set:
+
+```
+* 302 → /home · connected to 192.0.2.10:443 · dns 2ms connect 10ms tls 21ms ttfb 80ms total 81ms
+* cookies: set session
+* connected to 192.0.2.10:443 (reused) · TLS 1.3 · h2 · ttfb 35ms total 36ms
+* certificate CN=api.example.test, issuer CN=Example CA, expires 2027-01-31T23:59:59Z
+* cookies: sent session
+```
+
+With `--json` the same is in `timing`, `remote_addr`, `tls`, `proxy`,
+`redirects` and `cookies`, and after an error too, as far as the request
+got. There is no mode that prints the exchange unmasked.
+
+A run keeps the cookies that responses set for the requests after it,
+in memory: a request that signs in and one that uses the session work in
+one run, and the next run starts afresh. `# @no-cookie-jar` keeps one
+request away from them, `--no-cookies` a whole run.
+`Authorization: Basic {{user}} {{password}}` goes as Basic credentials,
+base64-encoded, as in JetBrains' client.
 
 ## TUI
 
@@ -180,8 +206,9 @@ shown as it would be sent, with secrets as their placeholders, or, if it
 cannot be resolved, as written, over what stops it. Its placeholders are
 coloured by what they stand for: a plain value, a secret, a value an
 `@capture` takes, or nothing. The response is shown as `run --verbose`
-prints it: status and time, headers, the body with JSON indented, and
-the outcome of each `@assert` and `@capture`. From 80 columns the list
+prints it: status and time, headers, what the request went through, the
+body with JSON indented, and the outcome of each `@assert` and
+`@capture`. From 80 columns the list
 sits beside the other two panes, from 140 all three are side by side,
 and in a narrower terminal they stack.
 
@@ -202,7 +229,8 @@ and in a narrower terminal they stack.
 
 In the request and response panes `f`/`b` scroll by a page and `d`/`u`
 by half of one. A value that an `@capture` takes is a variable for the
-requests sent after it, until another environment is chosen. Each send
+requests sent after it, and a cookie a response sets goes with them,
+until another environment is chosen. Each send
 reads the environment files again and runs `{{$cmd NAME}}` again, so an
 edited file counts at once. Secrets are masked as in the CLI's output,
 and the interface writes no file but the history of runs.
@@ -210,8 +238,10 @@ and the interface writes no file but the history of runs.
 `y` puts the command on the clipboard through the terminal (OSC 52) and
 shows it in the response pane, for a terminal that does not pass OSC 52
 on. Secrets are not in it: each is a shell variable, such as `"$token"`
-for `{{token}}`; a comment above the command names the variables to
-set, and the command stops before curl runs if one is not set. A request
+for `{{token}}`, and Basic credentials are `-u 'user:'"$password"`; a
+comment above the command names the variables to set, and the command
+stops before curl runs if one is not set. The cookies of the session are
+not in it. A request
 whose text holds a secret value outside a placeholder is not copied.
 Text with control characters, such as a tab in a body, is quoted as
 `$'...'`, which bash and zsh read.

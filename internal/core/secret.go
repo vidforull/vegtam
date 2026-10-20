@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"cmp"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/url"
@@ -142,13 +143,16 @@ func newMasker(forms []string) *Masker {
 	return &Masker{strings.NewReplacer(pairs...), forms}
 }
 
-// escapes returns v and the forms it may come back in.
+// escapes returns v and the forms it may come back in: escaped for a URL
+// or JSON, and base64-encoded, as Basic credentials and many tokens are.
 func escapes(v string) []string {
-	j := jsonString(v, false)
+	j, b := jsonString(v, false), []byte(v)
 	forms := []string{
 		v, url.QueryEscape(v), url.PathEscape(v), jsonString(v, true), j,
-		strings.ReplaceAll(j, "/", `\/`),
-	} // as PHP escapes JSON
+		strings.ReplaceAll(j, "/", `\/`), // as PHP escapes JSON
+		base64.StdEncoding.EncodeToString(b), base64.RawStdEncoding.EncodeToString(b),
+		base64.URLEncoding.EncodeToString(b), base64.RawURLEncoding.EncodeToString(b),
+	}
 	// A server that decodes a query and echoes it turns "+" into a space.
 	if d, err := url.QueryUnescape(v); err == nil {
 		forms = append(forms, d)

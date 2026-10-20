@@ -40,7 +40,37 @@ GET {{host}}/slow?key={{token}}
 # @name raised
 # @max-time 10 m
 GET {{host}}/echo
+
+### Basic, written as user and password; the server echoes it
+# @name basic
+GET {{host}}/echo
+Authorization: Basic alice {{token}}
+
+### A host from the private file, which redirects to itself
+# @name moved
+GET {{live}}/moved?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
+Authorization: Bearer {{token}}
 `
+
+// cookieRequests sign in and send the session cookie the jar keeps.
+const cookieRequests = `### The session comes back as a cookie, and in the body
+# @name login
+POST {{host}}/login
+
+### The jar sends it, and the server echoes it
+# @name me
+GET {{host}}/me
+`
+
+// cookieFile writes the cookie requests and returns their file.
+func (fx *fixture) cookieFile(t *testing.T) string {
+	t.Helper()
+	path := fx.path("cookies.http")
+	if err := os.WriteFile(path, []byte(cookieRequests), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 // transportFile writes the transport requests and returns their file.
 func (fx *fixture) transportFile(t *testing.T) string {

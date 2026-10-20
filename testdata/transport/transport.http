@@ -19,6 +19,16 @@ GET {{host}}/above
 # @timeout 1
 GET {{slow}}/
 
+### Neither reads nor writes the cookie jar of the run
+# @name fresh
+# @no-cookie-jar
+GET {{host}}/fresh
+
+### Basic, written as user and password: sent as the base64 of both
+# @name basic
+GET {{host}}/basic
+Authorization: Basic {{user}} {{password}}
+
 ### Directives of other clients: a warning, and the request runs
 # @name foreign
 # @note are you sure?

@@ -24,6 +24,7 @@ import (
 const (
 	privateSecret = "Pr1vT0k/en+x"
 	envSecret     = "EnvK3y/v+al"
+	cookieSecret  = "S3ss10n/c00k+ie" // the session /login hands out
 )
 
 // fixture is a copy of testdata/cli with environment files for the
@@ -32,6 +33,7 @@ type fixture struct {
 	dir    string
 	host   string
 	hidden string // the base URL in the private file, as localhost:port
+	live   string // another one, as localhost:port, where a server answers
 	ca     string // a PEM file with the certificate of the TLS servers
 
 	mu   sync.Mutex
@@ -46,9 +48,14 @@ func newFixture(t *testing.T) *fixture {
 	closed, hidden := httptest.NewServer(http.NotFoundHandler()), httptest.NewServer(http.NotFoundHandler())
 	closed.Close()
 	hidden.Close()
+	live := httptest.NewServer(fx.handler())
+	t.Cleanup(live.Close)
 	// localhost, not 127.0.0.1 as the other servers: masking the secret
 	// host must not hide them.
-	fx.host, fx.hidden = srv.URL, strings.Replace(strings.TrimPrefix(hidden.URL, "http://"), "127.0.0.1", "localhost", 1)
+	local := func(u string) string {
+		return strings.Replace(strings.TrimPrefix(u, "http://"), "127.0.0.1", "localhost", 1)
+	}
+	fx.host, fx.hidden, fx.live = srv.URL, local(hidden.URL), local(live.URL)
 	if err := os.CopyFS(fx.dir, os.DirFS("../../testdata/cli")); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +104,7 @@ func newFixture(t *testing.T) *fixture {
 		"http-client.env.json": {"test": {
 			"host": srv.URL, "closed": closed.URL, "tls": secure.URL, "mtls": mtls.URL, "silent": silent.Addr().String(),
 		}},
-		"http-client.private.env.json": {"test": {"token": privateSecret, "base": "http://" + fx.hidden}},
+		"http-client.private.env.json": {"test": {"token": privateSecret, "base": "http://" + fx.hidden, "live": "http://" + fx.live}},
 	}
 	for name, v := range envs {
 		b, _ := json.Marshal(v)
@@ -147,6 +154,20 @@ func (fx *fixture) handler() http.Handler {
 	})
 	mux.HandleFunc("/hops", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/hops/x?"+r.URL.RawQuery, http.StatusFound)
+	})
+	// The session comes as a cookie and in the body; /me echoes the
+	// cookies it gets.
+	mux.HandleFunc("/login", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Add("Set-Cookie", "session="+cookieSecret+"; Path=/; HttpOnly")
+		w.Header().Add("Set-Cookie", "lang=en; Path=/")
+		fmt.Fprintf(w, `{"session": %q}`, cookieSecret)
+	})
+	mux.HandleFunc("/me", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Cookie", r.Header.Get("Cookie"))
+		fmt.Fprintf(w, `{"cookie": %q}`, r.Header.Get("Cookie"))
+	})
+	mux.HandleFunc("/moved", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/echo?"+r.URL.RawQuery, http.StatusFound)
 	})
 	mux.HandleFunc("/plain", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")

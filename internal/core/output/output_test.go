@@ -56,17 +56,17 @@ func TestNewResponse(t *testing.T) {
 		Header: http.Header{"X-B": {"2", "t0ken%2Fx"}, "X-A": {"1"}},
 		Body:   []byte(`{"echo": "t0ken\/x", "raw": "t0ken/x"}`),
 	}
-	resp, timing := NewResponse(r, masker)
-	got, _ := json.Marshal(Document{SchemaVersion: 1, Result: &Result{Response: resp, Timing: timing}})
+	resp := NewResponse(r, masker)
+	got, _ := json.Marshal(Document{SchemaVersion: 1, Result: &Result{Response: resp}})
 	want := `{"schema_version":1,"response":{"proto":"HTTP/1.1","status":200,"reason":"OK","headers":` +
 		`[{"name":"X-A","value":"1"},{"name":"X-B","value":"2"},{"name":"X-B","value":"***"}],` +
-		`"body":"{\"echo\": \"***\", \"raw\": \"***\"}","truncated":false,"untrusted":true,"tls_verified":false},"timing":{"total_ms":1.234}}`
+		`"body":"{\"echo\": \"***\", \"raw\": \"***\"}","truncated":false,"untrusted":true,"tls_verified":false}}`
 	if string(got) != want {
 		t.Errorf("NewResponse = %s\nwant          %s", got, want)
 	}
 
 	cut := &exec.Response{Body: []byte("id=t0ke"), Truncated: true, Header: http.Header{}}
-	if resp, _ := NewResponse(cut, masker); resp.Body != "id=***" || !resp.Truncated {
+	if resp := NewResponse(cut, masker); resp.Body != "id=***" || !resp.Truncated {
 		t.Errorf("truncated body = %q, %v; want the cut value masked", resp.Body, resp.Truncated)
 	}
 	escaped := &exec.Response{
@@ -74,15 +74,19 @@ func TestNewResponse(t *testing.T) {
 		Header: http.Header{},
 	}
 	m := core.NewMasker([]string{"t0ken/x", "ключ"})
-	if resp, _ := NewResponse(escaped, m); resp.Body != `{"net": "***", "py": "***", "k": "\u006b"}` {
+	if resp := NewResponse(escaped, m); resp.Body != `{"net": "***", "py": "***", "k": "\u006b"}` {
 		t.Errorf("escaped JSON body = %s; want every escaping of a value masked, the rest as sent", resp.Body)
 	}
 	split := &exec.Response{Body: []byte("ключ")[:7], Truncated: true, Header: http.Header{}}
-	if resp, _ := NewResponse(split, nil); resp.Body != "клю" || resp.Encoding != "" {
+	if resp := NewResponse(split, nil); resp.Body != "клю" || resp.Encoding != "" {
 		t.Errorf("text cut inside a character = %q, %q; want the whole characters as text", resp.Body, resp.Encoding)
 	}
+	cookies := &exec.Response{Header: http.Header{"Set-Cookie": {"lang=en; Path=/", "sid=t0ken/x", "gone=; Max-Age=0"}}}
+	if h := NewResponse(cookies, masker).Headers; len(h) != 3 || h[0].Value != "lang=***; Path=/" || h[1].Value != "sid=***" || h[2].Value != "gone=; Max-Age=0" {
+		t.Errorf("Set-Cookie = %+v; want each value masked, short ones too", h)
+	}
 	binary := &exec.Response{Body: []byte("\xfft0ken/x"), Header: http.Header{}}
-	if resp, _ := NewResponse(binary, masker); resp.Body != "/yoqKg==" || resp.Encoding != "base64" {
+	if resp := NewResponse(binary, masker); resp.Body != "/yoqKg==" || resp.Encoding != "base64" {
 		t.Errorf("binary body = %q, %q; want the masked bytes, base64-encoded", resp.Body, resp.Encoding)
 	}
 }
@@ -178,8 +182,15 @@ func TestSchemaMatchesTypes(t *testing.T) {
 		var walk func(reflect.Type)
 		walk = func(typ reflect.Type) {
 			for f := range typ.Fields() {
+				if !f.IsExported() && !f.Anonymous { // not in the JSON
+					continue
+				}
 				if f.Anonymous {
-					walk(f.Type.Elem())
+					if f.Type.Kind() == reflect.Pointer {
+						walk(f.Type.Elem())
+					} else {
+						walk(f.Type)
+					}
 					continue
 				}
 				name, opts, _ := strings.Cut(f.Tag.Get("json"), ",")

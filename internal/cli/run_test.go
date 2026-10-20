@@ -16,7 +16,10 @@ import (
 func normalize(fx *fixture, s string) string {
 	s = strings.ReplaceAll(s, fx.dir, "DIR")
 	s = strings.ReplaceAll(s, fx.host, "HOST")
+	s = strings.ReplaceAll(s, strings.TrimPrefix(fx.host, "http://"), "ADDR")
 	s = regexp.MustCompile(`\((\d+(\.\d+)?(µs|ms|s))\)`).ReplaceAllString(s, "(TIME)")
+	times := regexp.MustCompile(`\b(dns|connect|tls|ttfb|total) \d+(\.\d+)?(µs|ms|s)`)
+	s = regexp.MustCompile(`(?m)^\* .*$`).ReplaceAllStringFunc(s, func(line string) string { return times.ReplaceAllString(line, "$1 T") })
 	return regexp.MustCompile(`"total_ms": ?[0-9.]+`).ReplaceAllString(s, `"total_ms":0`)
 }
 
@@ -66,9 +69,15 @@ HTTP/1.1 200 OK (TIME)
 Content-Length: 26
 Content-Type: text/plain
 Date: Mon, 19 Oct 2026 00:00:00 GMT
+* connected to ADDR · connect T ttfb T total T
 
 plain\x1b]0;title\x07 \u202etext\u200b
 `, ""},
+		{"--verbose and a timeout", []string{"run", "api.http#slow", "-v", "--read-timeout", "50ms"}, exitNetwork, `# timeouts: connect 10s, read 50ms, max time 2m
+GET HOST/slow?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
+
+* connected to ADDR · connect T total T
+`, `vegtam: api.http:29: Get "HOST/slow?key={{token}}&env={{$env VEGTAM_TEST_KEY}}": no data from the server for 50ms (read timeout)` + "\n"},
 		{"dry run", []string{"run", "api.http#echo", "--dry-run"}, exitOK, `# timeouts: connect 10s, read 30s, max time 2m
 POST HOST/echo?key={{token}}&env={{$env VEGTAM_TEST_KEY}}
 Authorization: Bearer {{token}}

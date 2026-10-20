@@ -1,12 +1,14 @@
 package exec
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strings"
@@ -31,6 +33,9 @@ type Transport struct {
 	// and body included.
 	// 0 is no limit.
 	Connect, Read, Total time.Duration
+	// NoCookies leaves the client without a cookie jar. Otherwise it has
+	// one, in memory, for as long as it lives (see Jar).
+	NoCookies bool
 }
 
 // TLS is how servers are checked and how the client proves who it is.
@@ -106,11 +111,25 @@ func (c *Client) newTransport(k transportKey) *http.Transport {
 			return nil
 		}
 	}
+	proxy := t.Proxy
+	if c.proxy != nil {
+		proxy = c.proxy
+	}
 	if cert := o.Cert; k.cert && cert != nil {
 		// Always this certificate, whichever CAs the server names: as
 		// curl does, and unlike Certificates, which Go matches to them.
 		cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return cert, nil }
-		t.Proxy = noTLSProxy(t.Proxy)
+		proxy = noTLSProxy(proxy)
+	}
+	t.Proxy = func(r *http.Request) (*url.URL, error) {
+		if proxy == nil {
+			return nil, nil
+		}
+		u, err := proxy(r)
+		if err == nil {
+			proxied(r, u)
+		}
+		return u, err
 	}
 	t.TLSClientConfig = cfg
 	return t
@@ -138,20 +157,59 @@ func noTLSProxy(proxy func(*http.Request) (*url.URL, error)) func(*http.Request)
 // to the origin of the request as written offer the client certificate,
 // until a redirect has led elsewhere; from then on, none does, as no
 // secret header goes on. One transport for the whole chain would offer it
-// to every origin a redirect leads to.
+// to every origin a redirect leads to. Each hop takes the cookies of the
+// jar for its URL, and gives the jar those its response sets.
 type hops struct {
 	c     *Client
 	st    Settings
+	w     *watch
+	t     *tracer
+	jar   *Jar   // nil for none
+	noJar string // why there is none
 	first string // the origin of the request as written
 	left  bool   // a hop has gone to another origin
 	plain bool   // a hop has gone over http
 }
 
-// RoundTrip sends a hop. net/http calls it once a hop, one after another.
+// RoundTrip sends a hop, with hooks of its own that keep its time limits
+// and trace it. net/http calls it once a hop, one after another.
 func (h *hops) RoundTrip(r *http.Request) (*http.Response, error) {
 	h.left = h.left || origin(r.URL) != h.first
 	h.plain = h.plain || r.URL.Scheme != "https"
-	return h.c.transport(transportKey{cert: !h.left, connect: h.st.Connect, version: h.st.Version}).RoundTrip(r)
+	ht := h.t.begin(r)
+	ctx := context.WithValue(r.Context(), hopKey{}, ht)
+	r = r.WithContext(httptrace.WithClientTrace(ctx, h.w.trace(ht)))
+	var sent []Cookie
+	if h.jar != nil {
+		var cs []*http.Cookie
+		if cs, sent = h.jar.cookies(r.URL); len(cs) > 0 {
+			r.Header = r.Header.Clone() // r is a copy, its header not yet
+			for _, c := range cs {
+				r.AddCookie(c)
+			}
+		}
+	}
+	resp, err := h.c.transport(transportKey{cert: !h.left, connect: h.st.Connect, version: h.st.Version}).RoundTrip(r)
+	ht.got(resp)
+	var set []SetCookie
+	if resp != nil {
+		set = h.offer(r.URL, resp.Cookies())
+	}
+	ht.cookies(sent, set)
+	return resp, err
+}
+
+// offer gives the jar the cookies that the response to u set, and says
+// what became of each.
+func (h *hops) offer(u *url.URL, cs []*http.Cookie) []SetCookie {
+	if h.jar != nil {
+		return h.jar.set(u, cs, time.Now())
+	}
+	var set []SetCookie
+	for _, c := range cs {
+		set = append(set, SetCookie{Name: c.Name, Domain: c.Domain, Path: c.Path, Secure: c.Secure, HTTPOnly: c.HttpOnly, Value: c.Value, Reason: h.noJar})
+	}
+	return set
 }
 
 // LoadTLS reads the files that the TLS flags name: caFile, PEM

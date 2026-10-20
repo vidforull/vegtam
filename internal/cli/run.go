@@ -50,7 +50,10 @@ results for a file or a directory. An error stops only its own request.
 
 A captured value is a variable for the requests after it in the same
 run, over the environment; it is a secret unless the directive says
-plain. {{$cmd NAME}} runs a command of http-client.cmd.json once per run,
+plain. So is a cookie a response sets: a jar in memory keeps it for the
+requests after it, and sends it where it goes, without ever writing it
+to disk or showing its value. --no-cookies turns the jar off, and
+"# @no-cookie-jar" for one request. {{$cmd NAME}} runs a command of http-client.cmd.json once per run,
 if the file is trusted (see vegtam trust --help); --dry-run checks the
 trust but runs nothing.
 

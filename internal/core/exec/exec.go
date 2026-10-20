@@ -4,15 +4,16 @@ package exec
 import (
 	"context"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,11 +43,20 @@ type Client struct {
 	pool map[transportKey]*http.Transport
 	// control is the dialer's: tests make a connection hang with it.
 	control func(ctx context.Context, network, address string, c syscall.RawConn) error
+	// proxy takes the place of the environment's, for tests: net/http
+	// reads it once a process.
+	proxy func(*http.Request) (*url.URL, error)
+	jar   *Jar // nil without one
 }
 
-// New returns a Client.
+// New returns a Client, with a cookie jar of its own unless the transport
+// says no.
 func New(opts Options) *Client {
-	return &Client{opts: opts, pool: map[transportKey]*http.Transport{}}
+	c := &Client{opts: opts, pool: map[transportKey]*http.Transport{}}
+	if !opts.Transport.NoCookies {
+		c.jar = NewJar()
+	}
+	return c
 }
 
 // Response is a received response.
@@ -65,8 +75,10 @@ type Response struct {
 	TLSVerified bool
 }
 
-// Do sends p with its secrets revealed from s and reads the response.
-func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Response, error) {
+// Do sends p with its secrets revealed from s and reads the response. The
+// trace says how it went, after an error too; it is nil if nothing was
+// sent.
+func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Response, *Trace, error) {
 	st, _ := c.Settings(p.Request)
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -77,18 +89,24 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 	}
 	w := &watch{connect: st.Connect, read: st.Read, cancel: cancel}
 	defer w.stop()
-	ctx = httptrace.WithClientTrace(ctx, w.trace())
 	req, sensitive, err := c.build(ctx, p, s, false, st.Version)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	h := &hops{c: c, st: st, first: origin(req.URL)}
-	hc := &http.Client{Transport: h, CheckRedirect: redirectPolicy(sensitive, p.Body.HasSecret())}
+	t := &tracer{}
+	h := &hops{c: c, st: st, w: w, t: t, first: origin(req.URL), jar: c.jar}
+	switch {
+	case c.jar == nil:
+		h.noJar = "the jar is off: --no-cookies"
+	case p.Request != nil && p.Request.NoCookieJar():
+		h.jar, h.noJar = nil, "@no-cookie-jar"
+	}
+	hc := &http.Client{Transport: h, CheckRedirect: redirectPolicy(sensitive, p.Body.HasSecret(), t)}
 	start := time.Now()
 	resp, err := hc.Do(req)
 	w.idle() // the headers are in
 	if err != nil {
-		return nil, c.netError(ctx, p, s, req.URL.String(), err, st, w)
+		return nil, t.finish(start), c.netError(ctx, p, s, req.URL.String(), err, st, w)
 	}
 	defer resp.Body.Close()
 	limit := c.opts.MaxBody
@@ -97,7 +115,7 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 	}
 	body, err := io.ReadAll(io.LimitReader(watched{resp.Body, w}, limit))
 	if err != nil {
-		return nil, c.netError(ctx, p, s, req.URL.String(), err, st, w)
+		return nil, t.finish(start), c.netError(ctx, p, s, req.URL.String(), err, st, w)
 	}
 	r := &Response{
 		Proto:    resp.Proto,
@@ -112,7 +130,15 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 	if int64(len(body)) > c.opts.MaxBody {
 		r.Body, r.Truncated = body[:c.opts.MaxBody], true
 	}
-	return r, nil
+	return r, t.finish(start), nil
+}
+
+// CookieValues returns the values of the cookies the client's jar keeps.
+func (c *Client) CookieValues() []string {
+	if c.jar == nil {
+		return nil
+	}
+	return c.jar.values()
 }
 
 // Check reports the error Do would give p before sending anything: an
@@ -178,7 +204,7 @@ func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets, ch
 	for _, h := range p.Headers {
 		var v string
 		var known bool
-		v, known, err = reveal(h.Value)
+		v, known, err = headerValue(h, reveal, fail)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -222,13 +248,45 @@ func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets, ch
 	return req, sensitive, nil
 }
 
+// headerValue returns the value of h as it goes on the wire, revealed by
+// reveal, and whether it is known yet; fail makes the error of a value
+// that cannot go.
+func headerValue(h core.PreparedHeader, reveal func(core.Text) (string, bool, error), fail func(string, ...any) error) (string, bool, error) {
+	if user, password, ok := core.BasicAuth(h); ok {
+		return basic(user, password, reveal, fail)
+	}
+	return reveal(h.Value)
+}
+
+// basic returns the value of an Authorization header that core.BasicAuth
+// reads as user and password: Basic and the base64 of user:password.
+func basic(user, password core.Text, reveal func(core.Text) (string, bool, error), fail func(string, ...any) error) (string, bool, error) {
+	u, userKnown, err := reveal(user)
+	switch {
+	case err != nil:
+		return "", false, err
+	// Known before the password, as in a dry run with a password that an
+	// earlier request captures.
+	case userKnown && strings.Contains(u, ":"):
+		return "", false, fail("header Authorization: the user of Basic holds a colon, which Basic cannot carry (RFC 7617)")
+	}
+	pw, known, err := reveal(password)
+	if err != nil || !userKnown || !known {
+		return "", false, err
+	}
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(u+":"+pw)), true, nil
+}
+
 // redirectPolicy follows a redirect unless it goes from https to http, or
 // to another origin with a body that holds a secret: a 307 or 308 sends
 // the body again, and no header can be dropped from it. On the way to
 // another origin the sensitive headers are dropped, and the Referer that
-// net/http adds on every hop is dropped on all of them.
-func redirectPolicy(sensitive []string, secretBody bool) func(*http.Request, []*http.Request) error {
+// net/http adds on every hop is dropped on all of them. t records each
+// redirect, and the headers of the request it dropped.
+func redirectPolicy(sensitive []string, secretBody bool, t *tracer) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
+		var dropped []string
+		defer func() { t.redirect(dropped) }()
 		if len(via) > MaxRedirects {
 			return fmt.Errorf("stopped after %d redirects", MaxRedirects)
 		}
@@ -254,7 +312,11 @@ func redirectPolicy(sensitive []string, secretBody bool) func(*http.Request, []*
 				return errors.New("refused a redirect to another origin: it would send the body again, and the body holds a secret")
 			}
 			for _, h := range sensitive {
-				req.Header.Del(h)
+				name := http.CanonicalHeaderKey(h)
+				if _, ok := req.Header[name]; ok && !slices.Contains(dropped, name) {
+					dropped = append(dropped, name)
+				}
+				req.Header.Del(name)
 			}
 		}
 		return nil

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,7 +49,8 @@ func do(t *testing.T, opts Options, p *core.Prepared) (*Response, error) {
 	if opts.MaxBody == 0 {
 		opts.MaxBody = 1 << 20
 	}
-	return New(opts).Do(t.Context(), p, testSecrets)
+	r, _, err := New(opts).Do(t.Context(), p, testSecrets)
+	return r, err
 }
 
 func TestDo(t *testing.T) {
@@ -360,7 +362,7 @@ func TestCheckLate(t *testing.T) {
 		}
 	}
 	// Sending needs the value.
-	_, err := New(Options{}).Do(t.Context(), prepared("GET", secret("late"), nil), late)
+	_, _, err := New(Options{}).Do(t.Context(), prepared("GET", secret("late"), nil), late)
 	if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != core.KindVariable {
 		t.Errorf("Do = %v, want a variable error", err)
 	}
@@ -423,7 +425,7 @@ func TestErrorsHideSecrets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(Options{MaxBody: 1, Transport: Transport{Total: 100 * time.Millisecond}}).Do(t.Context(), tt.p, tt.secrets)
+			_, _, err := New(Options{MaxBody: 1, Transport: Transport{Total: 100 * time.Millisecond}}).Do(t.Context(), tt.p, tt.secrets)
 			e, ok := errors.AsType[*core.Error](err)
 			if !ok || e.Kind != tt.kind || !strings.Contains(e.Msg, tt.want) {
 				t.Fatalf("error = %v; want %s error with %q", err, tt.kind, tt.want)
@@ -443,5 +445,57 @@ func TestErrorsHideSecrets(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestBasic sends credentials written as Basic, user and password: they
+// go encoded, and not to another origin.
+func TestBasic(t *testing.T) {
+	var elsewhere atomic.Value
+	other := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		elsewhere.Store(r.Header.Get("Authorization"))
+	}))
+	defer other.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/moved" {
+			http.Redirect(w, r, other.URL, http.StatusFound)
+			return
+		}
+		user, password, _ := r.BasicAuth()
+		fmt.Fprintf(w, "%s:%s", user, password)
+	}))
+	defer srv.Close()
+	auth := func(t core.Text) core.PreparedHeader { return header("Authorization", t) }
+	s := secrets{"token": "t0ken", "user": "a:b"}
+	for _, tt := range []struct {
+		h    core.PreparedHeader
+		want string // the body, or the error
+	}{
+		{auth(append(lit("Basic alice "), secret("token")...)), "alice:t0ken"},
+		{auth(lit("basic alice s3 ")), "alice:s3"},
+		{auth(lit("Basic YWxpY2U6dDBrZW4=")), "alice:t0ken"},
+		{auth(slices.Concat(lit("Basic "), secret("user"), lit(" x"))), "the user of Basic holds a colon"},
+	} {
+		r, _, err := New(Options{MaxBody: 1 << 20}).Do(t.Context(), prepared(http.MethodGet, lit(srv.URL), nil, tt.h), s)
+		got := fmt.Sprint(err)
+		if err == nil {
+			got = string(r.Body)
+		}
+		if !strings.Contains(got, tt.want) {
+			t.Errorf("%s: %q, want %q", tt.h.Value.Masked(), got, tt.want)
+		}
+	}
+	_, tr, err := New(Options{MaxBody: 1 << 20}).Do(t.Context(), prepared(http.MethodGet, lit(srv.URL+"/moved"), nil, auth(append(lit("Basic alice "), secret("token")...))), s)
+	if err != nil || elsewhere.Load() != "" || !slices.Equal(tr.Hops[0].Dropped, []string{"Authorization"}) {
+		t.Errorf("another origin got %q; dropped %v, %v", elsewhere.Load(), tr.Hops[0].Dropped, err)
+	}
+	// A password an earlier request captures is known when it is sent.
+	late := prepared(http.MethodGet, lit(srv.URL), nil, auth(append(lit("Basic alice "), secret("late")...)))
+	if err := New(Options{}).Check(t.Context(), late, lateSecrets{testSecrets}); err != nil {
+		t.Errorf("Check with a late password: %v", err)
+	}
+	late = prepared(http.MethodGet, lit(srv.URL), nil, auth(append(lit("Basic a:b "), secret("late")...)))
+	if err := New(Options{}).Check(t.Context(), late, lateSecrets{testSecrets}); err == nil || !strings.Contains(err.Error(), "holds a colon") {
+		t.Errorf("Check with a colon in the user and a late password: %v", err)
 	}
 }

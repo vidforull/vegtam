@@ -721,3 +721,88 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   before: a mistyped `@asert` must not drop a check and exit with 0.
   Warnings go to stderr and into `warnings` in JSON, those of the
   environment files once, with the first request of their directory.
+
+## 2026-10-20: diagnostics and cookies
+
+- **No raw dump.** `--verbose` and the JSON say what a request went
+  through, and every part of it goes through the masker: a `Location`, a
+  proxy's password, the issuer of a certificate. What names a host that
+  holds a secret is hidden whole, since the masker, which works by
+  value, would miss the host in another letter case or a domain above
+  it: its address, the subject of its certificate, the domain of its
+  cookies; the reasons a cookie was refused name no host. There is no
+  mode that prints the exchange as it is, and there will be none: curl's `-v` and `--trace` print
+  `Authorization` and `Cookie` as they are, which its maintainer says
+  nothing guarantees against, and an agent reads whatever is printed.
+- **A trace per hop.** Each hop of a request gets its own hooks, which
+  keep the time limits as before and record its phases: a hook that
+  fires late, such as for the connection that lost the race of Happy
+  Eyeballs, cannot land in the next hop. The address is that of the
+  first connection made, known before the TLS handshake, which may fail.
+  The diagnostics come after an error too: a request that hangs is what
+  they are for. A handshake that fails still names the certificate the
+  server sent, from Go's verification error, which says what CA to
+  trust.
+- **curl's names, in the timing there was.** The phases are curl's and
+  Hurl's (`name_lookup`, `connect`, `app_connect`, `start_transfer`),
+  each from the start of the request to the end of the phase, summed
+  over redirects as libcurl does, with the `_ms` that every duration of
+  the schema has. They join `timing`, which had `total_ms`: a second
+  object, `timings`, beside it would have said the total twice. A phase
+  that did not happen is absent, not 0. `reused` is true when no
+  connection was made at all, so that the phases then hold no connect
+  time. The text form gives each hop its own line and times, which are
+  easier to read than sums.
+- **A jar in memory, for a run.** `.http` files sign in with one request
+  and use the session in the next; without a jar that breaks without a
+  word, and every `.http` client has one on. It is never written to
+  disk: net/http's jar cannot be saved whole (`Cookies` gives names and
+  values only), the file would hold sessions, and cookies carried from
+  one run to the next would make a run depend on what ran before. One
+  jar per session: a run of the CLI, an environment in the interface.
+- **The public suffix list is required.** Go's documentation calls a jar
+  without it not secure: any site could set a cookie for all of co.uk.
+  `golang.org/x/net/publicsuffix` is the one new dependency; it moved
+  `golang.org/x/sys` from 0.47 to 0.49, which `x/net` requires.
+- **net/http's jar decides where a cookie goes.** vegtam does not match
+  domains and paths itself: it refuses, in front of net/http's jar, what
+  RFC 6265bis refuses and that jar takes, a `Secure` cookie set over
+  http or one from http that would replace a `Secure` one, a `__Secure-`
+  or `__Host-` prefix without what it needs, and keeps what it took, to
+  count cookies against the limits (4096 bytes, 50 a site, 300 in all)
+  and to say which were sent. net/http's limit, after CVE-2025-58186, is
+  on how many cookies one response may set, 3000, past which it takes
+  none; a test checks it, and others the jar's own. A `Domain` or `Path` over 1024 bytes refuses the cookie,
+  where RFC 6265bis ignores the attribute: stricter, and no copy of a
+  cookie to change. A host that is not ASCII keeps no cookie: net/http's
+  jar turns it into punycode first, and the count would not match.
+- **`Secure` means https, localhost too.** net/http's jar, as browsers,
+  takes and sends a `Secure` cookie over http to localhost, to a loopback
+  address and to any host under localhost. But net/http sends a request
+  to `LOCALHOST`, `localhost.` or `api.localhost` through `HTTP_PROXY`,
+  in clear, and a `__Host-` session would go to a proxy that way.
+  vegtam takes and sends a `Secure` cookie over https only. A
+  development server on http that sets `Secure` cookies gets them
+  refused, and the output says why.
+- **`@no-cookie-jar` is strict.** JetBrains reads it as "do not keep
+  what this response sets"; kulala as "neither send nor keep". vegtam
+  takes the stricter: the request neither reads the jar nor writes it,
+  so that it goes out as its file says.
+- **A cookie's value is a secret.** The output names cookies, never
+  their values. In `Set-Cookie` headers the value is `***` whatever its
+  length; elsewhere, values of 8 bytes and more are masked, such as a
+  session a body echoes. A shorter one, `lang=en` or `seen=1`, is no
+  credential, and masking every `en` and `1` of the output would make it
+  unreadable, which a server could do on purpose. The values the jar
+  keeps are masked as long as it keeps them; of the others, refused,
+  removed or replaced, the latest 256, and none over 4096 bytes: the
+  masker is made anew for each request, and a server that set cookies
+  without end could make it as large and slow as it liked.
+- **Basic from the secrets.** `Authorization: Basic {{user}}
+  {{password}}` goes as base64, as in JetBrains, REST Client and
+  httpyac, so that a password stays in the private file. The words are
+  split on the text as written, so that a secret may hold a space. The
+  base64 form is a form of the secret: the masker hides the base64 of
+  every secret value, and a session adds the `user:password` of each
+  such header. As a curl command it is `-u`, which curl encodes and,
+  like vegtam, does not send to another host.

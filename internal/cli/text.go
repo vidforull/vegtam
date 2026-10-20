@@ -9,7 +9,8 @@ import (
 
 // printResult prints the i-th result of a run as text. With several
 // requests each block starts with "### ref". The request is shown with
-// --verbose and for a dry run; an error goes to stderr.
+// --verbose and for a dry run, and so is what it went through, up to an
+// error, which goes to stderr.
 func (c *Config) printResult(res *output.Result, i int, several, verbose bool) {
 	var b strings.Builder
 	if several {
@@ -24,12 +25,15 @@ func (c *Config) printResult(res *output.Result, i int, several, verbose bool) {
 			output.WriteTransport(&b, res.Transport)
 		}
 		output.WriteRequest(&b, res.Request)
-		if res.Response != nil {
+		if res.Response != nil || res.Timing != nil {
 			b.WriteString("\n")
 		}
 	}
-	if res.Response != nil {
+	switch {
+	case res.Response != nil:
 		output.WriteResponse(&b, res, verbose, 0)
+	case verbose:
+		output.WriteTrace(&b, res)
 	}
 	fmt.Fprint(c.out, c.text(b.String()))
 	if res.Error != nil {

@@ -57,6 +57,18 @@ override the line for a whole run; the response says what was spoken.
 name is an RFC 9110 token; the value may contain placeholders. A header
 named `Host` sets the request's host.
 
+**Basic credentials.** `Authorization: Basic {{user}} {{password}}`, the
+shortcut of JetBrains, REST Client and httpyac, goes on the wire as
+`Basic` and the base64 of `user:password` (RFC 7617). The user and the
+password are a word each, literal text or placeholders, so that the
+password can stay in the private environment file. Words are split at
+the spaces of the text as written: the value of a secret may hold a
+space, a value of `http-client.env.json` may not. `Basic` and one word,
+the encoded form, is sent as it is. A user with a colon in it is an
+error, since Basic cannot carry it. The encoded form is masked like the
+secrets in it, and the header is dropped on a redirect to another
+origin, as every `Authorization` header is.
+
 **Body.** Everything after the first blank line, up to the next `###` or
 the end of the file, taken verbatim. Blank lines at its start and end are
 dropped, and line endings become `\n`. Placeholders in the body are
@@ -90,12 +102,13 @@ vegtam's own extensions are comments, so other tools ignore them:
 | `# @capture [plain] <name> = <source>` | takes a value from the response for the requests after it, such as `token = $.token` |
 | `# @tag <tags>` | labels for selecting requests |
 | `# @no-log` | keeps the request out of the history of runs, as in JetBrains, kulala and httpyac |
+| `# @no-cookie-jar` | the request neither sends the cookies of the run nor keeps those its response sets (see [Cookies](#cookies)) |
 | `# @timeout <time>` | lowers the read timeout, as in JetBrains: how long to wait for data once the request is sent |
 | `# @connection-timeout <time>` | lowers the connect timeout, as in JetBrains: DNS, TCP and the TLS handshake |
 | `# @max-time <time>` | lowers the time limit of the whole exchange, as curl's `--max-time` |
 
 Directives go before the request line or among the headers, and each
-but `@no-log`, which takes none, needs a value. Their values are taken
+but `@no-log` and `@no-cookie-jar`, which take none, needs a value. Their values are taken
 as written: placeholders in them are not resolved, so
 `header Authorization == "Bearer {{token}}"` compares with that very
 text. `@tag` is kept with the request but not
@@ -343,8 +356,8 @@ request holds only their names; the values are inserted
 when the request is sent. Wherever a request is shown, a secret appears as
 its placeholder (`Bearer {{token}}`). In other text that might contain a
 value, such as error messages and response headers and bodies, every
-secret value, including its URL- and JSON-escaped forms, is replaced with
-`***`.
+secret value, including its URL- and JSON-escaped and base64-encoded
+forms, is replaced with `***`.
 
 When a redirect leads to another origin (scheme, host or port),
 `Authorization`, `Cookie`, `Proxy-Authorization`, `Referer` and every
@@ -354,6 +367,39 @@ clients do: its query may hold a token. A `Referer` the request has itself
 is sent on as far as its origin. A 307 or 308 redirect sends the body again, so one to another
 origin is refused if the body holds a secret. A redirect from `https` to
 `http` is always refused. A refused redirect is a `network` error.
+
+## Cookies
+
+A run keeps the cookies that responses set, for the requests after them,
+as browsers and the other `.http` clients do: a request that signs in
+and one that uses the session work in one run. In the terminal
+interface the cookies last until another environment is chosen. They
+are kept in memory only, never written to a file, and the next run
+starts without any.
+
+Which cookie goes to which request follows RFC 6265, with the public
+suffix list: a cookie goes to the host that set it, or to the domain
+its `Domain` names and the hosts below it, never to another site, and a
+`Secure` one only over `https`. A cookie is not kept if its `Domain` is
+a public suffix, such as `co.uk`, or another site; if it is `Secure` and
+was set over `http`, or would replace a `Secure` one from `http`; if a
+`__Secure-` or `__Host-` prefix lacks what RFC 6265bis asks of it; if
+its name and value are over 4096 bytes, or its `Domain` or `Path` over
+1024; or past 50 cookies a site and 300 in all. Unlike in browsers,
+`localhost` is no exception to `Secure`: http to it may go through a
+proxy. A host that is not ASCII keeps no cookies.
+
+`# @no-cookie-jar` keeps one request away from the cookies of the run:
+none is sent, and none its response sets is kept. JetBrains reads the
+directive as "keep none" only. `--no-cookies` turns the cookies off for a
+whole run. A `Cookie` header written in the request is sent either way,
+and dropped on a redirect to another origin.
+
+A cookie's value is a secret: the output names the cookies sent and set,
+never their values; a `Set-Cookie` header shows `***` for the value, and
+a value of 8 bytes or more is masked wherever else it shows, such as in
+a body that echoes the session. A shorter one, such as `lang=en`, is no
+credential, and masking it would mask every `en`.
 
 ## Importing from Postman
 
@@ -453,7 +499,7 @@ and it overwrites no file without `--force`.
 | body file with variables (`<@ ./file`) | error |
 | multipart bodies with `< file` parts | error |
 | response handlers and output redirects (`> {% ... %}`, `> script.js`, `>> file`, `<> file`) | error |
-| JetBrains directives such as `@no-redirect`, `@no-cookie-jar` | error |
+| JetBrains directives such as `@no-redirect`, `@no-auto-encoding` | error |
 | dynamic variables other than `$env` and `$cmd` (`$uuid`, `$timestamp`, `$random.*`) | error |
 | environment values that are objects, such as `Security`, other than `SSLConfiguration` | error |
 | WebSocket, gRPC and GraphQL requests | error (method not recognised) |

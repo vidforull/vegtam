@@ -28,7 +28,10 @@ var ErrSecret = errors.New("a secret value is in the request outside a placehold
 // the URL, the headers and the body, and nothing that curl adds to a body
 // of its own accord, such as a Content-Type or an Expect; its default
 // headers, such as User-Agent and Accept, are curl's. A body file is sent
-// with --data-binary @path, its path as the .http file's was given.
+// with --data-binary @path, its path as the .http file's was given. An
+// Authorization header written as Basic, user and password
+// (core.BasicAuth) is -u user:password, which curl encodes. The cookies of
+// vegtam's jar are not in the command.
 //
 // Each secret is "$name", a shell variable named after its placeholder:
 // {{token}} is "$token", {{$env NAME}} and {{$cmd NAME}} are "$NAME".
@@ -70,6 +73,11 @@ func Command(p *core.Prepared, m *core.Masker) (string, error) {
 	contentType := false
 	for _, h := range p.Headers {
 		contentType = contentType || strings.EqualFold(h.Name, "Content-Type")
+		// curl encodes it, and keeps it to the host of the request.
+		if user, password, ok := core.BasicAuth(h); ok {
+			lines = append(lines, "-u "+c.text(slices.Concat(user, core.Text{{Text: ":"}}, password), "header Authorization"))
+			continue
+		}
 		t := append(core.Text{{Text: h.Name + ": "}}, h.Value...)
 		if empty(h.Value) {
 			t = core.Text{{Text: h.Name + ";"}} // "Name:" would remove the header, "Name;" sends it empty

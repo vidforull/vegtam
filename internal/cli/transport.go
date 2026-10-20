@@ -18,6 +18,7 @@ type netFlags struct {
 	http11, http2, h2c     bool
 	connect, read, maxTime timeout
 	timeoutUsed            bool // --timeout was given, the old name of --max-time
+	noCookies              bool
 }
 
 // newNetFlags returns the flags as they are when not given. The read
@@ -44,6 +45,7 @@ func (f *netFlags) add(fl *pflag.FlagSet) {
 	fl.StringVar(&f.cert, "cert", "", "offer this PEM client certificate to the origin of each request as written")
 	fl.StringVar(&f.key, "key", "", "the unencrypted PEM key of --cert, if it is not in the --cert file")
 	fl.BoolVar(&f.insecure, "insecure", false, "do not check server certificates; only for a person at a terminal")
+	fl.BoolVar(&f.noCookies, "no-cookies", false, "keep no cookie jar: send no cookie that a response set, keep none")
 }
 
 // insecureBanner is printed on stderr by every run with --insecure.
@@ -81,6 +83,7 @@ func (f *netFlags) transport(cfg *Config) (exec.Transport, error) {
 	}
 	return exec.Transport{
 		TLS: t, Version: version, Connect: time.Duration(f.connect), Read: time.Duration(f.read), Total: time.Duration(f.maxTime),
+		NoCookies: f.noCookies,
 	}, nil
 }
 

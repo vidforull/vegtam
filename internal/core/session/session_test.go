@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -236,5 +237,51 @@ func TestHistory(t *testing.T) {
 	s = New(Options{Env: "test", MaxBody: 1 << 20, History: history.New(filepath.Join(blocked, "vegtam"))})
 	if res := s.Run(t.Context(), s.Prepare(t.Context(), f, 0)); res.Error != nil || s.HistoryError() == nil {
 		t.Errorf("with no place for the history: %+v, %v", res.Error, s.HistoryError())
+	}
+}
+
+// TestCookieJar checks that a session keeps the cookies of its responses
+// for the requests after them, masked, and that another session, as the
+// terminal interface makes for another environment, starts without them.
+func TestCookieJar(t *testing.T) {
+	const value = "c00kie/s3ss10n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			w.Header().Set("Set-Cookie", "sid="+value)
+		}
+		fmt.Fprintf(w, `{"cookie": %q}`, r.Header.Get("Cookie"))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api.http")
+	if err := os.WriteFile(path, []byte("POST "+srv.URL+"/login\n\n###\nGET "+srv.URL+"/me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := httpfile.ParseFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(Options{MaxBody: 1 << 20})
+	login := s.Run(t.Context(), s.Prepare(t.Context(), f, 0))
+	me := s.Run(t.Context(), s.Prepare(t.Context(), f, 1))
+	if login.Response.Headers[3].Value != "sid=***" || login.Cookies == nil || me.Cookies == nil || len(me.Cookies.Sent) != 1 ||
+		me.Response.Body != `{"cookie": "sid=***"}` || s.Masker().Mask(value) != "***" {
+		t.Errorf("login %+v, me %+v %+v", login.Response, me.Response, me.Cookies)
+	}
+	// Set again, the value is kept once; past the latest, the jar's still
+	// count.
+	s.Run(t.Context(), s.Prepare(t.Context(), f, 0))
+	if len(s.cookies) != 1 {
+		t.Errorf("cookie values %d, want 1", len(s.cookies))
+	}
+	for i := range maxCookieSecrets {
+		s.cookie(fmt.Sprintf("another-value-%d", i))
+	}
+	if len(s.cookies) != maxCookieSecrets || slices.Contains(s.cookies, value) || s.Masker().Mask(value) != "***" {
+		t.Errorf("after %d more: %d values; the jar's %s", maxCookieSecrets, len(s.cookies), s.Masker().Mask(value))
+	}
+	other := New(Options{MaxBody: 1 << 20})
+	if res := other.Run(t.Context(), other.Prepare(t.Context(), f, 1)); res.Cookies != nil || res.Response.Body != `{"cookie": ""}` {
+		t.Errorf("another session: %+v, %s", res.Cookies, res.Response.Body)
 	}
 }

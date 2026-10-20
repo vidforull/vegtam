@@ -98,6 +98,10 @@ Accept: application/json`,
 			"2 GET https://example.com/a @no-log():1\n4 GET https://example.com/b @no-log():5\n",
 		},
 		{
+			"no-cookie-jar", "# @no-cookie-jar\nGET https://example.com/a",
+			"2 GET https://example.com/a @no-cookie-jar():1\n",
+		},
+		{
 			"HTTP versions", "GET http://example.com/a HTTP/2 (Prior Knowledge)\n###\nGET https://example.com/b HTTP/2.0\n" +
 				"###\nGET http://example.com/c HTTP/2  ( prior  knowledge )",
 			"1 GET http://example.com/a HTTP/2 (Prior Knowledge)\n3 GET https://example.com/b HTTP/2\n" +
@@ -148,6 +152,7 @@ func TestParseErrors(t *testing.T) {
 		{"unknown directive", "# @no-redirect\nGET https://example.com", 1, "unknown directive @no-redirect"},
 		{"directive without value", "# @assert\nGET https://example.com", 1, "@assert needs a value"},
 		{"no-log with a value", "# @no-log yes\nGET https://example.com", 1, "@no-log takes no value"},
+		{"no-cookie-jar with a value", "GET https://example.com\n# @no-cookie-jar off", 2, "@no-cookie-jar takes no value"},
 		{"httpyac without TLS checks", "# @no-reject-unauthorized\nGET https://example.com", 1, "--insecure does it, for a person at a terminal"},
 		{"httpyac proxy", "GET https://example.com\n# @proxy http://proxy.example.test", 2, "@proxy (httpyac) chooses a proxy, which a file may not do"},
 		{"kulala curl option", "# @kulala-curl--insecure\nGET https://example.com", 1, "@kulala-curl--insecure (kulala) passes an option to curl"},

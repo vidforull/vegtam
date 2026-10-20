@@ -55,11 +55,12 @@ type Header struct {
 	Value string
 }
 
-// Directive is an "# @assert", "# @capture", "# @tag", "# @no-log" or
-// time limit comment, kept as written for the stages that act on it.
+// Directive is an "# @assert", "# @capture", "# @tag", "# @no-log",
+// "# @no-cookie-jar" or time limit comment, kept as written for the stages
+// that act on it.
 type Directive struct {
-	Kind  string // "assert", "capture", "tag", NoLog, Timeout, ConnectionTimeout or MaxTime
-	Value string // "" for NoLog
+	Kind  string // "assert", "capture", "tag", NoLog, NoCookieJar, Timeout, ConnectionTimeout or MaxTime
+	Value string // "" for NoLog and NoCookieJar
 	Line  int
 }
 
@@ -77,6 +78,17 @@ const NoLog = "no-log"
 // NoLog reports whether r has an "# @no-log" directive.
 func (r *Request) NoLog() bool {
 	return slices.ContainsFunc(r.Directives, func(d Directive) bool { return d.Kind == NoLog })
+}
+
+// NoCookieJar is the kind of the "# @no-cookie-jar" directive, which
+// JetBrains, REST Client, httpyac and kulala know too: the cookie jar of
+// the run is neither read nor written for the request. JetBrains only
+// does not write it.
+const NoCookieJar = "no-cookie-jar"
+
+// NoCookieJar reports whether r has an "# @no-cookie-jar" directive.
+func (r *Request) NoCookieJar() bool {
+	return slices.ContainsFunc(r.Directives, func(d Directive) bool { return d.Kind == NoCookieJar })
 }
 
 // Source locates a line in a .http file.

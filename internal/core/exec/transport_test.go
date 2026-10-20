@@ -167,7 +167,7 @@ func TestNoReuseAcrossIdentities(t *testing.T) {
 	}})
 	send := func(c *Client, u string) {
 		t.Helper()
-		if _, err := c.Do(ctx, prepared(http.MethodGet, lit(u), nil), testSecrets); err != nil {
+		if _, _, err := c.Do(ctx, prepared(http.MethodGet, lit(u), nil), testSecrets); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -386,7 +386,7 @@ func TestTLSErrorsHideSecrets(t *testing.T) {
 		{"another host", "localhost", TLS{Roots: roots}, "x509: certificate is valid for example.com, *.example.com, not ***"},
 	} {
 		s := secrets{"base": "https://" + tt.host + ":" + port, "token": "t0ken"}
-		_, err := New(Options{MaxBody: 1, Transport: Transport{TLS: tt.tls}}).Do(t.Context(), prepared(http.MethodGet, u, nil), s)
+		_, _, err := New(Options{MaxBody: 1, Transport: Transport{TLS: tt.tls}}).Do(t.Context(), prepared(http.MethodGet, u, nil), s)
 		if err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Errorf("%s: %v, want %q", tt.name, err, tt.want)
 			continue

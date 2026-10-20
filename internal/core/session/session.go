@@ -49,7 +49,25 @@ type Session struct {
 	declared   []string        // the variables @capture directives take, in order
 	historyErr error           // why the entry of the latest run was not kept
 	warned     map[string]bool // the warnings of environment files a job has had
+	// Secret values that no file holds: the latest values of cookies that
+	// responses set, and the credentials of Basic written as user and
+	// password.
+	cookies, credentials []string
 }
+
+// The values of cookies that the masker hides wherever they are: from
+// minCookieSecret bytes to maxCookieSecret, the most a cookie may be. A
+// shorter one, such as lang=en or seen=1, is no credential, and hiding it
+// would hide every "en" and "1"; a longer one is refused; either is still
+// hidden where it shows as a cookie's (see output.Cookies). Those of the
+// jar are hidden as long as it keeps them, and of the others the latest
+// maxCookieSecrets: a server that set more would make the masker, which
+// is made anew for each request, as large and slow as it liked.
+const (
+	minCookieSecret  = 8
+	maxCookieSecret  = 4096
+	maxCookieSecrets = 256
+)
 
 // New returns a Session.
 func New(opts Options) *Session {
@@ -62,8 +80,17 @@ func New(opts Options) *Session {
 }
 
 // Masker returns a Masker for every secret the session has read or
-// captured so far.
-func (s *Session) Masker() *core.Masker { return s.loader.Masker() }
+// captured so far, for the values of the cookies responses have set, and
+// for the credentials of Basic, which go in base64.
+func (s *Session) Masker() *core.Masker {
+	values := slices.Concat(s.cookies, s.credentials)
+	for _, v := range s.client.CookieValues() {
+		if len(v) >= minCookieSecret {
+			values = append(values, v)
+		}
+	}
+	return s.loader.Masker().Join(core.NewMasker(values))
+}
 
 // Declared returns the variables that the @capture directives of the
 // requests prepared so far take.
@@ -266,6 +293,38 @@ func (s *Session) Curl(ctx context.Context, j *Job, m *core.Masker) (string, err
 	return curl.Command(p, m)
 }
 
+// basic makes the masker hide the credentials of an Authorization header
+// of p written as Basic, user and password, which go in base64, if they
+// hold a secret that vars reveal.
+func (s *Session) basic(p *core.Prepared, vars core.Secrets) {
+	for _, h := range p.Headers {
+		user, password, ok := core.BasicAuth(h)
+		if !ok || !user.HasSecret() && !password.HasSecret() {
+			continue
+		}
+		u, uerr := user.Reveal(vars)
+		pw, perr := password.Reveal(vars)
+		if uerr == nil && perr == nil {
+			if !slices.Contains(s.credentials, u+":"+pw) {
+				s.credentials = append(s.credentials, u+":"+pw)
+			}
+		}
+	}
+}
+
+// cookie makes the masker hide v, the value of a cookie a response set,
+// if it is a secret: see maxCookieSecrets. Each response sets its cookies
+// again: a value is kept once, however often it comes.
+func (s *Session) cookie(v string) {
+	switch {
+	case len(v) < minCookieSecret, len(v) > maxCookieSecret, slices.Contains(s.cookies, v):
+		return
+	case len(s.cookies) == maxCookieSecrets:
+		s.cookies = slices.Delete(s.cookies, 0, 1)
+	}
+	s.cookies = append(s.cookies, v)
+}
+
 // send sends the request of j, evaluates its directives, and sets the
 // request, the response, the outcomes and the captures of res. The error
 // is for a status of 400 or above with Fail, or else for failed captures
@@ -275,9 +334,18 @@ func (s *Session) send(ctx context.Context, j *Job, res *output.Result) error {
 	if err != nil {
 		return err
 	}
+	s.basic(p, j.vars)
 	res.Request = output.Sent(p, s.Masker())
-	resp, err := s.client.Do(ctx, p, j.vars)
+	resp, trace, err := s.client.Do(ctx, p, j.vars)
+	if trace != nil {
+		for _, h := range trace.Hops {
+			for _, c := range h.Set {
+				s.cookie(c.Value)
+			}
+		}
+	}
 	if err != nil {
+		output.Diagnose(res, trace, s.Masker())
 		return err
 	}
 	ev := assert.Evaluate(ctx, j.Request, resp)
@@ -286,7 +354,8 @@ func (s *Session) send(ctx context.Context, j *Job, res *output.Result) error {
 	}
 	// A secret is masked in the very response it was captured from.
 	m := s.Masker()
-	res.Response, res.Timing = output.NewResponse(resp, m)
+	res.Response = output.NewResponse(resp, m)
+	output.Diagnose(res, trace, m)
 	res.Asserts = output.Checked(ev.Outcomes, m)
 	res.Captures = output.Captures(ev.Captured)
 	if s.opts.Fail && resp.Status >= 400 {

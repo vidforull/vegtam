@@ -48,17 +48,27 @@ type Document struct {
 	Trust         []*Trusted `json:"trust,omitzero"`
 }
 
-// Result is the outcome of one request.
+// Result is the outcome of one request. Timing and the fields after it,
+// up to Asserts, are what the request went through, as far as it went:
+// they come with an error too, and none of them for a dry run.
 type Result struct {
-	Ref       string     `json:"ref,omitempty"`       // file#name or file#N; the file alone if it does not parse
-	Request   *Request   `json:"request,omitempty"`   // nil if the request could not be resolved
-	Transport *Transport `json:"transport,omitempty"` // nil if the file does not parse
-	Response  *Response  `json:"response,omitempty"`  // nil on an error and for a dry run
-	Timing    *Timing    `json:"timing,omitempty"`
-	Asserts   []Assert   `json:"asserts,omitempty"`  // nil without a response
-	Captures  []Capture  `json:"captures,omitempty"` // the values taken; nil without a response
-	Warnings  []Warning  `json:"warnings,omitempty"`
-	Error     *Error     `json:"error,omitempty"`
+	Ref        string     `json:"ref,omitempty"`       // file#name or file#N; the file alone if it does not parse
+	Request    *Request   `json:"request,omitempty"`   // nil if the request could not be resolved
+	Transport  *Transport `json:"transport,omitempty"` // nil if the file does not parse
+	Response   *Response  `json:"response,omitempty"`  // nil on an error and for a dry run
+	Timing     *Timing    `json:"timing,omitempty"`
+	RemoteAddr string     `json:"remote_addr,omitempty"` // of the last hop; *** if its host holds a secret
+	Proxy      string     `json:"proxy,omitempty"`       // of the last hop, its user and password shown as ***
+	TLS        *TLS       `json:"tls,omitempty"`         // of the last hop
+	Redirects  []Redirect `json:"redirects,omitempty"`
+	Cookies    *Cookies   `json:"cookies,omitempty"`
+	Asserts    []Assert   `json:"asserts,omitempty"`  // nil without a response
+	Captures   []Capture  `json:"captures,omitempty"` // the values taken; nil without a response
+	Warnings   []Warning  `json:"warnings,omitempty"`
+	Error      *Error     `json:"error,omitempty"`
+
+	last *Timing // of the last hop alone, for the text form
+	hops int     // how many there were, for the text form
 }
 
 // Transport is what a request is sent with: its HTTP version, and its
@@ -141,11 +151,6 @@ type Response struct {
 	// with the server's certificate checked: false if one came over http,
 	// and with --insecure.
 	TLSVerified bool `json:"tls_verified"`
-}
-
-// Timing is how long a request took.
-type Timing struct {
-	TotalMS float64 `json:"total_ms"` // from sending to the end of the body
 }
 
 // Error is an error that ended a request or a command.
@@ -244,18 +249,36 @@ func Written(r *core.Request) *Request {
 }
 
 // NewResponse returns r with every secret value in it hidden by m.
-func NewResponse(r *exec.Response, m *core.Masker) (*Response, *Timing) {
+func NewResponse(r *exec.Response, m *core.Masker) *Response {
 	resp := &Response{
 		Proto: r.Proto, Status: r.Status, Reason: m.Mask(r.Reason), Headers: []Header{},
 		Truncated: r.Truncated, Untrusted: true, TLSVerified: r.TLSVerified,
 	}
 	for _, name := range slices.Sorted(maps.Keys(r.Header)) {
 		for _, v := range r.Header[name] {
+			if name == "Set-Cookie" {
+				v = maskCookie(v)
+			}
 			resp.Headers = append(resp.Headers, Header{m.Mask(name), m.Mask(v)})
 		}
 	}
 	resp.Body, resp.Encoding = body(maskBody(r.Body, r.Truncated, m))
-	return resp, &Timing{TotalMS: float64(r.Duration.Microseconds()) / 1000}
+	return resp
+}
+
+// maskCookie returns the value of a Set-Cookie header with the value of
+// the cookie shown as ***, whatever it is: a cookie's value is a secret,
+// short ones too, which the masker does not hide everywhere (see
+// session.Masker).
+func maskCookie(v string) string {
+	pair, attrs, _ := strings.Cut(v, ";")
+	if name, value, ok := strings.Cut(pair, "="); ok && strings.TrimSpace(value) != "" {
+		pair = name + "=***"
+	}
+	if attrs != "" {
+		return pair + ";" + attrs
+	}
+	return pair
 }
 
 // maskBody returns a response body with every secret value hidden by m;

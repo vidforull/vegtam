@@ -326,6 +326,8 @@ func (m *Model) responseText() string {
 			}
 			res.Response = &resp
 			output.WriteResponse(&b, &res, true, m.fold)
+		} else {
+			output.WriteTrace(&b, m.result)
 		}
 		writeWarnings(&b, m.result.Warnings)
 		writeError(&b, m.result.Error)
