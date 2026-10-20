@@ -1,0 +1,98 @@
+# The gate, make check, on each pull request and each push to main. It
+# mirrors the gate and does not replace it: docs/CI.md says what the
+# workflow adds to it, and how to update the versions pinned here.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Every go command runs the Go that setup-go installs, and none
+  # fetches another.
+  GOTOOLCHAIN: local
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          # setup-go reads the toolchain line of go.mod only when
+          # GOTOOLCHAIN is not local; with local it would take the go
+          # line, 1.27, and any 1.27.x would do, the runner's own first.
+          # It sets GOTOOLCHAIN=local itself before it runs a go command.
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check the Go version
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' go.mod)
+          got=$(go env GOVERSION)
+          if [ -z "$want" ]; then
+            echo "::error::go.mod has no toolchain line: the gate runs with one version of Go, which that line names"
+            exit 1
+          fi
+          if [ "$got" != "$want" ]; then
+            echo "::error::Go is $got, and the toolchain line of go.mod says $want: setup-go installed another version"
+            exit 1
+          fi
+          echo "Go is $got, as the toolchain line of go.mod says"
+
+      - name: Install golangci-lint
+        env:
+          VERSION: 2.15.0
+          # The sum of golangci-lint-2.15.0-linux-amd64.tar.gz in the
+          # release's golangci-lint-2.15.0-checksums.txt.
+          SHA256: 9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea
+        run: |
+          name="golangci-lint-$VERSION-linux-amd64"
+          cd "$RUNNER_TEMP"
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$name.tar.gz" \
+            "https://github.com/golangci/golangci-lint/releases/download/v$VERSION/$name.tar.gz"
+          echo "$SHA256  $name.tar.gz" | sha256sum -c -
+          tar -xzf "$name.tar.gz" "$name/golangci-lint"
+          "$RUNNER_TEMP/$name/golangci-lint" version
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+
+      - name: Install govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          # setup-go has put $(go env GOPATH)/bin on the PATH. Without
+          # govulncheck there, make check would skip it, and pass.
+          command -v govulncheck
+          govulncheck -version
+
+      # The gate takes the suppression baseline from origin/main, and
+      # names the gate's files that differ from it. checkout makes
+      # origin/main on a push to main, not for a pull request.
+      - name: Fetch main
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
+      - name: make check
+        run: |
+          if ! git cat-file -e origin/main:.gate/suppressions.baseline 2>/dev/null; then
+            echo "::error::origin/main has no .gate/suppressions.baseline: make check would take the baseline from this change itself"
+            exit 1
+          fi
+          make check

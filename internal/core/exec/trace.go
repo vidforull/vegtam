@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
@@ -80,6 +81,11 @@ type hopTrace struct {
 	// handshake with an https proxy is over.
 	conn, proxyTLS bool
 	hop            Hop
+	// preface is the connection of the hop, once it has it, if it speaks
+	// HTTP/2 with prior knowledge over http. One that fails before then,
+	// as when the server resets it before the client's preface is out,
+	// fails with an error of the network's: the server saw no HTTP/2.
+	preface *preface
 }
 
 // hopKey is the context key of the hopTrace of a request.
@@ -127,6 +133,32 @@ func (t *tracer) finish(start time.Time) *Trace {
 		tr.Hops = append(tr.Hops, hop)
 	}
 	return tr
+}
+
+// refusedPriorKnowledge reports whether the server of the latest hop
+// showed that it does not speak HTTP/2 with prior knowledge (see
+// preface).
+func (t *tracer) refusedPriorKnowledge() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := len(t.hops)
+	return n > 0 && t.hops[n-1].preface != nil && t.hops[n-1].preface.refused()
+}
+
+// dialed returns conn, a connection made for the hop on a transport that
+// speaks HTTP/2 with prior knowledge, to its proxy with proxy: watched
+// for what the server sends first, if the hop goes over http, and
+// straight to the server or through a SOCKS proxy, which carries the
+// hop's own bytes once its handshake is done. Over https, the handshake
+// says what the server speaks; an http proxy is spoken to itself.
+func (h *hopTrace) dialed(conn net.Conn, proxy bool) net.Conn {
+	h.t.mu.Lock()
+	defer h.t.mu.Unlock()
+	socks := h.hop.Proxy != nil && (h.hop.Proxy.Scheme == "socks5" || h.hop.Proxy.Scheme == "socks5h")
+	if h.hop.URL.Scheme != "http" || proxy && !socks {
+		return conn
+	}
+	return &preface{Conn: conn}
 }
 
 // end sets the Total of h, if not yet. The tracer's lock is held.
@@ -248,6 +280,7 @@ func (w *watch) trace(h *hopTrace) *httptrace.ClientTrace {
 			w.setConnecting(false)
 			h.record(func(hop *Hop, _ time.Duration) {
 				h.conn, hop.Reused = true, i.Reused
+				h.preface, _ = i.Conn.(*preface)
 				if i.Reused {
 					hop.DNS, hop.Connect, hop.TLSDone, hop.TLS = 0, 0, 0, nil
 				}

@@ -2,9 +2,11 @@
 
 ## The gate
 
-A change is ready when `make check` passes. There is no CI yet: run it
-before you open a pull request, and paste its output there. While you
-work, `make check-fast` is quicker.
+A change is ready when `make check` passes. Run it before you open a
+pull request, and paste its output there. While you work,
+`make check-fast` is quicker. On GitHub a workflow runs `make check` on
+each pull request too, on a clean machine; it mirrors the gate and does
+not replace it ([docs/CI.md](docs/CI.md)).
 
 | Target | What it runs |
 |---|---|

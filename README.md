@@ -1,436 +1,248 @@
 # vegtam
 
-vegtam is a local-first CLI/TUI API client that runs requests from plain
-`.http` files: no accounts, no cloud, no telemetry.
+[![check](https://github.com/vidforull/vegtam/actions/workflows/check.yml/badge.svg)](https://github.com/vidforull/vegtam/actions/workflows/check.yml)
 
-**Status:** early development. The JSON output and the exit codes are
-kept stable (see [docs/AUTOMATION.md](docs/AUTOMATION.md)); everything else
-may still change.
+Run `.http` files from a terminal, a CI job, or an AI agent — without leaking secrets.
 
-## Usage
+- Plain `.http` files, as JetBrains' HTTP Client and VS Code REST Client write them (a subset). No account, no cloud, no telemetry.
+- Secrets are masked everywhere: output, errors, JSON, history.
+- Agents get a contract: one JSON document per command, exit codes, `--confirm` before anything that changes state, and a network policy you control.
 
-Requests live in `.http` files, such as `api.http`:
+## Quick start
 
-```http
-### List users
-# @name list
-GET {{host}}/users?limit=2
-Accept: application/json
-Authorization: Bearer {{token}}
-```
-
-Variables come from `http-client.env.json`:
-
-```json
-{
-  "dev": {"host": "https://api.example.test"}
-}
-```
-
-and secrets from `http-client.private.env.json`, which stays out of
-version control:
-
-```json
-{
-  "dev": {"token": "dev-token-123"}
-}
-```
-
-Send the request with the `dev` environment:
-
-```console
-$ vegtam run api.http#list -e dev
-HTTP/1.1 200 OK (84ms)
-
-[
-  {
-    "id": 1,
-    "name": "Ada"
-  },
-  {
-    "id": 2,
-    "name": "Grace"
-  }
-]
-```
-
-`--verbose` adds the request and the response headers. When the output is
-not a terminal, or with `--json`, vegtam prints JSON instead:
-
-```console
-$ vegtam run api.http#list -e dev --json
-{
-  "schema_version": 1,
-  "ref": "api.http#list",
-  "request": {
-    "method": "GET",
-    "url": "https://api.example.test/users?limit=2",
-    "headers": [
-      {
-        "name": "Accept",
-        "value": "application/json"
-      },
-      {
-        "name": "Authorization",
-        "value": "Bearer {{token}}"
-      }
-    ]
-  },
-  "transport": {
-    "connect_timeout_ms": 10000,
-    "read_timeout_ms": 30000,
-    "max_time_ms": 120000
-  },
-  "response": {
-    "proto": "HTTP/1.1",
-    "status": 200,
-    "reason": "OK",
-    "headers": [
-      {
-        "name": "Content-Length",
-        "value": "47"
-      },
-      {
-        "name": "Content-Type",
-        "value": "application/json"
-      },
-      {
-        "name": "Date",
-        "value": "Mon, 19 Oct 2026 06:59:47 GMT"
-      }
-    ],
-    "body": "[{\"id\":1,\"name\":\"Ada\"},{\"id\":2,\"name\":\"Grace\"}]",
-    "truncated": false,
-    "untrusted": true,
-    "tls_verified": true
-  },
-  "timing": {
-    "total_ms": 84.215
-  }
-}
-```
-
-The token never appears in the output: requests show it as `{{token}}`,
-and anywhere else, such as in a response that echoes it, it is replaced
-with `***`.
-
-More commands:
+With Go 1.27 or newer:
 
 ```sh
-vegtam run api.http -e dev            # every request in the file
-vegtam run api/ -e dev --fail         # every .http file below api/; exit 4 on HTTP errors
-vegtam run api/ -e dev --dry-run      # resolve and check everything, send nothing
-vegtam show api.http#list -e dev      # the request as it would be sent
-vegtam list api/                      # the requests and how to refer to them
-vegtam trust api/                     # let {{$cmd NAME}} run the commands of api/http-client.cmd.json
-vegtam schema                         # the JSON Schema of the JSON output
+go install github.com/vidforull/vegtam/cmd/vegtam@latest
+printf 'GET https://httpbin.org/get\n' > api.http
+vegtam run api.http
 ```
 
-Secrets can also come from a command, such as a password manager's CLI:
-`{{$cmd TOKEN}}` runs the command `TOKEN` of `http-client.cmd.json`, but
-only once you have read the file and trusted it with `vegtam trust`. The
-command gets no input and, on Unix, no terminal, so it must not ask for
-a password there: unlock the manager's agent first, or let it ask in a
-window of its own.
+vegtam prints the status, the time and the body, with JSON indented.
+Piped or with `--json`, it prints JSON for a program instead, and
+reaches localhost and private networks only as
+[the policy](#scripts-and-agents) allows. On a terminal, `vegtam` alone
+opens the terminal interface on the `.http` files below the current
+directory.
 
-`vegtam --help` lists the exit codes.
+`go install` puts `vegtam` in `$(go env GOPATH)/bin`. In a clone,
+`make build` builds `./vegtam`. Releases are `tar.gz` archives for
+macOS and Linux (amd64, arm64) with `checksums.txt`, unsigned;
+[docs/RELEASE.md](docs/RELEASE.md#verifying-a-download) says how to
+verify one.
 
-Each request sent goes into a history of runs,
-`~/.local/share/vegtam/history.jsonl` (or under `$XDG_DATA_HOME`): when,
-which request, the environment, the method and URL as written, the
-status, the time and the outcome. It holds no secret: no headers, bodies
-or values, and no URL with its placeholders resolved. `--no-history`
-keeps a run out of it, `VEGTAM_NO_HISTORY=1` every run, and
-`# @no-log` one request.
+## What it does
 
-## Transport
+### Requests, environments, checks
 
-What a request is sent with comes from three places, in this order:
-what vegtam does on its own, the operator's policy file, and the flags
-of `run` and `tui`. A `.http` or environment file may then only make a
-request stricter. What weakens a check or belongs to the machine never
-comes from a file, and when no person is at a terminal (stdin or stdout
-is not one, or `--json` is given, as for a script or an agent) it comes
-from the policy alone:
-
-| What | `.http` file | Flag, a person at a terminal | Flag, no person | Policy |
-|---|---|---|---|---|
-| time limits | lower only: `@connection-timeout`, `@timeout`, `@max-time` | `--connect-timeout`, `--read-timeout`, `--max-time` | the same | `limits`: ceilings on flags and directives |
-| HTTP version | the request line | `--http1.1`, `--http2`, `--http2-prior-knowledge` | the same | |
-| CAs | no | `--cacert` | the same | `hosts`: for one origin |
-| client certificate | no | `--cert`, `--key` | the same | `hosts`: for one origin |
-| unchecked certificates | no: an error | `--insecure`, every host | `--insecure`, only the hosts of `network.insecure_hosts` | `network.insecure_hosts` |
-| proxy | no: an error | `--proxy`, or the policy's, or the environment's | the policy's only; `--proxy` is an error | `network.proxy`, `network.no_proxy` |
-| hosts that go direct | no | `--noproxy` | the same | `network.no_proxy` |
-| the proxy's user and password | no | `--proxy-auth '$env NAME'` | the policy's only; `--proxy-auth` is an error | `network.proxy_auth: "$env NAME"`, for `network.proxy` alone |
-| another address for a host | no: an error | `--resolve`, `--connect-to` | only those that the policy lists | `network.resolve`, `network.connect_to` |
-| a unix socket | no: an error | `--unix-socket`, `--abstract-unix-socket` | only those that the policy lists | `network.unix_sockets` |
-| loopback and private addresses | no | connected to | only those of `network.allow` | `network.allow` |
-| cloud metadata, link-local, multicast, unspecified addresses | no | never | never | never |
-| cookie jar | `@no-cookie-jar` | `--no-cookies` | the same | |
-
-The policy is `$XDG_CONFIG_HOME/vegtam/policy.json`
-(`~/.config/vegtam/policy.json` without `XDG_CONFIG_HOME`), and nothing
-else: never a file of a repository, nor of the current directory.
-Others must not be able to write it or its directory. Every field may
-be left out:
-
-```json
-{
-  "limits":  {"max_time_ceiling": "5m", "read_timeout_ceiling": "2m", "connect_timeout_ceiling": "30s"},
-  "network": {"allow": ["127.0.0.1:8080", "localhost:3000", "10.0.0.0/8"],
-              "proxy": "http://proxy.example:3128", "proxy_auth": "$env PROXY_AUTH", "no_proxy": ["localhost"],
-              "insecure_hosts": ["dev.example:8443"], "resolve": ["api.example:443:127.0.0.1"],
-              "connect_to": ["api.example:443:staging.example:8443"], "unix_sockets": ["/var/run/docker.sock"]},
-  "hosts":   {"api.internal.example:443": {"cacert": "~/certs/corp.pem", "cert": "~/certs/me.pem", "key": "~/certs/me.key"}}
-}
-```
-
-`vegtam policy` prints it and what applies to a run; `vegtam policy
---help` describes every field. A connection the policy does not allow
-fails before anything is sent, with exit code 6 and a message that
-names the entry to write: `address 127.0.0.1:8080 is private (loopback),
-and no person is at a terminal; allow it in policy: network.allow`. The
-address checked is the one each connection is made to, after the name
-is looked up; through a proxy, which connects out of sight, the target
-is looked up here and checked before the proxy gets the request, which
-tells the local resolver the name, with `socks5h` too. The proxy looks
-it up again, and may get another answer: its own rules are the last
-word there.
-
-The flags:
-
-| Flag | Default | Unlike curl |
-|---|---|---|
-| `--cacert <pem>` | the system's roots | adds to the system's roots; curl's replaces them |
-| `--cert <pem>`, `--key <pem>` | none | offered to the origin of each request as written, never after a redirect elsewhere; PEM only, the key unencrypted (`--key <(openssl pkey -in key.pem)`) |
-| `--insecure` | off | for a person at a terminal; without one, only for the hosts that the policy names in `network.insecure_hosts`; a warning on every run |
-| `--connect-timeout <time>` | 10s | the whole of getting a connection: DNS, TCP, a proxy's CONNECT, the TLS handshake |
-| `--read-timeout <time>` | 30s | no counterpart: how long the server may send nothing, once the request is sent |
-| `--max-time <time>` | 2m | curl has no limit by default; `--timeout` is the old name |
-| `--http1.1`, `--http2`, `--http2-prior-knowledge` | as negotiated | `--http2` is HTTP/2 over TLS or an error: no fallback, no upgrade of `http` |
-| `--no-cookies` | a jar for the run | curl keeps no cookies unless asked; vegtam keeps them in memory, never on disk |
-| `--proxy <url>` | the policy's, or the environment's | for a person at a terminal; http, https, socks5 or socks5h; no user or password in it |
-| `--proxy-auth '$env NAME'` | none | for a person at a terminal: the proxy's user and password from a variable that holds `user:password`, never in the arguments; no request may read the variable |
-| `--noproxy <hosts>` | `NO_PROXY` | in its place, and the policy's; `*` for all |
-| `--resolve host:port:addr[,addr]` | none | as curl's; Host and TLS keep the name, the guard checks the address; not through a proxy |
-| `--connect-to host:port:to_host:to_port` | none | as curl's; an empty part is any, or the one asked for |
-| `--unix-socket <path>`, `--abstract-unix-socket <name>` | none | every request to the socket, the host of the URL in `Host`; no proxy |
-
-A time is in seconds (`5`, `0.5`) or has a unit (`500ms`, `2m`, `1m30s`);
-`0` or `none` is no limit. Directives may lower the limits of a request, and the
-request line may ask for a version (see [docs/FORMAT.md](docs/FORMAT.md)).
-More differences: the proxy is the policy's, or for a person at a
-terminal that of `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`, and one
-without a port uses that of its scheme (80, 443, 1080 for SOCKS), where
-curl uses 1080 for all; `socks5` is `socks5h`, the proxy looks up the
-name, as in Go; `--verbose` masks secrets, where curl's `-v`
-prints `Authorization` and `Cookie` as they are; `SSLKEYLOGFILE` is not
-read; HTTP/3 is not supported.
-
-`--verbose` also says what each request went through, after the
-response headers, with every secret masked: each redirect and the
-headers it dropped, the address connected to, the TLS version and
-protocol agreed on, the server's certificate, when each phase ended, as
-curl's `-w` names them, and the cookies sent and set:
-
-```
-* 302 → /home · connected to 192.0.2.10:443 · dns 2ms connect 10ms tls 21ms ttfb 80ms total 81ms
-* cookies: set session
-* connected to 192.0.2.10:443 (reused) · TLS 1.3 · h2 · ttfb 35ms total 36ms
-* certificate CN=api.example.test, issuer CN=Example CA, expires 2027-01-31T23:59:59Z
-* cookies: sent session
-```
-
-With `--json` the same is in `timing`, `remote_addr`, `resolved_by`,
-`tls`, `proxy`, `redirects` and `cookies`, and after an error too, as far
-as the request got. `resolved_by` names the flag that sent a connection
-elsewhere than its host: `* connected to 127.0.0.1:8443 · resolved by
---resolve`. There is no mode that prints the exchange unmasked.
-
-A run keeps the cookies that responses set for the requests after it,
-in memory: a request that signs in and one that uses the session work in
-one run, and the next run starts afresh. `# @no-cookie-jar` keeps one
-request away from them, `--no-cookies` a whole run.
-`Authorization: Basic {{user}} {{password}}` goes as Basic credentials,
-base64-encoded, as in JetBrains' client.
-
-## TUI
-
-```sh
-vegtam                       # on a terminal: the .http files below the current directory
-vegtam tui api/ -e dev       # a directory or a file, starting with the dev environment
-```
-
-The terminal interface has three panes: the `.http` files and their
-requests, the selected request, and the latest response. The request is
-shown as it would be sent, with secrets as their placeholders, or, if it
-cannot be resolved, as written, over what stops it. Its placeholders are
-coloured by what they stand for: a plain value, a secret, a value an
-`@capture` takes, or nothing. The response is shown as `run --verbose`
-prints it: status and time, headers, what the request went through, the
-body with JSON indented, and the outcome of each `@assert` and
-`@capture`. From 80 columns the list
-sits beside the other two panes, from 140 all three are side by side,
-and in a narrower terminal they stack.
-
-| Key | |
-|---|---|
-| `j`/`k`, `↓`/`↑` | move in the list; scroll the request or the response |
-| `Tab`, `Shift-Tab` | next, previous pane |
-| `/` | search the list by label, file name or URL; `Enter` keeps the search, `Esc` clears it |
-| `Enter` | send the selected request; for a method other than GET, HEAD or OPTIONS, after a second `Enter` (any other key leaves it unsent) |
-| `Esc` | cancel the request in flight; hide a copied command |
-| `y` | copy the selected request as a `curl` command |
-| `z` | fold the JSON body of the response from depth 1, then 2, then not at all |
-| `e` | choose the environment |
-| `h` | list the latest runs; `Enter` goes to the request of one, `/` searches them, `Esc` closes the list |
-| `Ctrl-L` | redraw the screen |
-| `?` | list the keys; on a small terminal, `j`/`k` and `f`/`b` scroll them |
-| `q`, `Ctrl-C` | quit |
-
-In the request and response panes `f`/`b` scroll by a page and `d`/`u`
-by half of one. A value that an `@capture` takes is a variable for the
-requests sent after it, and a cookie a response sets goes with them,
-until another environment is chosen. Each send
-reads the environment files again and runs `{{$cmd NAME}}` again, so an
-edited file counts at once. Secrets are masked as in the CLI's output,
-and the interface writes no file but the history of runs.
-
-`y` puts the command on the clipboard through the terminal (OSC 52) and
-shows it in the response pane, for a terminal that does not pass OSC 52
-on. Secrets are not in it: each is a shell variable, such as `"$token"`
-for `{{token}}`, and Basic credentials are `-u 'user:'"$password"`; a
-comment above the command names the variables to set, and the command
-stops before curl runs if one is not set. The cookies of the session are
-not in it. A request
-whose text holds a secret value outside a placeholder is not copied.
-Text with control characters, such as a tab in a body, is quoted as
-`$'...'`, which bash and zsh read.
-
-## Checks and captures
-
-`# @assert` checks a response, and `# @capture` takes a value from it for
-the requests after it, such as a token from a sign-in:
+`api.http`, with vegtam's directives in comments that other clients skip:
 
 ```http
 ### Sign in
 # @name login
-# @assert status == 200
 # @capture token = $.token
 POST {{host}}/login
 Content-Type: application/json
 
 {"user": "ada", "password": "{{password}}"}
 
-### The signed-in user
+### Who am I
 # @name me
-# @assert status == 200
 # @assert jsonpath $.name == "Ada"
 GET {{host}}/me
 Authorization: Bearer {{token}}
 ```
 
+Beside it, `http-client.env.json` holds
+`{"dev": {"host": "http://127.0.0.1:8080"}}`. The private file,
+`http-client.private.env.json`, is kept out of version control and
+holds `{"dev": {"password": "correct-horse-battery-staple"}}`:
+
 ```console
-$ vegtam run session.http -e dev
-### session.http#login
-HTTP/1.1 200 OK (112ms)
+$ vegtam run api.http -e dev
+### api.http#login
+HTTP/1.1 200 OK (3ms)
 
 {
   "token": "***"
 }
 
-✓ status == 200
 captured: token
 
-### session.http#me
-HTTP/1.1 200 OK (35ms)
+### api.http#me
+HTTP/1.1 200 OK (614µs)
 
 {
   "id": 1,
   "name": "Ada"
 }
 
-✓ status == 200
 ✓ jsonpath $.name == "Ada"
 ```
 
-A captured value is a secret unless the directive says `plain`: it is
-masked from the response it came from onwards, and requests show it as
-`{{token}}`. A failed assertion makes the exit code 1, and JSON output
-has the outcome of each in `asserts`. [docs/FORMAT.md](docs/FORMAT.md#directives)
-lists the checks and the sources.
+`me` sends the token that `login` captured, and the output shows it as
+`***`. `vegtam list` lists the requests, and `vegtam show` prints one
+as it would be sent. `run --dry-run` resolves them without sending, and
+`run --fail` exits with 4 on a status of 400 or more.
+`vegtam import postman` turns a Postman export into `.http` files.
 
-## Import from Postman
+### Secrets
 
-`import postman` turns a Postman export, one collection or the directory
-of a data export with its environments, into `.http` files, one per
-folder, and environment files. Values that look like secrets go to the
-private environment file rather than to a `.http` file:
+Secrets are the values of `http-client.private.env.json`,
+`{{$env NAME}}` and `{{$cmd NAME}}`, and captures not marked `plain`.
+Wherever a request is shown, a secret is its placeholder, such as
+`{{password}}`. Everywhere else it is `***`, even URL-, JSON- or
+base64-encoded. Masking goes by value, so a secret that comes back
+hashed or in another letter case is not recognised
+([docs/AUTOMATION.md](docs/AUTOMATION.md#secrets)).
+
+`{{$cmd NAME}}` runs a command from `http-client.cmd.json`, such as
+`pass show dev/api-token`, once a person has read the file and run
+`vegtam trust`. A redirect to another origin drops every header that
+holds a secret.
+
+### Scripts and agents
+
+vegtam treats a run as a program's when stdin or stdout is not a
+terminal, or with `--json`. Each command then prints one JSON document,
+which `vegtam schema` describes, and exits with 0 to 6 or 130. A
+program's request with a method other than GET, HEAD or OPTIONS is sent
+only with `--confirm`, and so is any request with `# @note`. Only the
+operator's policy can let a program reach loopback and private
+addresses, or use `--insecure`, proxies, `--resolve`, `--connect-to`
+and unix sockets. `vegtam describe --json` tells a program all of this.
+
+The dev server above is on loopback, so the operator allows it in the
+policy. A dry run says what to ask a person about, and `--confirm`
+passes on the answer:
 
 ```console
-$ vegtam import postman postman-export -o api
-Imported 25 of 30 requests from 2 collections into api, with 2 environments: dev, prod-eu.
-
-request: 5 requests written commented out
-  api/shop-api/shop-api.http#properties: method PROPFIND is not supported
-  api/shop-api/shop-api.http#release-notes: a line of the body starts with ###, which would end the request
-  api/shop-api/shop-api.http#draft: the request has no URL
-...
-
-body: 3 bodies and form fields not imported
-  api/shop-api/zakazy.http#create-order: disabled form field coupon
-  api/shop-api/zakazy.http#upload-receipt: formdata body
-  api/shop-api/zakazy.http#search-orders-graphql: graphql body
-...
-
-Variables to check or set:
-  id (unset): it has no value; set it in api/shop-api/http-client.env.json
-  token (secret): check its value in api/shop-api/http-client.private.env.json
-...
-
-Keep the http-client.private.env.json files out of version control: they hold the secrets.
-
-Check the requests without sending them: vegtam run api --dry-run -e dev
+$ cat ~/.config/vegtam/policy.json
+{"network": {"allow": ["127.0.0.1:8080"]}}
+$ vegtam run api.http -e dev --dry-run | jq -c '.results[] | [.ref, .confirm.reason]'
+["api.http#login","method"]
+["api.http#me",null]
+$ vegtam run api.http -e dev --confirm=api.http#login | jq -c '.results[] | [.ref, .response.status]'
+["api.http#login",200]
+["api.http#me",200]
 ```
 
-Scripts are not imported; [docs/FORMAT.md](docs/FORMAT.md#importing-from-postman)
-lists what is and what is not.
+Without the policy, the run ends with exit code 6 before anything is
+sent. The program should then ask a person, not write the policy:
+
+```console
+$ vegtam run api.http#login -e dev --confirm=api.http#login > /dev/null; echo $?
+vegtam: api.http:4: Post "http://127.0.0.1:8080/login": address 127.0.0.1:8080 is private (loopback), and no person is at a terminal; allow it in policy: network.allow
+6
+```
+
+The policy binds an agent when you set its environment and give it no
+terminal. With a shell of its own, it can run vegtam as a person would
+([docs/AUTOMATION.md](docs/AUTOMATION.md#the-operators-policy)).
+[docs/AUTOMATION.md](docs/AUTOMATION.md) is the whole contract.
+
+### Terminal interface
+
+The terminal interface shows the requests, the selected one as it
+would be sent, and the latest response. Open it with `vegtam` on a
+terminal, or with `vegtam tui api.http -e dev`. Here is the test
+collection `testdata/tui` in a terminal of 100 columns and 28 rows,
+after `Enter` on `echo`:
+
+```
+╭──────────────────────────╮╭──────────────────────────────────────────────────────────────────────╮
+│Requests                  ││Request api.http#echo                                                 │
+│api.http                  ││# @assert status == 200                                               │
+│  GET echo                ││GET http://127.0.0.1:8081/echo?key={{token}}&env={{$env VEGTAM_TEST_KE│
+│  POST create             ││Y}}                                                                   │
+│  GET escapes             ││Authorization: Bearer {{token}}                                       │
+│  GET binary              ││                                                                      │
+│  GET big                 ││                                                                      │
+│  GET refused             ││                                                                      │
+│  GET slow                │╰──────────────────────────────────────────────────────────────────────╯
+│  POST login              │╭──────────────────────────────────────────────────────────────────────╮
+│  GET me                  ││Response api.http#echo                                                │
+│  PUT everywhere          ││HTTP/1.1 200 OK (407µs)                                               │
+│broken.http ✗             ││Content-Length: 239                                                   │
+│                          ││Content-Type: application/json                                        │
+│                          ││Date: Tue, 20 Oct 2026 19:12:18 GMT                                   │
+│                          ││X-Echo: key=***&env=***                                               │
+│                          ││* connected to 127.0.0.1:8081 · connect 185µs ttfb 389µs total 405µs  │
+│                          ││                                                                      │
+│                          ││{                                                                     │
+│                          ││  "echo": {                                                           │
+│                          ││    "authorization": "Bearer ***",                                    │
+│                          ││    "key": "***",                                                     │
+│                          ││    "query": "key=***\u0026env=***"                                   │
+│                          ││  },                                                                  │
+│                          ││  "php": {                                                            │
+╰──────────────────────────╯╰──────────────────────────────────────────────────────────────────────╯
+ env: test                                 enter send • / search • y curl • e env • ? help • q quit
+```
+
+`Enter` sends the selected request. A method other than GET, HEAD or
+OPTIONS, or a request with a note, needs a second `Enter`. `/`
+searches, `e` chooses the environment, and `h` lists the latest runs.
+`y` copies the request as a curl command, with secrets as shell
+variables. [docs/TUI.md](docs/TUI.md) has every key.
+
+## What's in 0.1
+
+- `.http` and environment files in JetBrains' format, a subset ([docs/FORMAT.md](docs/FORMAT.md)).
+- Checks and chains: `@assert`, `@capture`, and `@note` for a request that needs a second look.
+- Secrets from private files, environment variables and trusted commands, masked by value.
+- A terminal interface, a history of runs, and import from Postman.
+- Transport: CAs and PEM client certificates per host, HTTP/2, time limits, cookies, proxies, curl's `--resolve` and `--connect-to`, unix sockets, and `--verbose` ([docs/TRANSPORT.md](docs/TRANSPORT.md)).
+- For programs: JSON with a schema, exit codes, `describe`, `--confirm`, and the operator's policy.
+- Reproducible release builds: the same commit, Go and GoReleaser give the same bytes ([docs/RELEASE.md](docs/RELEASE.md)).
+
+**Platforms:** Linux tested; macOS builds,
+[checks pending](docs/RELEASE.md#versions); Windows builds from
+source, untested.
+
+The JSON output and the exit codes are kept stable
+([docs/AUTOMATION.md](docs/AUTOMATION.md#stability)), while flags and
+text output may still change.
+
+## Not yet
+
+Planned: retries, OAuth2, PKCS#12 client certificates, `br` and `zstd`
+compression, Digest authentication, and then GraphQL, gRPC and
+WebSocket. HTTP/3 is not supported.
+
+## How it compares
+
+Five tools close to vegtam, as their documentation stood in October
+2026. A blank cell was not checked.
+
+| | Requests | Secrets in the output | For programs | Interface |
+|---|---|---|---|---|
+| **vegtam** | `.http`, JetBrains' format (a subset), with its environment files | masked by value: bodies, headers, errors, `--verbose`, JSON; kept out of the history | one JSON document per command, with a schema; exit codes 0–6 and 130; `describe`; `--confirm` without a person | CLI, terminal interface |
+| [Hurl](https://github.com/Orange-OpenSource/hurl) 8.0.1, 2026-04-28 | `.hurl`, a format of its own | `--secret` values are redacted from logs and reports | `--json`; documented exit codes 0–4 | CLI |
+| [httpYac](https://github.com/AnWeber/httpyac) 6.16.7, 2025-03-30 | `.http` and `.rest`, compatible with JetBrains' client and REST Client | | `--json`, `--junit` | CLI, VS Code extension |
+| [Bruno](https://github.com/usebruno/bruno) 4.2.1, 2026-09-30 | `.bru` or YAML (OpenCollection) | | `bru run`: JSON, JUnit or HTML reports, written to a file; exit codes 0–9 and 255 | desktop app, CLI |
+| [Posting](https://github.com/darrenburns/posting) 2.11.2, 2026-10-05; 3.0 beta, 2026-10-15 | YAML, a file per request | | in the 3.0 beta, `posting run --json`, exit codes 0–2; `posting remote`, which lets an agent send through a window a person has open | terminal interface |
+| [resterm](https://github.com/unkn0wn-root/resterm) 1.16.0, 2026-10-18 | `.http` and `.rest`, with directives in comments | | `resterm run`: text, JSON or JUnit | terminal interface |
+
+Between them, the others have features that vegtam lacks yet, such as
+GraphQL, gRPC, WebSocket, scripts, OAuth2, retries and HTTP/3. vegtam
+is built for the run without a person. It has a network policy the
+operator sets, `--confirm` for a program's requests other than GET,
+HEAD or OPTIONS, and secrets masked by value.
 
 ## Documentation
 
-- [docs/FORMAT.md](docs/FORMAT.md): the supported `.http` subset,
-  assertions and captures, environment files, commands, secrets, and
-  importing from Postman.
-- [docs/AUTOMATION.md](docs/AUTOMATION.md): driving vegtam from scripts
-  and agents: the JSON output and its stability, exit codes, dry runs,
-  policy, limits and secret masking.
+- [docs/FORMAT.md](docs/FORMAT.md): the `.http` subset, directives, environments, secrets, Postman.
+- [docs/AUTOMATION.md](docs/AUTOMATION.md): the contract for scripts and agents.
+- [docs/TRANSPORT.md](docs/TRANSPORT.md): TLS, proxies, routes, time limits, the policy file, diagnostics.
+- [docs/TUI.md](docs/TUI.md): the terminal interface and its keys.
+- [docs/RELEASE.md](docs/RELEASE.md): how a release is built and checked.
 - [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and why.
-
-## Build
-
-Requires Go 1.27 or newer.
-
-```sh
-make build        # builds ./vegtam
-./vegtam version
-```
-
-## Test
-
-```sh
-make test
-```
-
-`make check` runs the whole gate: golangci-lint, the tests with the race
-detector, and the other checks a change must pass. It needs golangci-lint
-v2.15.0; [CONTRIBUTING.md](CONTRIBUTING.md) says how to install it.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md): the gate, the rules it cannot
-check, and how commits are written.
+- [CONTRIBUTING.md](CONTRIBUTING.md): the gate, `make check`, and commit messages.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+Developed by Vidforull.
+[github.com/vidforull](https://github.com/vidforull)
+
+MIT License: see [LICENSE](LICENSE).

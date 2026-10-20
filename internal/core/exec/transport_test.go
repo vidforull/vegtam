@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math/big"
@@ -414,6 +415,82 @@ func TestTLSErrorsHideSecrets(t *testing.T) {
 	}
 }
 
+// raw starts a TCP server that hands each connection to serve, which
+// closes it, and returns its URL.
+func raw(t *testing.T, serve func(*net.TCPConn) error) string {
+	t.Helper()
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		if err := ln.Close(); err != nil {
+			t.Error(err)
+		}
+		wg.Wait()
+	})
+	wg.Go(func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			wg.Go(func() {
+				tc, ok := c.(*net.TCPConn)
+				switch {
+				case !ok:
+					t.Errorf("a connection of %T", c)
+				default:
+					if err := tc.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+						t.Error(err)
+					}
+					if err := serve(tc); err != nil {
+						t.Error(err)
+					}
+				}
+			})
+		}
+	})
+	return "http://" + ln.Addr().String()
+}
+
+// viaSOCKS answers the handshake of a SOCKS5 client (RFC 1928), with no
+// authentication and an IPv4 target, without connecting anywhere, then
+// serves the connection with serve, as the target would.
+func viaSOCKS(serve func(*net.TCPConn) error) func(*net.TCPConn) error {
+	return func(c *net.TCPConn) error {
+		b := make([]byte, 256)
+		_, err := io.ReadFull(c, b[:2]) // the version and the number of methods
+		if err == nil {
+			_, err = io.ReadFull(c, b[:b[1]])
+		}
+		if err == nil {
+			_, err = c.Write([]byte{5, 0}) // no authentication
+		}
+		if err == nil {
+			_, err = io.ReadFull(c, b[:4]) // the version, CONNECT, 0 and the type of the address
+		}
+		if err == nil && b[3] != 1 {
+			err = fmt.Errorf("SOCKS: an address of type %d, want IPv4", b[3])
+		}
+		if err == nil {
+			_, err = io.ReadFull(c, b[:6]) // the address and the port
+		}
+		if err == nil {
+			_, err = c.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0})
+		}
+		if err != nil {
+			return errors.Join(err, c.Close())
+		}
+		return serve(c)
+	}
+}
+
+// noH2C is the hint for a server that does not speak HTTP/2 with prior
+// knowledge.
+const noH2C = "the server does not speak HTTP/2 with prior knowledge"
+
 // TestHTTPVersions checks what each version, from a flag or a request
 // line, speaks to servers of each kind, and what it refuses.
 func TestHTTPVersions(t *testing.T) {
@@ -457,6 +534,27 @@ func TestHTTPVersions(t *testing.T) {
 		wg.Wait()
 	})
 	bare := "https://" + ln.Addr().String()
+	// Servers that do not speak HTTP/2 with prior knowledge, besides
+	// plain: each shows it in its own way, and net/http says so in words
+	// that change with the timing.
+	closes := raw(t, func(c *net.TCPConn) error { return c.Close() })
+	// The other two read the client's preface first: a reset before it
+	// is out ends the dial, with an error that is the network's.
+	resets := raw(t, func(c *net.TCPConn) error {
+		_, err := io.ReadFull(c, make([]byte, len(clientPreface)))
+		if err == nil {
+			err = c.SetLinger(0)
+		}
+		return errors.Join(err, c.Close())
+	})
+	answer := func(c *net.TCPConn) error {
+		_, err := io.ReadFull(c, make([]byte, len(clientPreface)))
+		if err == nil {
+			_, err = io.WriteString(c, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+		}
+		return errors.Join(err, c.Close())
+	}
+	answers := raw(t, answer)
 	tests := []struct {
 		flag, line string // the versions of the flag and the request line
 		url        string
@@ -473,7 +571,10 @@ func TestHTTPVersions(t *testing.T) {
 		{core.HTTP2, "", plain.URL, "HTTP/2 over http needs HTTP/2 (Prior Knowledge)"},
 		{core.HTTP2PriorKnowledge, "", h2c.URL, "HTTP/2.0"},
 		{"", core.HTTP2PriorKnowledge, h2.URL, "HTTP/2.0"},
-		{core.HTTP2PriorKnowledge, "", plain.URL, "the server does not speak HTTP/2 with prior knowledge"},
+		{core.HTTP2PriorKnowledge, "", plain.URL, noH2C},
+		{core.HTTP2PriorKnowledge, "", closes, noH2C},
+		{core.HTTP2PriorKnowledge, "", resets, noH2C},
+		{"", core.HTTP2PriorKnowledge, answers, noH2C},
 		{core.HTTP2, "", bare, "the server agreed on no HTTP/2 over TLS (ALPN)"},
 		{"", core.HTTP2PriorKnowledge, bare, "the server agreed on no HTTP/2 over TLS (ALPN)"},
 		{"", "", bare, "HTTP/1.1"},
@@ -495,11 +596,77 @@ func TestHTTPVersions(t *testing.T) {
 	if n := sent.Load(); n != 1 {
 		t.Errorf("the server without ALPN got %d requests, want only the one that asked for no version", n)
 	}
+	// The hint is of what the server sent first, not of what net/http
+	// says: none for a server that speaks HTTP/2 before it closes the
+	// connection, nor without prior knowledge.
+	settle := func(c *net.TCPConn) error {
+		_, err := c.Write([]byte{0, 0, 0, 0x4, 0, 0, 0, 0, 0}) // an empty SETTINGS frame
+		if err == nil {
+			err = c.CloseWrite()
+		}
+		if err == nil { // until the client closes it: no reset to lose the frame
+			_, err = io.Copy(io.Discard, c)
+		}
+		return errors.Join(err, c.Close())
+	}
+	settles := raw(t, settle)
+	for _, tt := range []struct{ flag, url string }{{core.HTTP2PriorKnowledge, settles}, {"", closes}} {
+		_, err := do(t, Options{Transport: Transport{Version: tt.flag}}, prepared(http.MethodGet, lit(tt.url), nil))
+		if err == nil || strings.Contains(err.Error(), noH2C) {
+			t.Errorf("--http %q, %s: %v, want an error without the hint", tt.flag, tt.url, err)
+		}
+	}
+	// Through a SOCKS proxy, which carries the request's own bytes once
+	// its handshake is done: the hint is of what the server says, and
+	// what the proxy says first is not.
+	for _, tt := range []struct {
+		name  string
+		serve func(*net.TCPConn) error
+		hint  bool
+	}{{"HTTP/1.1 400", answer, true}, {"SETTINGS", settle, false}} {
+		proxy, err := url.Parse("socks5" + strings.TrimPrefix(raw(t, viaSOCKS(tt.serve)), "http"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		opts := Options{Transport: Transport{Version: core.HTTP2PriorKnowledge, Proxy: http.ProxyURL(proxy)}}
+		_, err = do(t, opts, prepared(http.MethodGet, lit("http://127.0.0.1:9/"), nil))
+		if err == nil || strings.Contains(err.Error(), noH2C) != tt.hint {
+			t.Errorf("through SOCKS, a server that sends %s: %v, want the hint %v", tt.name, err, tt.hint)
+		}
+	}
 	// Refused before sending, as a dry run finds it too.
 	p := prepared(http.MethodGet, lit(plain.URL), nil)
 	p.Request.Version = core.HTTP2
 	if err := New(Options{}).Check(t.Context(), p, testSecrets); err == nil || !strings.Contains(err.Error(), "needs HTTP/2 (Prior Knowledge)") {
 		t.Errorf("Check = %v", err)
+	}
+}
+
+// TestPreface checks what the first bytes from a server, and a failed
+// read or write, say about whether it speaks HTTP/2 with prior knowledge.
+func TestPreface(t *testing.T) {
+	settings := "\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+	for _, tt := range []struct {
+		name   string
+		first  string
+		broken bool
+		want   bool
+	}{
+		{"nothing yet", "", false, false},
+		{"closed or reset", "", true, true},
+		{"a status line", "HTTP/1.1 400 Bad Request\r\n", false, true},
+		{"part of a frame", settings[:4], false, false},
+		{"part of a frame, then closed", settings[:4], true, true},
+		{"SETTINGS", settings, false, false},
+		{"SETTINGS, then closed", settings, true, false},
+		{"SETTINGS on a stream", settings[:8] + "\x01", false, true},
+		{"another frame first", "\x00\x00\x00\x08\x00\x00\x00\x00\x00", false, true},
+	} {
+		p := &preface{broken: tt.broken}
+		p.got = copy(p.head[:], tt.first)
+		if got := p.refused(); got != tt.want {
+			t.Errorf("%s: refused = %v, want %v", tt.name, got, tt.want)
+		}
 	}
 }
 

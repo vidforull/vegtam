@@ -1132,3 +1132,44 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   no `schema_version`, and the JSON Schema does not describe it. The
   text stays one line, for a bug report, with the commit cut to the 12
   characters of Go's pseudo-versions; the JSON has all of it.
+
+## 2026-10-20: CI on GitHub
+
+- **A mirror of the gate.** A GitHub Actions workflow runs `make check`
+  on each pull request and each push to `main`; its own steps only set
+  up the tools and check their versions. `make check` before every merge
+  stays the gate; the workflow shows the same result on a clean machine,
+  for every pull request. docs/CI.md says what it adds.
+- **Pinned by commit and by sum.** The actions are named by the commit
+  of their latest release, golangci-lint by the SHA-256 of its archive,
+  written in the workflow, and Go by the `toolchain` line of `go.mod`,
+  which a step checks once setup-go is done: setup-go v7.0.0 ignores
+  that line under `GOTOOLCHAIN=local`, so its step alone runs with
+  `auto`. No token is kept, no secret used, and nothing is cached
+  between runs: a build cache from an earlier run is code that nothing
+  checks.
+- **The baseline from `main`.** checkout makes no `origin/main` for a
+  pull request, and without it the Makefile would take the suppression
+  baseline from the pull request. The workflow fetches `main` first,
+  and refuses to run the gate without the baseline there.
+
+## 2026-10-20: a hint from what the server sent
+
+- **The server's bytes, not Go's words.** With `HTTP/2 (Prior Knowledge)`
+  over http, a server that does not speak h2c answers the client's
+  preface with an HTTP/1.1 status line, or closes or resets the
+  connection. net/http reports that in words that change with the
+  timing: its reader can end the connection before the request is on
+  it, and the request then fails with `http2: client conn could not be
+  established` instead of the frame error. The hint matched the words of
+  the frame error and missed the others, which show up readily under
+  `GOMAXPROCS=1`. A connection that speaks HTTP/2 with
+  prior knowledge over http now keeps the first bytes the server sends.
+  An HTTP/2 server begins with a SETTINGS frame (RFC 9113, 3.4), so
+  anything else first, or a connection broken before a frame, gives the
+  hint, whatever the error says; a server that sent SETTINGS gets none.
+  The request must have had the connection: one that fails while it is
+  made, before the client's preface is out, is the network's error.
+  Through a SOCKS proxy, which carries the request's own bytes, what the
+  server sends counts from the client's preface, as the proxy answers
+  first; an http proxy is spoken to itself, and gets no hint.

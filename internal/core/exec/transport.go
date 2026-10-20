@@ -1,9 +1,11 @@
 package exec
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -132,7 +135,7 @@ func (c *Client) newTransport(k transportKey) *http.Transport {
 	}
 	t := base.Clone()
 	d := &net.Dialer{Timeout: k.connect, KeepAlive: 30 * time.Second, ControlContext: c.check}
-	t.DialContext, t.TLSHandshakeTimeout = c.dialer(d), k.connect
+	t.DialContext, t.TLSHandshakeTimeout = c.dialer(d, k.version == core.HTTP2PriorKnowledge), k.connect
 	// With HTTP/1 left out, HTTP/2 is all there is: ALPN offers only h2,
 	// and plain http is h2c.
 	var p http.Protocols
@@ -198,35 +201,106 @@ func (c *Client) newTransport(k transportKey) *http.Transport {
 // dialer returns the dial function of a transport, which makes its
 // connections with d, to where the routes send each, and says to the
 // guard what each is for: the name it is made to, and whether it is the
-// proxy of its hop.
-func (c *Client) dialer(d *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+// proxy of its hop. With priorKnowledge, the transport speaks HTTP/2 with
+// prior knowledge, and the hop watches what the server sends first on a
+// connection that carries its bytes (see hopTrace.dialed).
+func (c *Client) dialer(d *net.Dialer, priorKnowledge bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		if s := c.opts.Transport.Socket; s != "" {
-			return d.DialContext(ctx, "unix", s)
-		}
 		h, _ := ctx.Value(hopKey{}).(*hopTrace)
 		proxy := h != nil && h.proxyAddr() == addr
-		host, port, _ := net.SplitHostPort(addr)
-		to, addrs := host, []string{addr}
-		if !proxy { // the routes are for the hosts of requests, as curl's
-			to, addrs, _ = c.opts.Transport.Routes.Route(host, port)
+		conn, err := c.dial(ctx, d, network, addr, proxy)
+		if err != nil || !priorKnowledge || h == nil {
+			return conn, err
 		}
-		ctx = context.WithValue(ctx, dialKey{}, dialTo{host: to, proxy: proxy})
-		var first error
-		for _, a := range addrs {
-			conn, err := d.DialContext(ctx, network, a)
-			if err == nil {
-				return conn, nil
-			}
-			if first == nil {
-				first = err
-			}
-			if ctx.Err() != nil {
-				break
-			}
-		}
-		return nil, first
+		return h.dialed(conn, proxy), nil
 	}
+}
+
+// dial makes a connection with d to addr, the proxy's or else to where
+// the routes send it, or to the socket that every connection goes to.
+func (c *Client) dial(ctx context.Context, d *net.Dialer, network, addr string, proxy bool) (net.Conn, error) {
+	if s := c.opts.Transport.Socket; s != "" {
+		return d.DialContext(ctx, "unix", s)
+	}
+	host, port, _ := net.SplitHostPort(addr)
+	to, addrs := host, []string{addr}
+	if !proxy { // the routes are for the hosts of requests, as curl's
+		to, addrs, _ = c.opts.Transport.Routes.Route(host, port)
+	}
+	ctx = context.WithValue(ctx, dialKey{}, dialTo{host: to, proxy: proxy})
+	var first error
+	for _, a := range addrs {
+		conn, err := d.DialContext(ctx, network, a)
+		if err == nil {
+			return conn, nil
+		}
+		if first == nil {
+			first = err
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, first
+}
+
+// preface is a connection that speaks HTTP/2 with prior knowledge, or is
+// meant to. It keeps what the server sends first, which says whether the
+// server speaks it: an HTTP/2 server begins with a SETTINGS frame (RFC
+// 9113, 3.4), while one of HTTP/1.1 answers the client's preface with a
+// status line, or closes or resets the connection. net/http reports each
+// in words that change with the timing: its reader may end the connection
+// before the request is on it. What the server sends counts from the
+// client's preface: through a SOCKS proxy, the proxy answers first.
+type preface struct {
+	net.Conn
+
+	mu     sync.Mutex
+	head   [9]byte // the first bytes from the server, up to the header of a frame (RFC 9113, 4.1)
+	got    int     // how many of them came
+	broken bool    // a read or a write failed, and not because the connection was closed on this side
+}
+
+func (p *preface) Read(b []byte) (int, error) {
+	n, err := p.Conn.Read(b)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.got += copy(p.head[p.got:], b[:n])
+	p.fail(err)
+	return n, err
+}
+
+func (p *preface) Write(b []byte) (int, error) {
+	n, err := p.Conn.Write(b)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if bytes.HasPrefix(b, []byte(clientPreface)) {
+		p.got, p.broken = 0, false
+	}
+	p.fail(err)
+	return n, err
+}
+
+// clientPreface is what a client of HTTP/2 sends first (RFC 9113, 3.4).
+const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+// fail notes err, if any. The lock is held.
+func (p *preface) fail(err error) {
+	if err != nil && !errors.Is(err, net.ErrClosed) {
+		p.broken = true
+	}
+}
+
+// refused reports whether the server showed that it does not speak HTTP/2
+// with prior knowledge: it sent something other than a SETTINGS frame
+// first, which is of type 4 on stream 0, or the connection broke before
+// it sent a whole frame header.
+func (p *preface) refused() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h, full := p.head, p.got == len(p.head)
+	settings := full && h[3] == 0x4 && binary.BigEndian.Uint32(h[5:])&(1<<31-1) == 0
+	return !settings && (full || p.broken)
 }
 
 // checkProxy returns the proxy function of a transport, which takes the

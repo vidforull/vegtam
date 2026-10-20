@@ -111,7 +111,7 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 	resp, err := hc.Do(req)
 	w.idle() // the headers are in
 	if err != nil {
-		return nil, t.finish(start), c.netError(ctx, p, s, req.URL.String(), err, st, w)
+		return nil, t.finish(start), c.netError(ctx, p, s, req.URL.String(), err, st, w, t)
 	}
 	defer resp.Body.Close()
 	limit := c.opts.MaxBody
@@ -120,7 +120,7 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 	}
 	body, err := io.ReadAll(io.LimitReader(watched{resp.Body, w}, limit))
 	if err != nil {
-		return nil, t.finish(start), c.netError(ctx, p, s, req.URL.String(), err, st, w)
+		return nil, t.finish(start), c.netError(ctx, p, s, req.URL.String(), err, st, w, t)
 	}
 	r := &Response{
 		Proto:    resp.Proto,
@@ -338,10 +338,10 @@ func origin(u *url.URL) string {
 }
 
 // netError classifies err, an error from sending p, with settings st, to
-// the URL wire, in the context ctx that w watched. A timeout names its
-// phase: the context says if a limit of vegtam's ended the request, and w
-// if a connection was being made.
-func (c *Client) netError(ctx context.Context, p *core.Prepared, s core.Secrets, wire string, err error, st Settings, w *watch) error {
+// the URL wire, in the context ctx that w watched and t traced. A timeout
+// names its phase: the context says if a limit of vegtam's ended the
+// request, and w if a connection was being made.
+func (c *Client) netError(ctx context.Context, p *core.Prepared, s core.Secrets, wire string, err error, st Settings, w *watch, t *tracer) error {
 	msg := hide(p, s, wire, err.Error())
 	// What net/http says after the URL is that it canceled the request.
 	// An error that reading the body gives is the bare cause.
@@ -382,14 +382,16 @@ func (c *Client) netError(ctx context.Context, p *core.Prepared, s core.Secrets,
 		}
 		return core.Errorf(core.KindTimeout, p.Request.Source, "%s", msg)
 	}
-	if h := c.hint(err); h != "" {
+	if h := c.hint(err, t); h != "" {
 		msg += ": " + h
 	}
 	return core.Errorf(core.KindNetwork, p.Request.Source, "%s", msg)
 }
 
-// hint says what to do about err, a TLS error, if anything.
-func (c *Client) hint(err error) string {
+// hint says what to do about err, if anything: a TLS error, or one of a
+// server that the trace t shows does not speak HTTP/2 with prior
+// knowledge, whatever net/http says about it.
+func (c *Client) hint(err error, t *tracer) string {
 	msg := err.Error()
 	_, unknownCA := errors.AsType[x509.UnknownAuthorityError](err)
 	switch {
@@ -401,7 +403,7 @@ func (c *Client) hint(err error) string {
 		return "the server asks for a client certificate: pass --cert and --key"
 	case strings.Contains(msg, "tls: no application protocol"):
 		return "the server does not speak HTTP/2 over TLS"
-	case strings.Contains(msg, "looked like an HTTP/1.1 header"):
+	case t.refusedPriorKnowledge():
 		return "the server does not speak HTTP/2 with prior knowledge"
 	}
 	return ""
