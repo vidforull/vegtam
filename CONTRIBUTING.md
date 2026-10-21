@@ -20,7 +20,7 @@ order comes back with `go test -shuffle=<seed>`.
 
 ### Tools
 
-- **Go 1.27.** `go.mod` pins the toolchain (`toolchain go1.27.2`), so
+- **Go 1.27.** `go.mod` pins the toolchain (`toolchain go1.27.3`), so
   that a newer Go does not change what the gate reports; with the default
   `GOTOOLCHAIN=auto` the go command fetches it.
 - **golangci-lint v2.15.0**, installed as a binary built with Go 1.27 or
@@ -47,11 +47,11 @@ is welcome: lower the number in the same pull request.
 
 ### Changes to the gate
 
-`.golangci.yml`, the `Makefile` and `.gate/` make up the gate. Change
-them in a pull request of their own, so that the gate can be reviewed
-apart from the code it judges; `make check` names them when they
-differ from `origin/main`. `docs/DECISIONS.md` records why the gate is
-as it is.
+`.golangci.yml`, the `Makefile`, `.gate/` and the workflows in
+`.github/` make up the gate. Change them in a pull request of their
+own, so that the gate can be reviewed apart from the code it judges;
+`make check` names them when they differ from `origin/main`.
+`docs/DECISIONS.md` records why the gate is as it is.
 
 ## What the linters cannot check
 

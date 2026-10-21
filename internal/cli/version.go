@@ -52,7 +52,7 @@ the commit means the files built had changes that were not committed.`,
 
 // String returns the information on one line, such as
 //
-//	vegtam 0.1.0 (commit 1a2b3c4d5e6f, 2026-10-20T12:00:00Z, go1.27.2, linux/arm64)
+//	vegtam 0.1.0 (commit 1a2b3c4d5e6f, 2026-10-20T12:00:00Z, go1.27.3, linux/arm64)
 //
 // with the commit cut to 12 characters.
 func (v versionInfo) String() string {

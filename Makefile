@@ -25,7 +25,7 @@ FUZZTIME              ?= 30s
 BASELINE     := .gate/suppressions.baseline
 SUPPRESSIONS := //nolint|//exhaustive:ignore|^[[:space:]]*_(, _)* = |\bt\.Skip
 # The files of the gate, which a pull request changes only on its own.
-GATE_FILES   := .golangci.yml Makefile .gate
+GATE_FILES   := .golangci.yml Makefile .gate .github
 
 .PHONY: build test vet fmt lint check-fast check release-check suppressions gate-files vuln fuzz tools clean
 

@@ -111,7 +111,7 @@ is no release.
 ## Making a release
 
 **Tools.** Go, the version that the `toolchain` line of `go.mod` names
-(go1.27.2): the Go version is part of what a binary is. GoReleaser
+(go1.27.3): the Go version is part of what a binary is. GoReleaser
 v2.18.3 (`go install github.com/goreleaser/goreleaser/v2@v2.18.3`), the
 version that the release workflow runs: another version may pack the
 archives and packages otherwise, and their sums would then differ, so
