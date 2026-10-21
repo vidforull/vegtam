@@ -1173,3 +1173,70 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   Through a SOCKS proxy, which carries the request's own bytes, what the
   server sends counts from the client's preface, as the proxy answers
   first; an http proxy is spoken to itself, and gets no hint.
+
+## 2026-10-21: releases from GitHub Actions
+
+- **A tag publishes the release.** A tag pushed to GitHub runs
+  `.github/workflows/release.yml`, and GoReleaser publishes the release
+  of it: its release step and the changelog are on, and no file is
+  attached by hand. This replaces what "2026-10-20: releases" said of
+  the release step, the changelog and signing; its reasons for
+  GoReleaser and for builds reproducible from the commit stand. A
+  release built on GitHub's machines is checked as any build is: a
+  build of its tag elsewhere, with the same Go and GoReleaser, gives
+  the same sums.
+- **The gate cannot write or sign.** The workflow's token can only read.
+  Its `gate` job runs `make check`, and with it the tag's code, its
+  tests and the linters, with that token and without `id-token: write`:
+  nothing it runs can change a release, or get a token to sign as the
+  workflow. The `release` job starts once the gate has passed, with
+  `contents: write` and `id-token: write`, and runs only setup steps,
+  GoReleaser and cosign; `GITHUB_TOKEN` goes to the GoReleaser step
+  alone.
+- **cosign, keyless.** `checksums.txt` is signed, and through it each
+  file it lists. A keyless signature leaves no key to keep, or to leak:
+  cosign gets a certificate from Sigstore that lasts minutes and names
+  the workflow at the tag,
+  `https://github.com/vidforull/vegtam/.github/workflows/release.yml@refs/tags/<tag>`,
+  for which GitHub's OIDC token vouches. The signature ties the sums to
+  that workflow, not to a person's key. The bundle,
+  `checksums.txt.sigstore.json`, carries the certificate and the entry
+  of Sigstore's transparency log, so that `cosign verify-blob` needs
+  nothing else. The run verifies it once itself, with that exact
+  identity: a signature that does not verify fails the run that made
+  it. An Apple signature and notarization still need a developer
+  account, and are not done.
+- **`.deb` and `.rpm`, as reproducible as the archives.** nfpm, inside
+  GoReleaser, packs the Linux binaries with `LICENSE` and `README.md`,
+  with the commit's time on every file and on the package, root as the
+  owner, and fixed modes. An `.rpm` records the host that built it, the
+  machine's own name unless `rpm.buildhost` is set: two hosts made two
+  different packages, so it is set, to `reproducible`. The version
+  inside keeps the `~` that nfpm puts before a pre-release part,
+  `0.1.0~rc.1`, which dpkg and rpm sort before `0.1.0`, so that the
+  version upgrades its candidates. The file names have `-` in its
+  place: GitHub renames an asset with a `~`, and `checksums.txt` would
+  then name a file that the release lacks.
+- **No package repository or tap yet.** An apt or yum repository needs
+  a host and a signing key of its own, and a Homebrew tap a repository
+  of its own. Each waits until after the first release: the packages
+  are tried first as files of a release.
+- **The tag that was pushed.** The release job sets
+  `GORELEASER_CURRENT_TAG` to the tag of the run. A version shares its
+  commit with its last candidate, and GoReleaser, left to choose, takes
+  the first tag of the commit in `-version:refname` order, which puts
+  `v0.1.0-rc.2` before `v0.1.0`.
+- **GitHub only, and only from `main`.** Another server that holds the
+  repository may run `.github/workflows`; both jobs run only when the
+  server is github.com and the repository `vidforull/vegtam`. The gate
+  refuses a tag whose commit is not on `main`: a release is made of
+  what was merged, not of a branch that was tagged.
+- **Pinned by commit.** checkout and setup-go are those of check.yml;
+  cosign-installer v4.1.2 and goreleaser-action v7.2.3 are named by the
+  commits that GoReleaser's own release workflow names for them. The
+  installer's commit fixes the version of cosign it installs, and the
+  workflow names GoReleaser's version, the Makefile's.
+- **Notes without docs and tests.** The changelog lists the commits
+  since the previous tag, sorted, without those whose subject starts
+  with `docs:`, `readme:` or `test:`: they change no behaviour.
+  `readme:` is this repository's area for the README.

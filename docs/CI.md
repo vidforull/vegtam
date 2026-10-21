@@ -22,10 +22,18 @@ The workflow's token can only read the repository, and it uses no
 secret. A pull request runs the workflow as it has it, so a change to
 the workflow is a change to the gate.
 
-To change a pinned version: golangci-lint and govulncheck are pinned
-twice, in the `Makefile`, which refuses any other version, and in the
-workflow; change both in one pull request of their own, golangci-lint's
-`VERSION` and `SHA256` together, the sum taken from the release's
-checksums file. Go follows the `toolchain` line of `go.mod`. An action
-takes the SHA of the commit that its release tag names, and the release
-in the comment beside it.
+`.github/workflows/release.yml` runs on a tag pushed to GitHub
+([RELEASE.md](RELEASE.md#the-release-workflow)). Its `gate` job is the
+same `make check`, with the same read-only token, and refuses a tag
+whose commit is not on `main`. Only its `release` job, which starts
+once the gate has passed, can write to the repository and ask for the
+OIDC token that cosign signs with; `GITHUB_TOKEN` goes to the
+GoReleaser step alone.
+
+To change a pinned version: golangci-lint and govulncheck are pinned in
+the `Makefile`, which refuses any other version, and in both workflows,
+and GoReleaser in the `Makefile` and `release.yml`; change them in one
+pull request of their own, golangci-lint's `VERSION` and `SHA256`
+together, the sum taken from the release's checksums file. Go follows
+the `toolchain` line of `go.mod`. An action takes the SHA of the commit
+that its release tag names, and the release in the comment beside it.

@@ -27,7 +27,8 @@ directory.
 
 `go install` puts `vegtam` in `$(go env GOPATH)/bin`. In a clone,
 `make build` builds `./vegtam`. Releases are `tar.gz` archives for
-macOS and Linux (amd64, arm64) with `checksums.txt`, unsigned;
+macOS and Linux and `.deb` and `.rpm` packages for Linux (amd64,
+arm64), with `checksums.txt` signed with cosign;
 [docs/RELEASE.md](docs/RELEASE.md#verifying-a-download) says how to
 verify one.
 
@@ -239,6 +240,16 @@ HEAD or OPTIONS, and secrets masked by value.
 - [docs/RELEASE.md](docs/RELEASE.md): how a release is built and checked.
 - [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and why.
 - [CONTRIBUTING.md](CONTRIBUTING.md): the gate, `make check`, and commit messages.
+
+## How it is built
+
+vegtam is developed with coding agents, under the rules it gives them.
+Every change passes the gate before it is merged: golangci-lint, tests
+under the race detector, fuzzing, and a fixed count of suppressions
+(`make check`). Each pull request is reviewed twice, then read and
+merged by a person. The reasons behind the design are in
+[docs/DECISIONS.md](docs/DECISIONS.md). The repository is the product's
+own test bed: an agent working on vegtam runs vegtam under its policy.
 
 ## License
 

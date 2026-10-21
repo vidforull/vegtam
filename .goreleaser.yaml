@@ -1,10 +1,12 @@
-# How a release of vegtam is built. docs/RELEASE.md says how to use it,
-# and docs/DECISIONS.md why it is as it is.
+# How a release of vegtam is built and published. docs/RELEASE.md says
+# how to use it, and docs/DECISIONS.md why it is as it is.
 #
-# Nothing is published: the release step is off, and there is no
-# signing, no package manager and no image. Built from the same commit
-# with the same Go, the binaries and the archives come out the same, byte
-# for byte: every time in them is the commit's.
+# A tag pushed to GitHub runs this in .github/workflows/release.yml: the
+# archives, .deb and .rpm packages for Linux, checksums.txt with a
+# keyless cosign signature of it, and the release on GitHub. There is no
+# package repository and no image. Built from the same commit with the
+# same Go and GoReleaser, every file that checksums.txt lists comes out
+# the same, byte for byte: every time in them is the commit's.
 version: 2
 
 project_name: vegtam
@@ -51,12 +53,99 @@ archives:
           mode: 0o644
           mtime: "{{ .CommitDate }}"
 
+# The linux builds as packages. Their version is the tag's, with ~ before
+# a pre-release part (0.1.0~rc.1), which dpkg and rpm sort before 0.1.0.
+# The file names have - in its place: GitHub renames an asset with a ~,
+# and checksums.txt would then name a file that the release lacks.
+nfpms:
+  - id: vegtam
+    ids:
+      - vegtam
+    formats:
+      - deb
+      - rpm
+    file_name_template: '{{ replace .ConventionalFileName "~" "-" }}'
+    maintainer: vidforull <344096586+vidforull@users.noreply.github.com>
+    description: Run .http files from a terminal, a CI job, or an AI agent — without leaking secrets.
+    homepage: https://github.com/vidforull/vegtam
+    license: MIT
+    section: utils
+    bindir: /usr/bin
+    mtime: "{{ .CommitDate }}"
+    contents:
+      # Debian keeps the license of a package in its copyright file; rpm
+      # marks the license and the documentation as such.
+      - src: LICENSE
+        dst: /usr/share/doc/vegtam/copyright
+        packager: deb
+        file_info:
+          owner: root
+          group: root
+          mode: 0o644
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        dst: /usr/share/doc/vegtam/README.md
+        packager: deb
+        file_info:
+          owner: root
+          group: root
+          mode: 0o644
+          mtime: "{{ .CommitDate }}"
+      - src: LICENSE
+        dst: /usr/share/doc/vegtam/LICENSE
+        type: license
+        packager: rpm
+        file_info:
+          owner: root
+          group: root
+          mode: 0o644
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        dst: /usr/share/doc/vegtam/README.md
+        type: doc
+        packager: rpm
+        file_info:
+          owner: root
+          group: root
+          mode: 0o644
+          mtime: "{{ .CommitDate }}"
+    rpm:
+      # An rpm names the host that built it, the machine's own name
+      # unless this is set.
+      buildhost: reproducible
+
 checksum:
   name_template: checksums.txt
   algorithm: sha256
 
+# A keyless signature: cosign takes the workflow's identity from GitHub's
+# OIDC token, and the bundle holds the certificate and the log entry.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --yes
+      - "--bundle=${signature}"
+      - "${artifact}"
+
 changelog:
-  disable: true
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^readme:"
+      - "^test:"
 
 release:
-  disable: true
+  disable: false
+  # The release goes to this repository on GitHub.
+  github:
+    owner: vidforull
+    name: vegtam
+  name_template: "vegtam {{ .Version }}"
+  # A tag with a pre-release part, such as v0.1.0-rc.1, makes a pre-release.
+  prerelease: auto
+  draft: false

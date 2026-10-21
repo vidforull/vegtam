@@ -1,0 +1,184 @@
+# A release, from a tag vX.Y.Z or vX.Y.Z-rc.N pushed to GitHub: the
+# gate, make check, then GoReleaser builds what .goreleaser.yaml says,
+# signs checksums.txt with cosign, keyless, and publishes the release.
+# docs/RELEASE.md says how to make one.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+# One run per tag, and a release in progress is never cancelled: it
+# would leave a draft with half of its files.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Every go command runs the Go that setup-go installs, and none
+  # fetches another.
+  GOTOOLCHAIN: local
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # The gate runs the tag's code, its tests and the linters. Its token
+  # can only read, and it has no id-token: write, so nothing it runs can
+  # change a release or get a token to sign as this workflow.
+  gate:
+    # The repository lives on another server too, which may read
+    # .github/workflows: only GitHub's copy releases.
+    if: github.server_url == 'https://github.com' && github.repository == 'vidforull/vegtam'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # All of the history; with fetch-depth: 0, checkout fetches every
+      # branch too, main among them.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check that the tag is on main
+        run: |
+          if ! git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+            echo "::error::checkout made no origin/main: this step cannot tell whether $GITHUB_REF_NAME is on main"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::$GITHUB_REF_NAME is on $(git rev-parse HEAD), which is not on main: a release is made only from a commit of main"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME is on $(git rev-parse HEAD), a commit of main"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          # setup-go reads the toolchain line of go.mod only when
+          # GOTOOLCHAIN is not local; with local it would take the go
+          # line, 1.27, and any 1.27.x would do, the runner's own first.
+          # It sets GOTOOLCHAIN=local itself before it runs a go command.
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check the Go version
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' go.mod)
+          got=$(go env GOVERSION)
+          if [ -z "$want" ]; then
+            echo "::error::go.mod has no toolchain line: the gate runs with one version of Go, which that line names"
+            exit 1
+          fi
+          if [ "$got" != "$want" ]; then
+            echo "::error::Go is $got, and the toolchain line of go.mod says $want: setup-go installed another version"
+            exit 1
+          fi
+          echo "Go is $got, as the toolchain line of go.mod says"
+
+      - name: Install golangci-lint
+        env:
+          VERSION: 2.15.0
+          # The sum of golangci-lint-2.15.0-linux-amd64.tar.gz in the
+          # release's golangci-lint-2.15.0-checksums.txt.
+          SHA256: 9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea
+        run: |
+          name="golangci-lint-$VERSION-linux-amd64"
+          cd "$RUNNER_TEMP"
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$name.tar.gz" \
+            "https://github.com/golangci/golangci-lint/releases/download/v$VERSION/$name.tar.gz"
+          echo "$SHA256  $name.tar.gz" | sha256sum -c -
+          tar -xzf "$name.tar.gz" "$name/golangci-lint"
+          "$RUNNER_TEMP/$name/golangci-lint" version
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+
+      - name: Install govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          # setup-go has put $(go env GOPATH)/bin on the PATH. Without
+          # govulncheck there, make check would skip it, and pass.
+          command -v govulncheck
+          govulncheck -version
+
+      # The gate takes the suppression baseline from origin/main, which
+      # checkout has made above.
+      - name: make check
+        run: |
+          if ! git cat-file -e origin/main:.gate/suppressions.baseline 2>/dev/null; then
+            echo "::error::origin/main has no .gate/suppressions.baseline: make check would take the baseline from this change itself"
+            exit 1
+          fi
+          make check
+
+  # Only this job can write, to make the release, and ask for an OIDC
+  # token, which cosign's keyless signature is made with. It starts once
+  # the gate has passed, and checks out the same commit.
+  release:
+    needs: gate
+    if: github.server_url == 'https://github.com' && github.repository == 'vidforull/vegtam'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      # All of the history, with the tags, which GoReleaser reads.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The binaries are built here, with the Go that the gate checked.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          # As in the gate: setup-go reads the toolchain line of go.mod
+          # only when GOTOOLCHAIN is not local.
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check the Go version
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' go.mod)
+          got=$(go env GOVERSION)
+          if [ -z "$want" ]; then
+            echo "::error::go.mod has no toolchain line: a release is built with one version of Go, which that line names"
+            exit 1
+          fi
+          if [ "$got" != "$want" ]; then
+            echo "::error::Go is $got, and the toolchain line of go.mod says $want: setup-go installed another version"
+            exit 1
+          fi
+          echo "Go is $got, as the toolchain line of go.mod says"
+
+      # The installer is pinned by commit, and with it the version of
+      # cosign that it installs.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The tag that was pushed. A final tag shares its commit with
+          # its last candidate, and GoReleaser, left to choose among the
+          # tags of a commit, would build v0.1.0 as 0.1.0-rc.2.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+        with:
+          # The Makefile's GORELEASER_VERSION: change both together.
+          version: v2.18.3
+          args: release --clean
+
+      # What a user runs to check the signature, run once here: a release
+      # whose signature does not verify fails its run.
+      - name: Verify the signature
+        run: |
+          cosign verify-blob \
+            --certificate-identity "https://github.com/vidforull/vegtam/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --bundle dist/checksums.txt.sigstore.json \
+            dist/checksums.txt
