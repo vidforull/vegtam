@@ -98,16 +98,8 @@ func (m *Model) render() string {
 	}
 	switch m.mode {
 	case browsing, searching, choosingEnv, helping:
-	case confirming:
-		r := m.rows[m.cursor]
-		req := r.file.Requests[r.index]
-		question := fmt.Sprintf("Send %s %s?\n\n", req.Method, output.Ref(r.file, r.index))
-		// The text of its @note, from the file: clean masks it and shows
-		// what would drive the terminal as escapes.
-		if note, ok := req.Note(); ok && note != "" {
-			question += note + "\n\n"
-		}
-		response = m.box(responsePane, "Send?", m.clean(question+"enter sends it, any other key does not."))
+	case confirming: // see questionText
+		response = m.box(responsePane, "Send?", m.clean(m.question))
 	}
 	var panes string
 	switch {
@@ -236,8 +228,8 @@ func (m *Model) treeText() string {
 }
 
 // requestText is the selected request: its directives and the request as
-// it would be sent or, if it cannot be resolved, as written, and what
-// stops it from being sent.
+// it would be sent, with where each of its secrets may go, or, if it
+// cannot be resolved, as written, and what stops it from being sent.
 func (m *Model) requestText() string {
 	r := m.rows[m.cursor]
 	var b strings.Builder
@@ -252,6 +244,7 @@ func (m *Model) requestText() string {
 		}
 		if m.preview.Request != nil {
 			output.WriteRequest(&b, m.preview.Request)
+			output.WriteSecrets(&b, m.preview.SecretOrigins)
 		} else {
 			output.WriteRequest(&b, output.Written(req))
 		}
@@ -402,7 +395,8 @@ func (m *Model) helpText(width int) string {
 	}
 	b.WriteString("\nIn the request and response panes j/k scroll, f/b by a page, d/u by half.\n\n" +
 		"/ narrows the list by label, file or URL: enter keeps it, esc clears it.\n\n" +
-		"enter asks first for a method other than GET, HEAD or OPTIONS, and for a request with an @note: enter again sends. " +
+		"enter asks first for a method other than GET, HEAD or OPTIONS, a request with an @note, or a secret " +
+		"that would go where it is not bound: enter again sends. " +
 		"y copies the request as curl, its secrets as shell variables; esc hides it.\n\n" +
 		"h lists the latest runs: enter goes to the request of one; esc closes it.\n\n")
 	st := func(c env.Class, s string) string { return placeholderStyles[c].Render(s) }

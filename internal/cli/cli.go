@@ -66,11 +66,13 @@ var exitCodes = []struct {
 		"a capture (# @capture) that finds no value, or an export that cannot be imported"},
 	{exitNetwork, "network or TLS error, or timeout"},
 	{exitStatus, "HTTP status 400 or above, with run --fail"},
-	{exitConfirm, `a request that is not sent without a confirmation, --confirm: one with "# @note", or, with no person ` +
-		"at a terminal, one whose method is not GET, HEAD or OPTIONS (see vegtam run --help)"},
+	{exitConfirm, `a request that is not sent without a confirmation, --confirm: one with "# @note"; with no person ` +
+		"at a terminal, one whose method is not GET, HEAD or OPTIONS; with a person at a terminal, one that would send " +
+		"a secret to an origin it is not bound to (see vegtam run --help)"},
 	{exitPolicy, "blocked by policy: a {{$cmd NAME}} whose command file is not trusted (see vegtam trust --help), " +
 		"an address that vegtam never connects to or that the operator's policy does not allow, " +
-		"or a policy file that cannot be read (see vegtam policy --help)"},
+		"a secret that would go to an origin it is not bound to, from a request with no person at a terminal or " +
+		"from a redirect (see vegtam run --help), or a policy file that cannot be read (see vegtam policy --help)"},
 	{exitCanceled, "interrupted by Ctrl-C (SIGINT) or SIGTERM"},
 }
 

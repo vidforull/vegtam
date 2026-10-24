@@ -14,6 +14,8 @@ func (m secretMap) SecretValue(s Secret) (string, error) {
 	return "", errors.New("no secret " + s.Name)
 }
 
+func (m secretMap) SecretOrigins(Secret) []string { return nil }
+
 func TestText(t *testing.T) {
 	text := Text{{Text: "Bearer "}, {Secret: &Secret{Name: "token"}}, {Text: "; "}, {Secret: &Secret{Name: "$env KEY"}}}
 	if got := text.Masked(); got != "Bearer {{token}}; {{$env KEY}}" {

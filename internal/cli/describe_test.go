@@ -135,6 +135,55 @@ func TestDescribe(t *testing.T) {
 	}
 }
 
+// TestDescribeSecretOrigins checks what describe says of secrets that
+// would go to an origin they are not bound to: that vegtam never sends
+// them, what binds them, and the kinds of error and exit codes they give,
+// in JSON and as text.
+func TestDescribeSecretOrigins(t *testing.T) {
+	writePolicy(t, `{}`)
+	_, stdout, _ := runCLI(t, false, "describe")
+	var doc output.Document
+	decode(t, stdout, &doc)
+	d := doc.Describe
+	const item = "send a secret value to an origin it is not bound to: "
+	i := slices.IndexFunc(d.Never, func(n string) bool { return strings.HasPrefix(n, item) })
+	if i < 0 {
+		t.Fatalf("never says nothing of secret origins: %q", d.Never)
+	}
+	for _, want := range []string{
+		"the $allow of http-client.private.env.json binds the file's own values",
+		"the operator's policy (secrets) alone binds {{$env NAME}} and {{$cmd NAME}}", "a captured value goes back only to",
+		"bound to none goes nowhere", "a person at a terminal may confirm", "without a person --confirm does not lift it",
+	} {
+		if !strings.Contains(d.Never[i], want) {
+			t.Errorf("never[%d] does not say %q: %s", i, want, d.Never[i])
+		}
+	}
+	meaning := func(kind core.Kind) string {
+		j := slices.IndexFunc(d.Errors, func(e output.DescribeError) bool { return e.Kind == string(kind) })
+		if j < 0 {
+			t.Fatalf("no error of kind %s", kind)
+		}
+		return d.Errors[j].Meaning
+	}
+	if m := meaning(core.KindPolicy); !strings.Contains(m, "a secret that would go to an origin it is not bound to") ||
+		!strings.Contains(m, "--confirm does not lift it") {
+		t.Errorf("policy: %s", m)
+	}
+	if m := meaning(core.KindConfirm); !strings.Contains(m, "with a person at a terminal, one that would send a secret to an origin it is not bound to") {
+		t.Errorf("confirm: %s", m)
+	}
+	for _, e := range d.ExitCodes {
+		if (e.Code == exitConfirm || e.Code == exitPolicy) && !strings.Contains(e.Meaning, "a secret") {
+			t.Errorf("exit code %d says nothing of secrets: %s", e.Code, e.Meaning)
+		}
+	}
+	_, text, _ := runAt(t, "describe")
+	if words := strings.Join(strings.Fields(text), " "); !strings.Contains(words, "- "+d.Never[i]) {
+		t.Errorf("as text, never does not say:\n%s\nin:\n%s", d.Never[i], text)
+	}
+}
+
 // oddDir is the name of a directory with what would drive a terminal.
 const oddDir = "conf\x1b]0;t\x07"
 

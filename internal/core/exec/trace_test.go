@@ -86,7 +86,7 @@ func TestTraceRedirects(t *testing.T) {
 	defer srv.Close()
 	p := prepared(http.MethodGet, lit(srv.URL+"/start"), nil,
 		header("Authorization", append(lit("Bearer "), secret("token")...)), header("X-Key", secret("$env KEY")), header("X-Plain", lit("1")))
-	_, tr, err := New(Options{MaxBody: 1 << 20}).Do(t.Context(), p, testSecrets)
+	_, tr, err := New(Options{MaxBody: 1 << 20}).Do(t.Context(), p, testSecrets.to(srv.URL))
 	if err != nil || len(tr.Hops) != 3 {
 		t.Fatalf("Do: %+v, %v", tr, err)
 	}

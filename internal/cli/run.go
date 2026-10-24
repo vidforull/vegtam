@@ -76,7 +76,19 @@ policy may let such a run send any method (network.confirm, see vegtam
 policy --help). A request with "# @note" needs --confirm in every mode,
 with a person at a terminal too, whatever the policy says: its file
 asks for a person, and the error shows the note. A dry run needs no
-confirmation: each result says, in confirm, what sending it would need.`,
+confirmation: each result says, in confirm, what sending it would need.
+
+A secret goes only to the origins it is bound to: a value of
+http-client.private.env.json to those the file binds it to ($allow);
+{{$env NAME}} and {{$cmd NAME}} to those of the operator's policy
+alone (secrets, see vegtam policy --help), whatever a file says; a
+captured value back to the origin of the response it came from. A
+request that would send one elsewhere is not sent: without a person at a terminal, it is an error of kind policy,
+exit code 6, which --confirm does not lift; with one, an error of kind
+confirm, exit code 5, and --confirm=file#name sends it this once. A
+redirect that would carry a secret of the URL to an origin it is not
+bound to is refused, exit code 6, with a person at a terminal too. A dry
+run says where each secret may go, in secret_origins.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return run(cmd.Context(), cfg, f, args[0])
@@ -108,14 +120,16 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 	// A person at a terminal runs what they typed; a script or an agent,
 	// which a file or a response may lead, sends what may change something
 	// only with --confirm, unless the operator's policy trusts it.
-	confirm := session.Confirm{Mutations: !cfg.unattended() || !pol.Network.ConfirmMutations(), All: f.confirm.all}
+	// A person may also send a secret where it is not bound, by confirming
+	// it; nothing confirms that for a program.
+	confirm := session.Confirm{Mutations: !cfg.unattended() || !pol.Network.ConfirmMutations(), Person: !cfg.unattended(), All: f.confirm.all}
 	if confirm.Requests, err = t.confirmed(f.confirm.refs); err != nil {
 		return err
 	}
 	s := session.New(session.Options{
 		Env: f.env, DryRun: f.dryRun, Trust: policy.DefaultStore(), Transport: tr,
 		MaxBody: int64(f.maxBody), UserAgent: "vegtam/" + cfg.Version, Fail: f.fail,
-		History: cfg.history(f.noHistory || f.dryRun), Confirm: confirm,
+		History: cfg.history(f.noHistory || f.dryRun), Confirm: confirm, Secrets: pol.Secrets,
 	})
 	cfg.secrets = s.Masker
 	jobs, err := t.jobs(ctx, s)

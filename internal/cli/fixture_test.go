@@ -39,6 +39,9 @@ type fixture struct {
 	// the policy, which allows the servers of the tests: a run without a
 	// person at a terminal connects to loopback only as it allows.
 	config string
+	// origins are where the secrets of the private environment file may
+	// go: see allow.
+	origins []string
 
 	mu   sync.Mutex
 	seen []string // the raw queries the server received
@@ -100,25 +103,39 @@ func newFixture(t *testing.T) *fixture {
 			})
 		}
 	})
-	fx.config = writePolicy(t, loopbackPolicy)
+	fx.origins = []string{srv.URL, closed.URL, "http://" + fx.hidden, "http://" + fx.live, secure.URL, mtls.URL, "https://" + silent.Addr().String()}
+	fx.config = writePolicy(t, fx.policy(loopbackPolicy))
 	fx.ca = filepath.Join(fx.dir, "ca.pem")
 	if err := os.WriteFile(fx.ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: secure.Certificate().Raw}), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	envs := map[string]map[string]map[string]string{
-		"http-client.env.json": {"test": {
-			"host": srv.URL, "closed": closed.URL, "tls": secure.URL, "mtls": mtls.URL, "silent": silent.Addr().String(),
-		}},
-		"http-client.private.env.json": {"test": {"token": privateSecret, "base": "http://" + fx.hidden, "live": "http://" + fx.live}},
+	b, _ := json.Marshal(map[string]map[string]string{"test": {
+		"host": srv.URL, "closed": closed.URL, "tls": secure.URL, "mtls": mtls.URL, "silent": silent.Addr().String(),
+	}})
+	if err := os.WriteFile(fx.path("http-client.env.json"), b, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	for name, v := range envs {
-		b, _ := json.Marshal(v)
-		if err := os.WriteFile(filepath.Join(fx.dir, name), b, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	fx.allow(t)
 	t.Setenv("VEGTAM_TEST_KEY", envSecret)
 	return fx
+}
+
+// allow writes the private environment file with its values allowed to
+// go to the servers of the fixture and to origins too ($allow), as the
+// person whose secrets they are allows them.
+func (fx *fixture) allow(t *testing.T, origins ...string) {
+	t.Helper()
+	fx.origins = append(fx.origins, origins...)
+	allow := map[string][]string{}
+	for _, name := range []string{"token", "base", "live"} {
+		allow[name] = fx.origins
+	}
+	b, _ := json.Marshal(map[string]map[string]any{"test": {
+		"token": privateSecret, "base": "http://" + fx.hidden, "live": "http://" + fx.live, "$allow": allow,
+	}})
+	if err := os.WriteFile(fx.path("http-client.private.env.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (fx *fixture) path(name string) string { return filepath.Join(fx.dir, name) }
@@ -140,15 +157,37 @@ func (fx *fixture) env(t *testing.T, name string) string {
 // loopbackPolicy allows the servers of the tests, on loopback.
 const loopbackPolicy = `{"network": {"allow": ["127.0.0.1", "::1"]}}`
 
-// setPolicy makes the fixture's policy say doc until the test ends.
+// policy returns doc, a policy file, as the person of the fixture has it:
+// {{$env VEGTAM_TEST_KEY}} and the {{$cmd NAME}} of the tests' command
+// files may go where the private file's values may (see allow), unless
+// doc binds secrets of its own.
+func (fx *fixture) policy(doc string) string {
+	trimmed := strings.TrimSpace(doc)
+	if strings.Contains(doc, `"secrets"`) || !strings.HasPrefix(trimmed, "{") {
+		return doc
+	}
+	cmd := map[string][]string{}
+	for _, name := range []string{"KEY", "LEAK", "SLOW", "TOUCH"} {
+		cmd[name] = fx.origins
+	}
+	b, _ := json.Marshal(map[string]any{"env": map[string][]string{"VEGTAM_TEST_KEY": fx.origins}, "cmd": cmd})
+	rest := strings.TrimPrefix(trimmed, "{")
+	if strings.TrimSpace(rest) != "}" {
+		rest = ", " + rest
+	}
+	return `{"secrets": ` + string(b) + rest
+}
+
+// setPolicy makes the fixture's policy say doc, with the fixture's
+// secrets (see policy), until the test ends.
 func setPolicy(t *testing.T, fx *fixture, doc string) {
 	t.Helper()
 	path := filepath.Join(fx.config, "policy.json")
-	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(fx.policy(doc)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := os.WriteFile(path, []byte(loopbackPolicy), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(fx.policy(loopbackPolicy)), 0o600); err != nil {
 			t.Error(err)
 		}
 	})

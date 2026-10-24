@@ -401,7 +401,7 @@ func TestTLSErrorsHideSecrets(t *testing.T) {
 		{"unknown CA", "127.0.0.1", TLS{}, `Get "{{base}}/?key={{token}}": tls: failed to verify certificate: x509: certificate signed by unknown authority`},
 		{"another host", "localhost", TLS{Roots: roots}, "x509: certificate is valid for example.com, *.example.com, not ***"},
 	} {
-		s := secrets{"base": "https://" + tt.host + ":" + port, "token": "t0ken"}
+		s := secrets{"base": "https://" + tt.host + ":" + port, "token": "t0ken"}.to("https://" + tt.host + ":" + port)
 		_, _, err := New(Options{MaxBody: 1, Transport: Transport{TLS: tt.tls}}).Do(t.Context(), prepared(http.MethodGet, u, nil), s)
 		if err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Errorf("%s: %v, want %q", tt.name, err, tt.want)

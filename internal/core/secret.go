@@ -37,9 +37,14 @@ type Secret struct {
 	Capture bool
 }
 
-// Secrets looks up secret values.
+// Secrets looks up secret values, and the origins each may go to. They
+// are the one way to a secret: whatever holds the values decides where
+// each may be sent.
 type Secrets interface {
 	SecretValue(s Secret) (string, error)
+	// SecretOrigins returns the origins s may be sent to, as Origin writes
+	// them; none for a secret bound to none, which goes nowhere.
+	SecretOrigins(s Secret) []string
 }
 
 // ErrLate is the error Secrets give in a dry run for a value that only
@@ -100,7 +105,9 @@ type Masker struct {
 
 // NewMasker returns a Masker that replaces each value, and its URL- and
 // JSON-escaped forms, with "***". A value that is a URL also hides its
-// host, which errors and responses often name alone.
+// host, which errors and responses often name alone: as written, and as
+// Origin writes it, in lower case, without a final dot or the scheme's
+// own port, as the refusal of a secret names the origin it would go to.
 func NewMasker(values []string) *Masker {
 	var forms []string
 	for _, v := range values {
@@ -109,8 +116,14 @@ func NewMasker(values []string) *Masker {
 		}
 		forms = append(forms, escapes(v)...)
 		if u, err := url.Parse(v); err == nil && u.Hostname() != "" {
-			forms = append(forms, escapes(u.Host)...)
-			forms = append(forms, escapes(u.Hostname())...)
+			hostPort := strings.TrimPrefix(Origin(u), u.Scheme+"://")
+			host := hostPort
+			if i := strings.LastIndex(host, ":"); i >= 0 && !strings.HasSuffix(host, "]") {
+				host = host[:i]
+			}
+			for _, h := range []string{u.Host, u.Hostname(), hostPort, strings.Trim(host, "[]")} {
+				forms = append(forms, escapes(h)...)
+			}
 		}
 	}
 	return newMasker(forms)

@@ -70,8 +70,11 @@ type Result struct {
 	Asserts    []Assert   `json:"asserts,omitempty"`  // nil without a response
 	Captures   []Capture  `json:"captures,omitempty"` // the values taken; nil without a response
 	Warnings   []Warning  `json:"warnings,omitempty"`
-	Confirm    *Confirm   `json:"confirm,omitempty"` // of a dry run: the confirmation that sending would need
-	Error      *Error     `json:"error,omitempty"`
+	// SecretOrigins are, of a dry run and of show, the secrets of the
+	// request and where each may go.
+	SecretOrigins []Secret `json:"secret_origins,omitempty"`
+	Confirm       *Confirm `json:"confirm,omitempty"` // of a dry run: the confirmation that sending would need
+	Error         *Error   `json:"error,omitempty"`
 
 	last *Timing // of the last hop alone, for the text form
 	hops int     // how many there were, for the text form
@@ -168,6 +171,9 @@ type Error struct {
 	Variables []string  `json:"variables,omitempty"`     // unresolved names, for kind "variable"
 	Phase     string    `json:"timeout_phase,omitempty"` // for kind "timeout": connect, read or total
 	Confirm   *Confirm  `json:"confirm,omitempty"`       // for kind "confirm"
+	// Secret is the first secret that the request would send to an origin
+	// it is not bound to, for kind "policy" or "confirm".
+	Secret *Secret `json:"secret,omitempty"`
 }
 
 // Confirm is what a request needs before it is sent: why, the request,
@@ -178,6 +184,39 @@ type Confirm struct {
 	URL    string  `json:"url"`            // as written, its placeholders unresolved
 	Note   *string `json:"note,omitempty"` // the text of its @note, which may be empty; absent without one
 	Flag   string  `json:"flag"`
+	// Secret is the first secret that the request would send to an origin
+	// it is not bound to, whatever the reason.
+	Secret *Secret `json:"secret,omitempty"`
+}
+
+// Secret is a secret of a request, by name, never by value, and where it
+// may go.
+type Secret struct {
+	Name     string   `json:"name"`             // its placeholder, such as {{token}} or {{$env TOKEN}}
+	Origin   string   `json:"origin,omitempty"` // where the request goes; absent if it is not known before it is sent
+	Allowed  []string `json:"allowed"`          // the origins it may go to; empty if it is bound to none
+	Captured bool     `json:"captured,omitempty"`
+}
+
+// NewSecret returns b with every secret value hidden by m, or nil for nil.
+func NewSecret(b *core.Bound, m *core.Masker) *Secret {
+	if b == nil {
+		return nil
+	}
+	s := &Secret{Name: b.Name, Origin: m.Mask(b.Origin), Allowed: []string{}, Captured: b.Capture}
+	for _, o := range b.Allowed {
+		s.Allowed = append(s.Allowed, m.Mask(o))
+	}
+	return s
+}
+
+// Bindings returns bs with every secret value hidden by m.
+func Bindings(bs []core.Bound, m *core.Masker) []Secret {
+	var list []Secret
+	for i := range bs {
+		list = append(list, *NewSecret(&bs[i], m))
+	}
+	return list
 }
 
 // NewConfirm returns c with every secret value hidden by m, or nil for
@@ -186,7 +225,7 @@ func NewConfirm(c *core.Confirmation, m *core.Masker) *Confirm {
 	if c == nil {
 		return nil
 	}
-	out := &Confirm{Reason: c.Reason, Method: m.Mask(c.Method), URL: m.Mask(c.URL), Flag: m.Mask(c.Flag)}
+	out := &Confirm{Reason: c.Reason, Method: m.Mask(c.Method), URL: m.Mask(c.URL), Flag: m.Mask(c.Flag), Secret: NewSecret(c.Secret, m)}
 	if c.Note != nil {
 		note := m.Mask(*c.Note)
 		out.Note = &note
@@ -387,7 +426,7 @@ func NewError(err error, m *core.Masker) *Error {
 	}
 	return &Error{
 		Kind: e.Kind, Message: m.Mask(e.Msg), File: e.Source.File, Line: e.Source.Line, Variables: e.Variables, Phase: e.Phase,
-		Confirm: NewConfirm(e.Confirm, m),
+		Confirm: NewConfirm(e.Confirm, m), Secret: NewSecret(e.Secret, m),
 	}
 }
 

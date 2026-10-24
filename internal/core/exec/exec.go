@@ -78,11 +78,17 @@ type Response struct {
 	// TLS.Insecure leaves all of them. A plain hop on the way could have
 	// led anywhere.
 	TLSVerified bool
+	// Origins are those of the last hop, which the response came from, as
+	// core.Origins gives them: its URL's, and its Host header's.
+	Origins []string
 }
 
 // Do sends p with its secrets revealed from s and reads the response. The
 // trace says how it went, after an error too; it is nil if nothing was
-// sent.
+// sent. No hop goes to an origin that a secret it holds is not bound to
+// (see core.Secrets): the request as written is refused before anything
+// is sent, and a redirect before it is followed, as errors of kind
+// policy.
 func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Response, *Trace, error) {
 	st, _ := c.Settings(p.Request)
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -98,6 +104,15 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 	if err != nil {
 		return nil, nil, err
 	}
+	var refused []core.Bound
+	for _, o := range core.Origins(req.URL, req.Host) {
+		refused = append(refused, core.Unbound(p, s, o)...)
+	}
+	if len(refused) > 0 {
+		e := core.SecretError(core.KindPolicy, p.Request.Source, p.Method+" "+p.URL.Masked()+" is not sent", refused)
+		e.Msg = hide(p, s, req.URL.String(), e.Msg) // the origin may be a secret's
+		return nil, nil, e
+	}
 	t := &tracer{}
 	h := &hops{c: c, st: st, w: w, t: t, first: origin(req.URL), jar: c.jar}
 	switch {
@@ -106,7 +121,7 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 	case p.Request != nil && p.Request.NoCookieJar():
 		h.jar, h.noJar = nil, "@no-cookie-jar"
 	}
-	hc := &http.Client{Transport: h, CheckRedirect: redirectPolicy(sensitive, p.Body.HasSecret(), t)}
+	hc := &http.Client{Transport: h, CheckRedirect: redirectPolicy(p, s, sensitive, t)}
 	start := time.Now()
 	resp, err := hc.Do(req)
 	w.idle() // the headers are in
@@ -131,6 +146,7 @@ func (c *Client) Do(ctx context.Context, p *core.Prepared, s core.Secrets) (*Res
 		Duration: time.Since(start),
 
 		TLSVerified: !h.plain && !h.insecure,
+		Origins:     core.Origins(resp.Request.URL, resp.Request.Host),
 	}
 	if int64(len(body)) > c.opts.MaxBody {
 		r.Body, r.Truncated = body[:c.opts.MaxBody], true
@@ -282,13 +298,18 @@ func basic(user, password core.Text, reveal func(core.Text) (string, bool, error
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(u+":"+pw)), true, nil
 }
 
-// redirectPolicy follows a redirect unless it goes from https to http, or
-// to another origin with a body that holds a secret: a 307 or 308 sends
-// the body again, and no header can be dropped from it. On the way to
-// another origin the sensitive headers are dropped, and the Referer that
-// net/http adds on every hop is dropped on all of them. t records each
-// redirect, and the headers of the request it dropped.
-func redirectPolicy(sensitive []string, secretBody bool, t *tracer) func(*http.Request, []*http.Request) error {
+// redirectPolicy follows a redirect of p, whose secrets s reveals, unless
+// it goes from https to http, or to another origin with a body that holds
+// a secret: a 307 or 308 sends the body again, and no header can be
+// dropped from it. Nor does it follow one to an origin that a secret in
+// the URL of p is not bound to, which is an error of kind policy: a
+// server that sends its query on, as an open redirect does, would send
+// the secret there. On the way to another origin the sensitive headers
+// are dropped, and the Referer that net/http adds on every hop is dropped
+// on all of them. t records each redirect, and the headers of the request
+// it dropped.
+func redirectPolicy(p *core.Prepared, s core.Secrets, sensitive []string, t *tracer) func(*http.Request, []*http.Request) error {
+	secretBody := p.Body.HasSecret()
 	return func(req *http.Request, via []*http.Request) error {
 		var dropped []string
 		defer func() { t.redirect(dropped) }()
@@ -297,6 +318,11 @@ func redirectPolicy(sensitive []string, secretBody bool, t *tracer) func(*http.R
 		}
 		if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme == "http" {
 			return errors.New("refused a redirect from https to http")
+		}
+		for _, to := range core.Origins(req.URL, req.Host) {
+			if refused := core.Refused(core.Bindings(s, to, p.URL)); len(refused) > 0 {
+				return core.SecretError(core.KindPolicy, p.Request.Source, "refused a redirect to "+to+" of a URL that holds a secret", refused)
+			}
 		}
 		// net/http sends the URL it was redirected from as the Referer,
 		// query and all, and a query may hold a token (RFC 9110, 10.1.3).
@@ -363,6 +389,11 @@ func (c *Client) netError(ctx context.Context, p *core.Prepared, s core.Secrets,
 		return timeout(core.PhaseConnect, "%s: no connection within %s (connect timeout)", where, core.FormatTimeout(st.Connect))
 	case errors.Is(err, context.Canceled):
 		return core.Errorf(core.KindCanceled, p.Request.Source, "%s", msg)
+	}
+	// A redirect refused for a secret.
+	if ce, ok := errors.AsType[*core.Error](err); ok && ce.Secret != nil {
+		ce.Msg = hide(p, s, wire, ce.Msg)
+		return ce
 	}
 	if pe, ok := errors.AsType[*proxyError](err); ok {
 		return core.Errorf(core.KindUsage, p.Request.Source, "%s: %s", where, pe.Error())

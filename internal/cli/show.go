@@ -24,7 +24,13 @@ func newShowCmd(cfg *Config) *cobra.Command {
 		Short: "Print a request without sending it",
 		Long: `Print a request without sending it. With -e it is resolved for that
 environment and shown as it would go on the wire; without -e it is shown
-as written. Secrets appear as their placeholders, such as {{token}}. A
+as written. Secrets appear as their placeholders, such as {{token}}.
+With -e, Secrets after the request says where each may go, and whether
+vegtam run would refuse to send it where the request goes (in JSON,
+secret_origins): a value of http-client.private.env.json to the origins
+the file binds it to ($allow), {{$env NAME}} and {{$cmd NAME}} to those
+of the operator's policy alone (secrets), and one bound to none
+nowhere. A
 {{$cmd NAME}} is checked against the trust store, with exit code 6 if
 its command file is not trusted, but its command does not run. The
 timeouts shown are those that vegtam run gives the request without its
@@ -50,7 +56,9 @@ CA file or the variable of the proxy's credentials cannot stop it.`,
 			res := &output.Result{Ref: output.Ref(f, i), Request: output.Written(f.Requests[i]), Transport: output.NewTransport(st)}
 			warnings = slices.Concat(f.Requests[i].Warnings, warnings)
 			if envName != "" {
-				s := session.New(session.Options{Env: envName, DryRun: true, Trust: policy.DefaultStore(), Transport: tr})
+				s := session.New(session.Options{
+					Env: envName, DryRun: true, Trust: policy.DefaultStore(), Transport: tr, Secrets: pol.Secrets,
+				})
 				cfg.secrets = s.Masker
 				j := s.Prepare(cmd.Context(), f, i)
 				cfg.masker = s.Masker()
@@ -58,6 +66,8 @@ CA file or the variable of the proxy's credentials cannot stop it.`,
 					return j.Err
 				}
 				res.Request = output.Sent(j.Prepared, cfg.masker)
+				// Where each secret may go, by its name, never its value.
+				res.SecretOrigins = output.Bindings(s.Bindings(j), cfg.masker)
 				warnings = j.Warnings // those of its environment files too
 			}
 			res.Warnings = output.Warnings(warnings, cfg.masker)
@@ -69,6 +79,7 @@ CA file or the variable of the proxy's credentials cannot stop it.`,
 			var b strings.Builder
 			output.WriteTransport(&b, res.Transport)
 			output.WriteRequest(&b, res.Request)
+			output.WriteSecrets(&b, res.SecretOrigins)
 			fmt.Fprint(cfg.out, cfg.text(b.String()))
 			return nil
 		},

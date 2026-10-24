@@ -31,11 +31,14 @@ directory and below it: "." if none is named. On a terminal, vegtam with
 no command does the same.
 
 One pane lists the files and their requests, the next shows the selected
-request as it would be sent, its variables coloured, and the last the
-latest response. enter sends the request as vegtam run does, and esc
+request as it would be sent, its variables coloured, and where each of
+its secrets may go, and the last the latest response. enter sends the request as vegtam run does, and esc
 cancels it; for a method other than GET, HEAD or OPTIONS, and for a
 request with "# @note", it asks first, showing the note, and only a
-second enter sends. / searches the list, y copies the request
+second enter sends. So it does for a request that would send a secret to
+an origin the secret is not bound to (see vegtam run --help): nothing is
+sent, the question names the secret and where it may go, and a second
+enter sends it there this once. / searches the list, y copies the request
 as a curl command, z folds the JSON of the response, e chooses the
 environment, h lists the latest runs, tab moves between panes, ? lists
 the keys and q quits.
@@ -83,7 +86,7 @@ func runTUI(ctx context.Context, cfg *Config, f tuiFlags, path string) error {
 	// not follow. The interface masks everything it shows before drawing.
 	m, err := tui.New(tui.Options{
 		Path: path, Env: f.env, Trust: policy.DefaultStore(), Transport: tr, MaxBody: int64(f.maxBody),
-		UserAgent: "vegtam/" + cfg.Version, History: cfg.history(f.noHistory), Input: cfg.Stdin, Output: cfg.Stdout,
+		UserAgent: "vegtam/" + cfg.Version, History: cfg.history(f.noHistory), Secrets: pol.Secrets, Input: cfg.Stdin, Output: cfg.Stdout,
 	})
 	if err != nil {
 		return err

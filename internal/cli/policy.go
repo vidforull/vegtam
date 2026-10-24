@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -38,7 +39,10 @@ vegtam does what it does on its own. Every field may be left out:
                 "unix_sockets": ["/var/run/docker.sock"],
                 "confirm": "mutations"},
     "hosts": {"api.internal.example:443": {"cacert": "~/certs/corp.pem",
-              "cert": "~/certs/me.pem", "key": "~/certs/me.key"}}
+              "cert": "~/certs/me.pem", "key": "~/certs/me.key"}},
+    "secrets": {"env": {"API_TOKEN": ["https://api.example.com"]},
+                "cmd": {"TOKEN": ["https://api.example.com",
+                                  "https://auth.example.com:8443"]}}
   }
 
 limits are ceilings on the time limits of every request: on the flags,
@@ -73,7 +77,18 @@ network.confirm says which requests a run without a person sends only
 with --confirm: "mutations", the default, those whose method is not
 GET, HEAD or OPTIONS; "never" none of them, for an operator who trusts
 whatever runs vegtam. Only the policy says "never": no flag, variable
-or file can. A request with "# @note" needs --confirm whatever it says.`,
+or file can. A request with "# @note" needs --confirm whatever it says.
+
+secrets gives the values of {{$env NAME}} and {{$cmd NAME}}, by NAME,
+the origins they may go to: scheme://host, and :port unless it is the
+scheme's own, such as https://api.example.com or http://127.0.0.1:8080;
+never a wildcard. Nothing else binds them: they are the machine's
+values, and every other file may have come with the requests.
+http-client.private.env.json binds its own values, in "$allow"; neither
+the public environment file nor a .http file binds any. A secret goes
+to its origins alone, and one bound to none goes nowhere: a request
+that would send it elsewhere is not sent, unless a person at a terminal
+confirms that request by name.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			pol, err := cfg.loadPolicy()
@@ -152,6 +167,7 @@ func policyText(p *output.Policy) string {
 		}
 		fmt.Fprintf(tw, "host %s\t%s\n", h.Host, strings.Join(parts, ", "))
 	}
+	secretRows(tw, p.Secrets)
 	tw.Flush()
 	r := p.Run
 	if r.Unattended {
@@ -180,6 +196,14 @@ func policyText(p *output.Policy) string {
 	}
 	fmt.Fprintf(&b, "Never connected to: %s.\n", strings.Join(p.Never, "; "))
 	return b.String()
+}
+
+// secretRows writes a row to w for each secret that the policy binds,
+// with the origins it may go to.
+func secretRows(w io.Writer, secrets []output.Secret) {
+	for _, s := range secrets {
+		fmt.Fprintf(w, "secret %s\t%s\n", s.Name, or(strings.Join(s.Allowed, ", "), "bound to none: goes nowhere"))
+	}
 }
 
 // msDuration returns ms milliseconds as a duration.

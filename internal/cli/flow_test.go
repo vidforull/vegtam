@@ -158,8 +158,9 @@ HTTP/1.1 200 OK (TIME)
 
 	// The whole directory: failures.http first. A capture that finds
 	// nothing is an error, and so is the request that needs its value;
-	// login.http still runs, and refused.http after it fails on the
-	// network, the token hidden.
+	// login.http still runs, and refused.http after it is refused before
+	// it connects, the token hidden: a captured token goes back only to
+	// the origin it came from, and nothing listens there.
 	type outcome struct{ ref, kind, msg string }
 	runDir := func() (int, []outcome, *output.Document) {
 		t.Helper()
@@ -188,17 +189,18 @@ HTTP/1.1 200 OK (TIME)
 		{"login.http#before", "", ""},
 		{"login.http#login", "", ""},
 		{"login.http#me", "", ""},
-		{"refused.http#refused", "network", ""},
+		{"refused.http#refused", "policy", ""},
 	}
 	if len(got) == len(wantOutcomes) {
-		got[6].msg = "" // the wording of the network stack
+		got[6].msg = "" // names the origin of the closed server
 	}
-	if code != exitNetwork || !slices.Equal(got, wantOutcomes) || doc.Results[0].Response == nil || doc.Results[1].Response == nil ||
+	if code != exitPolicy || !slices.Equal(got, wantOutcomes) || doc.Results[0].Response == nil || doc.Results[1].Response == nil ||
 		!slices.Equal(doc.Results[2].Error.Variables, []string{"session"}) {
 		t.Errorf("run . = %d, %q\nwant %q", code, got, wantOutcomes)
 	}
-	if msg := doc.Results[6].Error.Message; !strings.Contains(msg, "/?t={{token}}") {
-		t.Errorf("network error: %s", msg)
+	if e := doc.Results[6].Error; !strings.Contains(e.Message, "/?t={{token}}") || e.Secret == nil || e.Secret.Name != "{{token}}" ||
+		!e.Secret.Captured || !slices.Equal(e.Secret.Allowed, []string{host}) || doc.Results[6].Response != nil {
+		t.Errorf("policy error: %+v", e)
 	}
 
 	// A file that does not parse still declares its captures: the
@@ -214,15 +216,22 @@ HTTP/1.1 200 OK (TIME)
 	os.Remove("0-broken.http")
 
 	// A dry run sends nothing and captures nothing: captured variables stay
-	// placeholders, and nothing that depends on them is an error.
+	// placeholders, and nothing that depends on them is an error, but for
+	// the token that refused.http would send where it may not go.
 	code, stdout, _ = runCLI(t, false, "run", ".", "-e", "test", "--dry-run")
 	validateJSON(t, stdout)
 	*doc = output.Document{}
 	decode(t, stdout, doc)
-	if code != exitOK || len(doc.Results) != 7 || doc.Results[2].Request.URL != host+"/users/{{session}}" ||
+	if code != exitPolicy || len(doc.Results) != 7 || doc.Results[2].Request.URL != host+"/users/{{session}}" ||
 		doc.Results[3].Request.URL != host+"/users/1" || doc.Results[5].Request.URL != host+"/users/{{user}}" ||
 		strings.Contains(stdout, `"captures"`) {
 		t.Errorf("dry run = %d\n%s", code, stdout)
+	}
+	for i, r := range doc.Results {
+		refused := r.Error != nil && r.Error.Kind == "policy" && r.Error.Secret != nil && r.Error.Secret.Name == "{{token}}"
+		if i == 6 && !refused || i != 6 && r.Error != nil {
+			t.Errorf("dry run of %s: %+v", r.Ref, r.Error)
+		}
 	}
 
 	// One request alone has no earlier requests: user comes from the

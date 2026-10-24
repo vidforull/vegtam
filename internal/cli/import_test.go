@@ -45,15 +45,22 @@ func TestImportPostman(t *testing.T) {
 	}
 
 	// Each environment checks out but for the requests the report names:
-	// a Postman dynamic variable, and variables without a value.
+	// a Postman dynamic variable, variables without a value, and secrets,
+	// which go nowhere until a person binds them ($allow).
 	for _, env := range doc.Import.Environments {
 		code, stdout, _ := runCLI(t, false, "run", out, "--dry-run", "-e", env)
 		validateJSON(t, stdout)
 		var run output.Document
 		decode(t, stdout, &run)
-		var failed []string
+		var failed, unbound []string
 		for _, r := range run.Results {
-			if r.Error != nil {
+			switch {
+			case r.Error == nil:
+			case r.Error.Kind == "policy" && r.Error.Secret != nil:
+				if !slices.Contains(unbound, r.Error.Secret.Name) {
+					unbound = append(unbound, r.Error.Secret.Name)
+				}
+			default:
 				failed = append(failed, strings.TrimPrefix(r.Ref, out+string(filepath.Separator)))
 			}
 		}
@@ -63,9 +70,13 @@ func TestImportPostman(t *testing.T) {
 			"shop-api/products/admin.http#delete-product", "shop-api/shop-api.http#ping",
 			"shop-api/zakazy.http#log-in-as-user",
 		}
-		if code != exitUsage || len(run.Results) != doc.Import.Imported || !slices.Equal(failed, want) {
+		wantCode := exitUsage
+		if len(unbound) > 0 {
+			wantCode = exitPolicy
+		}
+		if code != wantCode || len(run.Results) != doc.Import.Imported || !slices.Equal(failed, want) {
 			t.Errorf("run --dry-run -e %s = %d, %d results, failed %q; want %d, %d results, failed %q",
-				env, code, len(run.Results), failed, exitUsage, doc.Import.Imported, want)
+				env, code, len(run.Results), failed, wantCode, doc.Import.Imported, want)
 		}
 	}
 }

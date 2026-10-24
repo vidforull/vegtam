@@ -64,7 +64,7 @@ func TestNoSecretInTUI(t *testing.T) {
 		for _, maxBody := range []int64{1 << 20, 106} {
 			m := open(t, Options{
 				Path: fx.dir, Transport: exec.Transport{Total: 5 * time.Second}, MaxBody: maxBody, UserAgent: "vegtam/test",
-				History: history.New(filepath.Join(t.TempDir(), "vegtam")),
+				History: history.New(filepath.Join(t.TempDir(), "vegtam")), Secrets: fx.secrets,
 			}, sz.w, sz.h)
 			views, styled := 0, 0
 			snap := func(state string) {
@@ -136,7 +136,7 @@ func TestNoSecretInTUI(t *testing.T) {
 			}
 		}
 	}
-	m := newModel(t, fx.dir, "test", 100, 30)
+	m := fx.model(t, "test", 100, 30)
 	press(m, "enter")
 	if text := m.responseText(); !strings.Contains(text, `"key": "***"`) || !strings.Contains(text, "X-Echo: key=***&env=***") {
 		t.Errorf("the echo of the secrets is not masked, so the test proves nothing:\n%s", text)
@@ -163,7 +163,7 @@ func TestTUIEscapes(t *testing.T) {
 		}
 	}
 	for _, sz := range []size{{60, 24}, {100, 30}, {150, 40}} {
-		m := newModel(t, fx.dir, "test", sz.w, sz.h)
+		m := fx.model(t, "test", sz.w, sz.h)
 		goTo(t, m, "escapes")
 		press(m, "enter")
 		for _, keys := range [][]string{nil, {"tab", "tab", "j", "j"}, {"G", "f"}, {"z"}, {"z"}} {
@@ -230,7 +230,7 @@ func TestRun(t *testing.T) {
 	} {
 		in, keys := io.Pipe()
 		var out bytes.Buffer
-		m, err := New(Options{Path: fx.dir, Env: tt.env, Transport: exec.Transport{Total: time.Minute}, MaxBody: 1 << 20, Input: in, Output: &out})
+		m, err := New(Options{Path: fx.dir, Env: tt.env, Transport: exec.Transport{Total: time.Minute}, MaxBody: 1 << 20, Secrets: fx.secrets, Input: in, Output: &out})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -263,8 +263,11 @@ func TestRun(t *testing.T) {
 		if err != nil || (p != nil) != tt.panics {
 			t.Errorf("%s: Run = %v, panic %v", tt.name, err, p)
 		}
-		if strings.Contains(tt.keys, "\r") && m.flight == nil {
-			t.Errorf("%s: no request was in flight", tt.name)
+		// q canceled the request in flight, which Run waited for: whether
+		// its end came in before the program did is up to the scheduler.
+		if canceled := m.result != nil && m.result.Error != nil && m.result.Error.Kind == core.KindCanceled; strings.Contains(tt.keys, "\r") &&
+			m.flight == nil && !canceled {
+			t.Errorf("%s: no request was in flight: %+v", tt.name, m.result)
 		}
 		if p != nil && !strings.Contains(string(p.Stack), "tui.(*Model).refresh") {
 			t.Errorf("the panic's stack is not where it happened:\n%s", p.Stack)
@@ -304,7 +307,7 @@ func TestRunCopy(t *testing.T) {
 	fx := newFixture(t)
 	in, keys := io.Pipe()
 	out := &syncBuffer{}
-	m, err := New(Options{Path: fx.dir, Env: "test", Transport: exec.Transport{Total: time.Minute}, MaxBody: 1 << 20, Input: in, Output: out})
+	m, err := New(Options{Path: fx.dir, Env: "test", Transport: exec.Transport{Total: time.Minute}, MaxBody: 1 << 20, Secrets: fx.secrets, Input: in, Output: out})
 	if err != nil {
 		t.Fatal(err)
 	}

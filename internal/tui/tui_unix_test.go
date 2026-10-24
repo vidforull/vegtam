@@ -23,7 +23,7 @@ func TestPreviewFIFO(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fx.dir, "piped.http"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m := newModel(t, fx.dir, "test", 100, 30)
+	m := fx.model(t, "test", 100, 30)
 	i := slices.IndexFunc(m.rows, func(r row) bool { return r.index >= 0 && r.file.Requests[r.index].Name == "piped" })
 	if i < 0 {
 		t.Fatal("no request piped")

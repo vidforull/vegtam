@@ -31,22 +31,32 @@ type Error struct {
 	Variables []string      // unresolved names, for KindVariable
 	Phase     string        // what a KindTimeout ended: PhaseConnect, PhaseRead or PhaseTotal; "" if not known
 	Confirm   *Confirmation // what a KindConfirm asks for
+	// Secret is the first secret that the request would send to an origin
+	// it is not bound to, for the KindPolicy or KindConfirm of that.
+	Secret *Bound
 }
 
 // Confirmation is what a request that is not sent without a confirmation
 // asks for.
 type Confirmation struct {
-	Reason string // ReasonMethod or ReasonNote
+	Reason string // ReasonMethod, ReasonNote or ReasonSecret
 	Method string
 	URL    string  // as written, its placeholders unresolved
 	Note   *string // the text of its @note, which may be empty; nil if it has none
 	Flag   string  // what confirms it, such as --confirm=api.http#create
+	// Secret is the first secret that the request would send to an origin
+	// it is not bound to, whatever the reason; nil for none.
+	Secret *Bound
 }
 
 // Why a request needs a confirmation.
 const (
 	ReasonMethod = "method" // its method may change something, and no person is at a terminal
 	ReasonNote   = "note"   // it has an @note, which asks a person to confirm it
+	// ReasonSecret: it would send a secret to an origin the secret is not
+	// bound to, and a person at a terminal may confirm that; without one,
+	// nothing does.
+	ReasonSecret = "secret"
 )
 
 // Errorf returns an *Error of kind k at src.

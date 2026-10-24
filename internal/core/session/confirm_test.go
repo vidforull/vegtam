@@ -87,7 +87,7 @@ func confirmFile(t *testing.T) (f *core.File, got func() []string) {
 		"###\n# @name drop\nDELETE {{host}}/items/{{secret}}\n"
 	files := map[string]string{
 		"api.http": src, "http-client.env.json": `{"test": {"host": "` + srv.URL + `"}}`,
-		"http-client.private.env.json": `{"test": {"secret": "c0nfirm-s3cret"}}`,
+		"http-client.private.env.json": `{"test": {"secret": "c0nfirm-s3cret", "$allow": {"secret": ["` + srv.URL + `"]}}}`,
 	}
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {

@@ -288,7 +288,7 @@ func TestGuardRun(t *testing.T) {
 		{"no policy", "", false, echo, exitPolicy},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := os.WriteFile(filepath.Join(fx.config, policy.PolicyFile), []byte(tt.policy), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(fx.config, policy.PolicyFile), []byte(fx.policy(tt.policy)), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if tt.policy == "" {
@@ -307,7 +307,13 @@ func TestGuardRun(t *testing.T) {
 				validateJSON(t, stdout)
 				var doc struct{ Error docError }
 				decode(t, stdout, &doc)
-				if doc.Error.Kind != "policy" || !strings.Contains(doc.Error.Message, "is private (loopback), and no person is at a terminal; allow it in policy: network.allow") {
+				want := "is private (loopback), and no person is at a terminal; allow it in policy: network.allow"
+				if tt.policy == "" {
+					// Without a policy, {{$env VEGTAM_TEST_KEY}} is bound to no
+					// origin, which is refused before the address is.
+					want = "secret {{$env VEGTAM_TEST_KEY}} may not go to " + fx.host + ": it is bound to no origin"
+				}
+				if doc.Error.Kind != "policy" || !strings.Contains(doc.Error.Message, want) {
 					t.Errorf("error %+v", doc.Error)
 				}
 			}
@@ -317,6 +323,16 @@ func TestGuardRun(t *testing.T) {
 				}
 			}
 		})
+	}
+	// Without a policy, a request whose secrets may go there is refused
+	// for its address.
+	if err := os.WriteFile(fx.path("guard.http"), []byte("GET {{host}}/echo?key={{token}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := runCLI(t, false, "run", fx.path("guard.http"), "-e", "test")
+	if code != exitPolicy || !strings.Contains(stderr, "is private (loopback), and no person is at a terminal; allow it in policy: network.allow") ||
+		strings.Contains(stdout+stderr, privateSecret) {
+		t.Errorf("no policy, {{token}} alone = %d\n%s\n%s", code, stdout, stderr)
 	}
 }
 
@@ -473,7 +489,7 @@ func TestInsecureHosts(t *testing.T) {
 	fx := newFixture(t)
 	file := fx.transportFile(t)
 	tlsHost := strings.TrimPrefix(fx.env(t, "tls"), "https://")
-	writePolicy(t, `{"network": {"allow": ["127.0.0.1"], "insecure_hosts": ["`+tlsHost+`"]}}`)
+	writePolicy(t, fx.policy(`{"network": {"allow": ["127.0.0.1"], "insecure_hosts": ["`+tlsHost+`"]}}`))
 	code, stdout, stderr := runCLI(t, false, "run", file+"#untrusted", "-e", "test", "--insecure")
 	if code != exitOK || !strings.Contains(stdout, `"tls_verified":false`) ||
 		!strings.Contains(stderr, "warning: --insecure: the certificates of "+tlsHost+" are not checked, as the policy allows (network.insecure_hosts)") {
@@ -526,8 +542,8 @@ func TestHostTLSPolicy(t *testing.T) {
 	file := fx.transportFile(t)
 	cert, key := clientCert(t, t.TempDir())
 	tlsHost, mtlsHost := strings.TrimPrefix(fx.env(t, "tls"), "https://"), strings.TrimPrefix(fx.env(t, "mtls"), "https://")
-	writePolicy(t, fmt.Sprintf(`{"network": {"allow": ["127.0.0.1"]}, "hosts": {%q: {"cacert": %q}, %q: {"cacert": %q, "cert": %q, "key": %q}}}`,
-		tlsHost, fx.ca, mtlsHost, fx.ca, cert, key))
+	writePolicy(t, fx.policy(fmt.Sprintf(`{"network": {"allow": ["127.0.0.1"]}, "hosts": {%q: {"cacert": %q}, %q: {"cacert": %q, "cert": %q, "key": %q}}}`,
+		tlsHost, fx.ca, mtlsHost, fx.ca, cert, key)))
 	for _, tt := range []struct {
 		ref  string
 		code int
@@ -541,20 +557,20 @@ func TestHostTLSPolicy(t *testing.T) {
 		}
 	}
 	// The certificate of one origin is not offered to the other.
-	writePolicy(t, fmt.Sprintf(`{"network": {"allow": ["127.0.0.1"]}, "hosts": {%q: {"cacert": %q, "cert": %q, "key": %q}, %q: {"cacert": %q}}}`,
-		tlsHost, fx.ca, cert, key, mtlsHost, fx.ca))
+	writePolicy(t, fx.policy(fmt.Sprintf(`{"network": {"allow": ["127.0.0.1"]}, "hosts": {%q: {"cacert": %q, "cert": %q, "key": %q}, %q: {"cacert": %q}}}`,
+		tlsHost, fx.ca, cert, key, mtlsHost, fx.ca)))
 	if code, _, stderr := runCLI(t, false, "run", file+"#mtls", "-e", "test"); code != exitNetwork || !strings.Contains(stderr, "certificate required") {
 		t.Errorf("the certificate of another origin = %d, %s", code, stderr)
 	}
 	// The CA of one origin is not trusted for the other.
-	writePolicy(t, fmt.Sprintf(`{"network": {"allow": ["127.0.0.1"]}, "hosts": {%q: {"cacert": %q}}}`, tlsHost, fx.ca))
+	writePolicy(t, fx.policy(fmt.Sprintf(`{"network": {"allow": ["127.0.0.1"]}, "hosts": {%q: {"cacert": %q}}}`, tlsHost, fx.ca)))
 	if code, _, stderr := runCLI(t, false, "run", file+"#mtls", "-e", "test"); code != exitNetwork || !strings.Contains(stderr, "unknown authority") {
 		t.Errorf("another origin = %d, %s", code, stderr)
 	}
 	if err := os.Chmod(key, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	writePolicy(t, fmt.Sprintf(`{"hosts": {%q: {"cert": %q, "key": %q}}}`, mtlsHost, cert, key))
+	writePolicy(t, fx.policy(fmt.Sprintf(`{"hosts": {%q: {"cert": %q, "key": %q}}}`, mtlsHost, cert, key)))
 	if code, _, stderr := runCLI(t, false, "run", file+"#mtls", "-e", "test"); code != exitPolicy || !strings.Contains(stderr, "others can read the key") {
 		t.Errorf("a key others can read = %d, %s", code, stderr)
 	}
@@ -581,6 +597,7 @@ func TestProxyAuth(t *testing.T) {
 	if err := os.WriteFile(fx.path("proxied.http"), []byte("GET http://192.0.2.1/x?key={{token}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fx.allow(t, "http://192.0.2.1")
 	writePolicy(t, `{"network": {"proxy": "`+proxy.URL+`", "proxy_auth": "$env VEGTAM_TEST_PROXY_AUTH"}}`)
 	t.Setenv("VEGTAM_TEST_PROXY_AUTH", credentials)
 	forms := []string{"Pr0xy/P4ss+word", base64.StdEncoding.EncodeToString([]byte(credentials)), url.QueryEscape("Pr0xy/P4ss+word"), url.PathEscape("Pr0xy/P4ss+word")}
@@ -660,6 +677,7 @@ func TestRouteFlags(t *testing.T) {
 	if err := os.WriteFile(fx.path("routed.http"), []byte("GET http://api.example.test:"+port+"/echo?key={{token}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fx.allow(t, "http://api.example.test:"+port) // the origin is the name, wherever it is routed
 	resolve := "api.example.test:" + port + ":127.0.0.1"
 	connect := "api.example.test:" + port + ":127.0.0.1:"
 	run := []string{"run", fx.path("routed.http") + "#1", "-e", "test"}
@@ -717,6 +735,7 @@ func TestUnixSocketFlag(t *testing.T) {
 	if err := os.WriteFile(fx.path("socket.http"), []byte("GET http://docker/echo?key={{token}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fx.allow(t, "http://docker")
 	run := []string{"run", fx.path("socket.http") + "#1", "-e", "test"}
 	for _, tt := range []struct {
 		name     string

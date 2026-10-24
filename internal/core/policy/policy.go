@@ -33,8 +33,18 @@ type Policy struct {
 	Found    bool
 	Limits   Limits
 	Network  Network
-	Hosts    []Host   // by origin
+	Hosts    []Host // by origin
+	Secrets  Secrets
 	Warnings []string // about the file itself
+}
+
+// Secrets are the origins that the values of {{$env NAME}} and
+// {{$cmd NAME}} may go to, by NAME, each as core.Origin writes it. A
+// value whose NAME they leave out goes nowhere, unless the private
+// environment file binds it ($allow).
+type Secrets struct {
+	Env map[string][]string // by environment variable
+	Cmd map[string][]string // by command, of any command file
 }
 
 // Limits are ceilings on the time limits of a request: on the flags, and
@@ -233,11 +243,23 @@ type file struct {
 		UnixSockets   []string `json:"unix_sockets"`
 		Confirm       string   `json:"confirm"`
 	} `json:"network"`
-	Hosts map[string]struct {
-		CACert string `json:"cacert"`
-		Cert   string `json:"cert"`
-		Key    string `json:"key"`
-	} `json:"hosts"`
+	Hosts   map[string]fileHost `json:"hosts"`
+	Secrets fileSecrets         `json:"secrets"`
+}
+
+// fileHost is the TLS of one host in the policy's file.
+type fileHost struct {
+	CACert string `json:"cacert"`
+	Cert   string `json:"cert"`
+	Key    string `json:"key"`
+}
+
+// fileSecrets are the origins that the values of {{$env NAME}} and
+// {{$cmd NAME}} may go to, by NAME, in the policy's file:
+// {"env": {"API_TOKEN": ["https://api.example.com"]}, "cmd": {"TOKEN": [...]}}.
+type fileSecrets struct {
+	Env map[string][]string `json:"env"`
+	Cmd map[string][]string `json:"cmd"`
 }
 
 // Parse parses b, the contents of the policy file at path.
@@ -298,15 +320,74 @@ func Parse(path string, b []byte) (*Policy, error) {
 			return nil, fail("network.confirm %q: want %q, the default, or %q", n.Confirm, ConfirmMutations, ConfirmNever)
 		}
 	}
-	for _, name := range slices.Sorted(maps.Keys(f.Hosts)) {
-		h := f.Hosts[name]
+	if err := p.hosts(f.Hosts); err != nil {
+		return nil, fail("hosts.%v", err)
+	}
+	if err := p.secrets(f.Secrets.Env, f.Secrets.Cmd); err != nil {
+		return nil, fail("secrets.%v", err)
+	}
+	return p, nil
+}
+
+// hosts sets the hosts of p from the field of the file, in the order of
+// their names.
+func (p *Policy) hosts(hosts map[string]fileHost) error {
+	for _, name := range slices.Sorted(maps.Keys(hosts)) {
+		h := hosts[name]
 		host, err := p.host(name, h.CACert, h.Cert, h.Key)
 		if err != nil {
-			return nil, fail("hosts.%s: %v", name, err)
+			return fmt.Errorf("%s: %w", name, err)
 		}
 		p.Hosts = append(p.Hosts, host)
 	}
-	return p, nil
+	return nil
+}
+
+var envVar = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// secrets sets the secrets of p from the fields of the file; a field
+// left out binds none.
+func (p *Policy) secrets(env, cmd map[string][]string) error {
+	for _, c := range []struct {
+		field string
+		from  map[string][]string
+		to    *map[string][]string
+		valid func(string) bool
+		want  string
+	}{
+		{"env", env, &p.Secrets.Env, envVar.MatchString, "the name of an environment variable, such as API_TOKEN"},
+		{"cmd", cmd, &p.Secrets.Cmd, core.IsVarName, "the name of a command of a command file, such as TOKEN"},
+	} {
+		for _, name := range slices.Sorted(maps.Keys(c.from)) {
+			if !c.valid(name) {
+				return fmt.Errorf("%s: %q: want %s", c.field, name, c.want)
+			}
+			origins, err := parseOrigins(c.from[name])
+			if err != nil {
+				return fmt.Errorf("%s.%s: %w", c.field, name, err)
+			}
+			if *c.to == nil {
+				*c.to = map[string][]string{}
+			}
+			(*c.to)[name] = origins
+		}
+	}
+	return nil
+}
+
+// parseOrigins returns list, origins as a person writes them, as
+// core.Origin writes them, sorted and each once.
+func parseOrigins(list []string) ([]string, error) {
+	origins := make([]string, 0, len(list))
+	for _, s := range list {
+		o, err := core.ParseOrigin(s)
+		if err != nil {
+			return nil, err
+		}
+		origins = append(origins, o)
+	}
+	slices.Sort(origins)
+	return slices.Compact(origins), nil
 }
 
 var envName = regexp.MustCompile(`^\$env ([A-Za-z_][A-Za-z0-9_]*)$`)

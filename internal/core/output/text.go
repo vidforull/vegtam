@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -75,6 +76,103 @@ func WriteRequest(b *strings.Builder, r *Request) {
 		b.WriteString("\n")
 		writeBody(b, r.Body, r.Encoding)
 	}
+}
+
+// WriteSecrets writes the secrets of a request by name, never by value,
+// where each may go, and, for one that may not go where the request goes,
+// that it is refused there, as show -e and a dry run give them, after a
+// blank line if b holds something already:
+//
+//	Secrets:
+//	  {{token}}       https://api.example.com
+//	  {{$env TOKEN}}  bound to no origin; refused for https://exfil.example
+//	  {{session}}     captured from https://login.example.com
+//
+// It writes nothing for a request without secrets.
+func WriteSecrets(b *strings.Builder, secrets []Secret) {
+	if len(secrets) == 0 {
+		return
+	}
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	width := 0
+	for _, s := range secrets {
+		width = max(width, utf8.RuneCountInString(s.Name))
+	}
+	b.WriteString("Secrets:\n")
+	for _, s := range secrets {
+		fmt.Fprintf(b, "  %-*s  %s", width, s.Name, bound(s))
+		if s.Refused() {
+			b.WriteString("; refused for " + s.Origin)
+		}
+		b.WriteString("\n")
+	}
+}
+
+// bound says where s may go.
+func bound(s Secret) string {
+	switch {
+	case s.Captured && len(s.Allowed) > 0:
+		return "captured from " + strings.Join(s.Allowed, ", ")
+	case s.Captured:
+		return "captured from an origin that is not known"
+	case len(s.Allowed) == 0:
+		return "bound to no origin"
+	}
+	return strings.Join(s.Allowed, ", ")
+}
+
+// Refused reports whether s may not go where its request goes, as
+// core.Bound.Refused does.
+func (s Secret) Refused() bool { return s.Origin != "" && !slices.Contains(s.Allowed, s.Origin) }
+
+// SecretWhy says of s, a secret that may not go where its request goes,
+// where it would go and where it may: "{{token}} goes to
+// https://exfil.example, but it may go only to https://api.example.com".
+func SecretWhy(s Secret) string {
+	head := s.Name + " goes to " + cmp.Or(s.Origin, "an origin known only once the request is sent") + ", but "
+	switch {
+	case s.Captured && len(s.Allowed) > 0:
+		return head + "it came from a response of " + strings.Join(s.Allowed, ", ") + " and may go back only there"
+	case s.Captured:
+		return head + "it came from a response whose origin is not known"
+	case len(s.Allowed) == 0:
+		return head + "it is bound to no origin"
+	}
+	return head + "it may go only to " + strings.Join(s.Allowed, ", ")
+}
+
+// WriteConfirm writes c, what sending the request of a dry run would
+// need, in a line after a blank one if b holds something already: the
+// flag that confirms it, and why. The text of an @note comes last, as
+// written: it may hold anything.
+func WriteConfirm(b *strings.Builder, c *Confirm) {
+	if c == nil {
+		return
+	}
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	var why []string
+	if c.Reason == core.ReasonMethod {
+		why = append(why, "its method is not GET, HEAD or OPTIONS, and no person is at a terminal")
+	}
+	if c.Secret != nil {
+		why = append(why, SecretWhy(*c.Secret))
+	}
+	if c.Reason == core.ReasonNote {
+		note := "its @note asks for a person"
+		if c.Note != nil && *c.Note != "" {
+			note += ": " + *c.Note
+		}
+		why = append(why, note)
+	}
+	b.WriteString("sending it needs " + c.Flag)
+	if len(why) > 0 {
+		b.WriteString(": " + strings.Join(why, "; "))
+	}
+	b.WriteString("\n")
 }
 
 // WriteTransport writes what a request is sent with, as a comment line

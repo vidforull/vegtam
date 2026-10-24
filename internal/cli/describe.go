@@ -64,10 +64,13 @@ var errorKinds = []struct {
 	{core.KindNetwork, "DNS, connection, TLS, redirects"},
 	{core.KindTimeout, "a time limit ran out; timeout_phase says which"},
 	{core.KindStatus, "HTTP status 400 or above, with --fail"},
-	{core.KindConfirm, "a request not sent without --confirm: one with an @note, or, without a person at a terminal, " +
-		"one whose method is not GET, HEAD or OPTIONS; error.confirm says what confirms it. Ask a person first"},
+	{core.KindConfirm, "a request not sent without --confirm: one with an @note; without a person at a terminal, " +
+		"one whose method is not GET, HEAD or OPTIONS; with a person at a terminal, one that would send a secret to " +
+		"an origin it is not bound to, which error.secret names; error.confirm says what confirms it. Ask a person first"},
 	{core.KindPolicy, "not allowed: a command file that is not trusted, an address vegtam never connects to or that " +
-		"the policy does not allow, a policy file that cannot be read. Ask a person; do not work around it"},
+		"the policy does not allow, a secret that would go to an origin it is not bound to (error.secret names it; " +
+		"without a person at a terminal, --confirm does not lift it), a policy file that cannot be read. " +
+		"Ask a person; do not work around it"},
 	{core.KindCanceled, "SIGINT or SIGTERM came while a request or a command ran"},
 }
 
@@ -85,6 +88,10 @@ var never = []string{
 	"run a {{$cmd NAME}} whose command file a person has not trusted, or that has changed since",
 	`send without --confirm a request with "# @note", or, with no person at a terminal, one whose method is not GET, HEAD or ` +
 		`OPTIONS; the operator's policy may lift the second, network.confirm "never", and nothing lifts the first`,
+	"send a secret value to an origin it is not bound to: the $allow of http-client.private.env.json binds the file's own " +
+		"values, the operator's policy (secrets) alone binds {{$env NAME}} and {{$cmd NAME}}, a captured value goes back " +
+		"only to the origin of the response it came from, and one bound to none goes nowhere; a person at a terminal may " +
+		"confirm one request that sends it elsewhere, and without a person --confirm does not lift it",
 	"follow a redirect from https to http, or carry Authorization, Cookie, Proxy-Authorization or a header that holds a secret to another origin",
 	"send the proxy's credentials anywhere but to the proxy",
 	"open the terminal interface, or wait for a key, without a terminal",

@@ -51,13 +51,15 @@ type Loader struct {
 	declared map[string]bool     // variables an @capture of a request prepared so far takes
 	captured map[string]captured // the values taken so far
 	lost     map[string]string   // variables whose latest capture took nothing: the request
+	bound    map[string][]string // in a dry run, the origins of the request whose @capture would take each variable
 	taken    []string            // every secret value ever captured, for the masker
 	old      []string            // the secrets read before the last Reload, for the masker
 
 	cmdFiles map[string]*commands // command files read, by path
 	ran      map[string]ran       // what each command gave, by command file path and name
 
-	ssl map[string]envMap // the SSLConfiguration of each environment, by environment file path
+	ssl   map[string]envMap   // the SSLConfiguration of each environment, by environment file path
+	allow map[string]allowMap // the $allow of each environment, by environment file path
 }
 
 // Options configure a Loader.
@@ -73,16 +75,26 @@ type Options struct {
 	// Hidden are environment variables that no {{$env NAME}} may read:
 	// those that hold the proxy's credentials, which go to the proxy alone.
 	Hidden []string
+	// Secrets are the origins the operator's policy binds the values of
+	// {{$env NAME}} and {{$cmd NAME}} to: nothing else binds them.
+	Secrets policy.Secrets
 }
 
 // captured is a value an @capture took.
 type captured struct {
-	value  string
-	secret bool
+	value   string
+	secret  bool
+	origins []string // of the response it came from
 }
 
 // envMap is a parsed environment file: environment -> name -> value.
 type envMap map[string]map[string]string
+
+// allowMap is the $allow of each environment of a file: environment ->
+// secret -> the origins it may go to, sorted, as core.Origin writes them.
+// Of the public environment file, it has the environments that give one,
+// and none of what they give.
+type allowMap map[string]map[string][]string
 
 // NewLoader returns a Loader. Without an environment, only {{$env NAME}}
 // and captured variables resolve.
@@ -90,8 +102,8 @@ func NewLoader(opts Options) *Loader {
 	return &Loader{
 		opts: opts, dirs: map[string]*Vars{}, errs: map[string]error{},
 		files: map[string]envMap{}, process: map[string]string{},
-		declared: map[string]bool{}, captured: map[string]captured{}, lost: map[string]string{},
-		cmdFiles: map[string]*commands{}, ran: map[string]ran{}, ssl: map[string]envMap{},
+		declared: map[string]bool{}, captured: map[string]captured{}, lost: map[string]string{}, bound: map[string][]string{},
+		cmdFiles: map[string]*commands{}, ran: map[string]ran{}, ssl: map[string]envMap{}, allow: map[string]allowMap{},
 	}
 }
 
@@ -132,10 +144,11 @@ func (l *Loader) Reload() {
 // captured last, never to the environment.
 func (l *Loader) Declare(name string) { l.declared[name] = true }
 
-// Capture sets the value of the declared variable name for the requests
-// sent from now on. A secret value is also masked from now on.
-func (l *Loader) Capture(name, value string, secret bool) {
-	l.captured[name] = captured{value, secret}
+// Capture sets the value of the declared variable name, which a response
+// from origins gave, for the requests sent from now on. A secret value is
+// also masked from now on, and goes to those origins alone.
+func (l *Loader) Capture(name, value string, secret bool, origins ...string) {
+	l.captured[name] = captured{value, secret, known(origins)}
 	delete(l.lost, name)
 	if secret {
 		l.taken = append(l.taken, value)
@@ -208,10 +221,13 @@ func (l *Loader) getenv(name string) (string, bool) {
 
 // Vars are the variables visible to the requests of one directory.
 type Vars struct {
-	loader   *Loader
-	dir      string
-	public   map[string]string
-	private  map[string]string
+	loader  *Loader
+	dir     string
+	public  map[string]string
+	private map[string]string
+	// allow are the origins the private environment file binds its
+	// values to ($allow), by variable.
+	allow    map[string][]string
 	cmd      *commands // the command file, once a request needs it
 	cmdErr   error
 	warnings []core.Warning
@@ -240,7 +256,7 @@ func (l *Loader) For(path string) (*Vars, error) {
 }
 
 func (l *Loader) load(dir string) (*Vars, error) {
-	v := &Vars{loader: l, dir: dir, public: map[string]string{}, private: map[string]string{}}
+	v := &Vars{loader: l, dir: dir, public: map[string]string{}, private: map[string]string{}, allow: map[string][]string{}}
 	env := l.opts.Env
 	if env == "" {
 		return v, nil
@@ -253,7 +269,7 @@ func (l *Loader) load(dir string) (*Vars, error) {
 		return nil, core.Errorf(core.KindUsage, core.Source{}, "%v", err)
 	}
 	var found, defined []string
-	selected := false
+	selected, private := false, ""
 	for _, f := range []struct {
 		name string
 		dst  map[string]string
@@ -268,6 +284,11 @@ func (l *Loader) load(dir string) (*Vars, error) {
 		}
 		found = append(found, path)
 		v.warnings = append(v.warnings, sslWarnings(path, l.ssl[path], env)...)
+		if f.name == PublicFile {
+			v.warnings = append(v.warnings, publicAllowWarnings(path, l.allow[path], env)...)
+		} else {
+			private = path
+		}
 		defined = append(defined, slices.Collect(maps.Keys(m))...)
 		maps.Copy(f.dst, m[shared])
 		vars, ok := m[env]
@@ -284,7 +305,38 @@ func (l *Loader) load(dir string) (*Vars, error) {
 		return nil, core.Errorf(core.KindUsage, core.Source{}, "environment %q is not defined in %s (defined: %s)",
 			env, strings.Join(found, ", "), strings.Join(slices.Compact(defined), ", "))
 	}
+	if private != "" {
+		v.warnings = append(v.warnings, v.bind(private, l.allow[private], env)...)
+	}
 	return v, nil
+}
+
+// bind sets the origins that the private environment file at path binds
+// the secrets of env to: those of the $allow of $shared, and then those of
+// env's, which replace them name by name, as its values do. It says which
+// plain name is no variable of the file, and leaves it out.
+func (v *Vars) bind(path string, allow allowMap, env string) []core.Warning {
+	from := map[string]string{} // the environment that binds each name
+	for _, e := range []string{shared, env} {
+		for name, origins := range allow[e] {
+			v.allow[name], from[name] = origins, e
+		}
+	}
+	var ws []core.Warning
+	for _, name := range slices.Sorted(maps.Keys(v.allow)) {
+		var msg string
+		if fn, n, ok := strings.Cut(name, " "); ok {
+			msg = fmt.Sprintf("%s.%s.%s is ignored: {{%s}} is a value of the machine, not of the file, which may have come with the requests; "+
+				"bind it in the policy (secrets.%s.%s)", from[name], allowKey, name, name, strings.TrimPrefix(fn, "$"), n)
+		} else if _, ok := v.private[name]; !ok {
+			msg = fmt.Sprintf("%s.%s.%s: %s is not a variable of the private environment file: ignored", from[name], allowKey, name, name)
+		} else {
+			continue
+		}
+		delete(v.allow, name)
+		ws = append(ws, core.Warning{Source: core.Source{File: path}, Msg: msg})
+	}
+	return ws
 }
 
 // Names returns the environments that the environment files for the
@@ -328,7 +380,9 @@ func nearest(dir, name string) string {
 }
 
 // read parses the environment file at path: {"<env>": {"<name>": value}}
-// with string, number or boolean values.
+// with string, number or boolean values. Neither SSLConfiguration nor
+// $allow is a variable; the $allow of the private environment file must
+// be as parseAllow wants it, and that of the public one is not read.
 func (l *Loader) read(path string) (envMap, error) {
 	if m, ok := l.files[path]; ok {
 		return m, nil
@@ -346,10 +400,19 @@ func (l *Loader) read(path string) (envMap, error) {
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fail("%v", err)
 	}
-	m, ssl := envMap{}, envMap{}
+	m, ssl, allow := envMap{}, envMap{}, allowMap{}
+	private := filepath.Base(path) == PrivateFile
 	for env, vars := range raw {
 		m[env] = map[string]string{}
 		for name, val := range vars {
+			if name == allowKey {
+				a, aerr := parseAllow(env, val, private)
+				if aerr != nil {
+					return nil, fail("%v", aerr)
+				}
+				allow[env] = a
+				continue
+			}
 			if cfg, ok := val.(map[string]any); ok && name == sslConfiguration {
 				ssl[env] = map[string]string{}
 				for k, v := range cfg {
@@ -369,8 +432,96 @@ func (l *Loader) read(path string) (envMap, error) {
 			}
 		}
 	}
-	l.files[path], l.ssl[path] = m, ssl
+	l.files[path], l.ssl[path], l.allow[path] = m, ssl, allow
 	return m, nil
+}
+
+// allowKey is the entry of an environment, in the private environment
+// file, that binds its values to the origins they may go to:
+//
+//	"$allow": {"token": ["https://api.example.com"], "password": []}
+//
+// A value it binds to none, or leaves out, goes nowhere. It may name
+// "$env NAME" and "$cmd NAME" too, which are ignored with a warning: they
+// are the machine's values, which the policy binds, and the file may have
+// come with the requests.
+const allowKey = "$allow"
+
+// parseAllow returns the $allow of env, val as the file gives it, with
+// each origin as core.Origin writes it, sorted and each once. That of the
+// public environment file, which binds nothing, is not read.
+func parseAllow(env string, val any, private bool) (map[string][]string, error) {
+	if !private {
+		return nil, nil
+	}
+	entries, ok := val.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf(`%s.%s: want an object of secrets, each with the origins it may go to, such as {"token": ["https://api.example.com"]}`, env, allowKey)
+	}
+	allow := map[string][]string{}
+	for _, name := range slices.Sorted(maps.Keys(entries)) {
+		if !allowable(name) {
+			return nil, fmt.Errorf(`%s.%s: %q: want a variable name, "$env NAME" or "$cmd NAME"`, env, allowKey, name)
+		}
+		origins, err := parseOrigins(entries[name])
+		if err != nil {
+			return nil, fmt.Errorf("%s.%s.%s: %w", env, allowKey, name, err)
+		}
+		allow[name] = origins
+	}
+	return allow, nil
+}
+
+// parseOrigins returns val, an array of origins as a person writes them,
+// as core.Origin writes them, sorted and each once.
+func parseOrigins(val any) ([]string, error) {
+	const want = `want an array of origins, such as ["https://api.example.com"]`
+	list, ok := val.([]any)
+	if !ok {
+		return nil, errors.New(want)
+	}
+	origins := make([]string, 0, len(list))
+	for _, item := range list {
+		s, ok := item.(string)
+		if !ok {
+			return nil, errors.New(want)
+		}
+		o, err := core.ParseOrigin(s)
+		if err != nil {
+			return nil, err
+		}
+		origins = append(origins, o)
+	}
+	slices.Sort(origins)
+	return slices.Compact(origins), nil
+}
+
+// allowable reports whether name may be written in $allow: a variable,
+// as in {{name}}, or "$env NAME" or "$cmd NAME", as their placeholders
+// name them, which bind is left to say.
+func allowable(name string) bool {
+	if n, ok := strings.CutPrefix(name, "$env "); ok {
+		return envVarName.MatchString(n)
+	}
+	if n, ok := strings.CutPrefix(name, "$cmd "); ok {
+		return core.IsVarName(n)
+	}
+	return core.IsVarName(name)
+}
+
+// publicAllowWarnings says that the $allow the public environment file at
+// path gives $shared and env is not applied: the file comes with the
+// requests, and whoever wrote it may not be the person whose secrets they
+// are.
+func publicAllowWarnings(path string, allow allowMap, env string) []core.Warning {
+	var ws []core.Warning
+	for _, e := range []string{shared, env} {
+		if _, ok := allow[e]; ok {
+			ws = append(ws, core.Warning{Source: core.Source{File: path}, Msg: fmt.Sprintf(
+				"%s.%s is ignored: the public environment file comes with the requests and binds no secret; write it in %s", e, allowKey, PrivateFile)})
+		}
+	}
+	return ws
 }
 
 // sslConfiguration is the setting of JetBrains' environment files for

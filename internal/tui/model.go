@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,7 +36,7 @@ const (
 	browsing  mode = iota
 	searching      // typing the search
 	choosingEnv
-	confirming // asks before sending a request that may change something
+	confirming // asks before sending a request that needs a confirmation
 	helping
 )
 
@@ -60,11 +61,13 @@ type Model struct {
 	envs   []string // to choose from; "" is none
 	choice int
 
-	send     *session.Session
-	declared []string          // what send has declared, as of when it was last idle
-	lost     map[string]string // and what it has lost
-	dry      *session.Session  // the dry run that previews the selected request
-	job      *session.Job      // the selected request, as dry prepared it
+	send      *session.Session
+	declared  []string            // what send has declared, as of when it was last idle
+	plainVars []string            // and which of those a plain @capture takes
+	lost      map[string]string   // and what it has lost
+	bound     map[string][]string // and the origins each secret it captured may go back to
+	dry       *session.Session    // the dry run that previews the selected request
+	job       *session.Job        // the selected request, as dry prepared it
 	// The secrets of the sessions of earlier environments and of earlier
 	// dry runs, and of send as of when it was last idle. masker joins
 	// them with those of dry, for everything View shows.
@@ -82,6 +85,10 @@ type Model struct {
 	base     string // the absolute directory of opts.Path, which the history's refs are shown from
 	now      func() time.Time
 	asked    time.Time // when the question before sending was asked
+	question string    // what it asks, not yet cleaned
+	// refusal is the secret that the session refused to send, when the
+	// question follows that refusal; nil otherwise.
+	refusal *output.Secret
 
 	preview *output.Result // the selected request as it would be sent, or what stops it
 	result  *output.Result // the latest response
@@ -209,11 +216,21 @@ func (m *Model) key(k tea.KeyPressMsg) tea.Cmd {
 			return nil
 		}
 		m.mode = browsing
-		if key.Matches(k, m.keys.Send) {
-			return m.sendSelected(true)
+		if !key.Matches(k, m.keys.Send) {
+			m.note = "not sent"
+			return nil
 		}
-		m.note = "not sent"
-		return nil
+		// The session reads the files again before it sends, and the
+		// confirmation lets the request's secrets go where it goes then: if
+		// the files now say otherwise than the question did, it is asked
+		// again.
+		m.refresh()
+		if q := m.questionText(); q != m.question {
+			m.mode, m.asked, m.question = confirming, m.now(), q
+			m.note = "the request has changed: enter again to send it"
+			return nil
+		}
+		return m.sendSelected(true)
 	case helping:
 		switch {
 		case key.Matches(k, m.keys.Quit):
@@ -419,7 +436,10 @@ func (m *Model) match() []int {
 
 // confirmSend sends the selected request, or asks first if it needs a
 // confirmation: the session sends nothing that needs one unless told
-// that a person gave it (see session.Confirm).
+// that a person gave it (see session.Confirm). Whether a request would
+// send a secret to an origin the secret is not bound to is known for sure
+// only once the session resolves it to send it: the session refuses it
+// then, before anything is sent, and the interface asks (see askSecret).
 func (m *Model) confirmSend() tea.Cmd {
 	r := m.rows[m.cursor]
 	switch {
@@ -432,9 +452,76 @@ func (m *Model) confirmSend() tea.Cmd {
 	case session.Confirm{}.Needs(r.file.Requests[r.index]) == "":
 		return m.sendSelected(false)
 	default:
-		m.mode, m.asked = confirming, m.now()
+		// The confirmation lets its secrets go where it goes too: the
+		// question says where, as the files say now.
+		m.refresh()
+		m.ask(nil)
 	}
 	return nil
+}
+
+// ask asks whether to send the selected request; refusal is the secret
+// that the session has just refused to send with it, or nil.
+func (m *Model) ask(refusal *output.Secret) {
+	m.mode, m.asked, m.refusal = confirming, m.now(), refusal
+	m.question = m.questionText()
+}
+
+// askSecret asks whether to send the request of row, which the session
+// has refused to send for refusal, a secret that would go to an origin it
+// is not bound to: a person may send it there this once. It asks only if
+// the request is still selected, and shown, and nothing else is open;
+// otherwise the response pane shows the refusal, and enter on the request
+// asks.
+func (m *Model) askSecret(row int, refusal *output.Secret) {
+	if m.mode != browsing || m.runsOpen || m.cursor != row || !slices.Contains(m.shown, row) {
+		return
+	}
+	m.ask(refusal)
+}
+
+// questionText returns the question before sending the selected request:
+// its method and ref; each secret that it would send to an origin the
+// secret is not bound to, as the preview gives them, or else the one the
+// session refused; and the text of its @note. The secrets come before the
+// note, which is text from the file: a long one must not push them out of
+// the box.
+func (m *Model) questionText() string {
+	r := m.rows[m.cursor]
+	req := r.file.Requests[r.index]
+	var b strings.Builder
+	fmt.Fprintf(&b, "Send %s %s?\n\n", req.Method, output.Ref(r.file, r.index))
+	var why, late []string
+	if m.dry != nil && m.job != nil {
+		// Compared before they are masked: two origins may mask alike.
+		for _, s := range m.dry.Bindings(m.job) {
+			switch {
+			case s.Refused():
+				why = append(why, output.SecretWhy(*output.NewSecret(&s, m.masker))+".")
+			case s.Origin == "":
+				late = append(late, s.Name)
+			}
+		}
+	}
+	switch {
+	case m.refusal != nil && len(why) == 0: // the preview cannot tell where it goes; the session could
+		why = []string{output.SecretWhy(*m.refusal) + "."}
+	case m.refusal == nil && len(late) > 0:
+		// A command or a capture gives where it goes, and a confirmation
+		// lets its secrets go there, whatever it is.
+		why = append(why, "Where it goes is known only once it is sent, and "+strings.Join(late, ", ")+
+			" would go there with it, wherever that is.")
+	}
+	if len(why) > 0 {
+		b.WriteString(strings.Join(why, "\n") + "\n\n")
+	}
+	// The text of its @note, from the file: clean masks it and shows what
+	// would drive the terminal as escapes.
+	if note, ok := req.Note(); ok && note != "" {
+		b.WriteString(note + "\n\n")
+	}
+	b.WriteString("enter sends it, any other key does not.")
+	return b.String()
 }
 
 // copyCurl copies the selected request as a curl command, with the
@@ -495,15 +582,15 @@ func (m *Model) chooseEnv(name string) {
 	m.past = m.past.Join(m.send.Masker())
 	m.env = name
 	m.send = session.New(m.sessionOptions(false))
-	m.declared, m.lost, m.sent, m.result = nil, nil, nil, nil
+	m.declared, m.plainVars, m.lost, m.bound, m.sent, m.result = nil, nil, nil, nil, nil, nil
 	m.refresh()
 	m.showResponse()
 }
 
 // refresh resolves the selected request again, as it would be sent next:
 // a dry run, in which the variables that the session has captured are
-// placeholders, and those it has lost are errors, as they would be when
-// sent.
+// placeholders, those it has lost are errors, as they would be when sent,
+// and the secrets it has captured may go back where they came from.
 func (m *Model) refresh() {
 	// What the dry run read stays masked once it previews something else.
 	m.past = m.past.Join(masker(m.dry))
@@ -516,8 +603,12 @@ func (m *Model) refresh() {
 	default:
 		m.dry = session.New(m.sessionOptions(true))
 		m.dry.Declare(m.declared...)
+		m.dry.DeclarePlain(m.plainVars...)
 		for name, ref := range m.lost {
 			m.dry.Forget(name, ref)
+		}
+		for name, origins := range m.bound {
+			m.dry.Bind(name, origins...)
 		}
 		m.job = m.dry.Prepare(m.ctx, r.file, r.index)
 		m.preview = m.dry.Run(m.ctx, m.job)

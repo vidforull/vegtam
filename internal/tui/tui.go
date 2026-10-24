@@ -30,8 +30,11 @@ type Options struct {
 	MaxBody   int64
 	UserAgent string
 	History   *history.Log // what the requests sent go into, and h lists; nil for none
-	Input     io.Reader    // a terminal
-	Output    io.Writer    // a terminal
+	// Secrets are the origins the operator's policy lets the values of
+	// {{$env NAME}} and {{$cmd NAME}} go to.
+	Secrets policy.Secrets
+	Input   io.Reader // a terminal
+	Output  io.Writer // a terminal
 }
 
 // Panic is a panic inside the interface. Bubble Tea would print its value
@@ -140,11 +143,15 @@ func (m *Model) start(ctx context.Context, stop context.CancelFunc) {
 	m.showResponse()
 }
 
+// sessionOptions returns the options of a session of the interface: the
+// one that sends, or the dry run of a preview. A person is at the
+// terminal, who may confirm that a request sends a secret where it is not
+// bound; nothing is confirmed until they are asked (see confirmSend).
 func (m *Model) sessionOptions(dryRun bool) session.Options {
 	o := m.opts
 	return session.Options{
 		Env: m.env, DryRun: dryRun, Trust: o.Trust, Transport: o.Transport, MaxBody: o.MaxBody, UserAgent: o.UserAgent, History: o.History,
-		EnvHint: "e chooses one",
+		EnvHint: "e chooses one", Secrets: o.Secrets, Confirm: session.Confirm{Person: true},
 	}
 }
 
@@ -159,6 +166,7 @@ func (m *Model) Masker() *core.Masker {
 // done is closed.
 type flight struct {
 	ref    string
+	row    int // of the request in the tree
 	cancel context.CancelFunc
 	done   chan struct{}
 	result *output.Result
@@ -184,7 +192,7 @@ func (m *Model) sendSelected(confirmed bool) tea.Cmd {
 		m.send.ConfirmOnce(r.file, r.index)
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
-	fl := &flight{ref: output.Ref(r.file, r.index), cancel: cancel, done: make(chan struct{})}
+	fl := &flight{ref: output.Ref(r.file, r.index), row: m.cursor, cancel: cancel, done: make(chan struct{})}
 	go fl.send(ctx, m.send, r)
 	// Once it runs, Run waits for it: a panic from here on cannot leave
 	// Run waiting for a goroutine that never started.
@@ -210,15 +218,23 @@ func (fl *flight) send(ctx context.Context, s *session.Session, r row) {
 }
 
 // answered takes back the session from the request that has ended, and
-// shows its result.
+// shows its result. If the session refused to send it, for a secret that
+// would go to an origin the secret is not bound to, it asks whether to
+// send it all the same (see askSecret).
 func (m *Model) answered(msg sentMsg) {
 	msg.flight.cancel()
 	m.flight, m.result, m.note = nil, msg.flight.result, ""
-	m.declared, m.lost, m.sent = m.send.Declared(), m.send.Lost(), m.send.Masker()
+	m.declared, m.plainVars, m.lost, m.bound, m.sent = m.send.Declared(), m.send.Plain(), m.send.Lost(), m.send.Bound(), m.send.Masker()
 	if err := m.send.HistoryError(); err != nil {
 		m.note = "history: " + err.Error()
 	}
 	m.refresh()
 	m.showResponse()
 	m.response.GotoTop()
+	if m.result == nil || m.result.Error == nil {
+		return
+	}
+	if e := m.result.Error; e.Kind == core.KindConfirm && e.Confirm != nil && e.Confirm.Reason == core.ReasonSecret {
+		m.askSecret(msg.flight.row, e.Secret)
+	}
 }

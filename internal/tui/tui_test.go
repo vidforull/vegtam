@@ -25,6 +25,7 @@ import (
 	"github.com/vidforull/vegtam/internal/core/env"
 	vexec "github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/history"
+	"github.com/vidforull/vegtam/internal/core/policy"
 )
 
 func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
@@ -43,6 +44,10 @@ type fixture struct {
 	dir  string
 	host string
 
+	// secrets are what the operator's policy says of the secrets of the
+	// fixture: where {{$env VEGTAM_TEST_KEY}} may go.
+	secrets policy.Secrets
+
 	mu        sync.Mutex
 	seen      []string // the paths the server was asked for
 	noSession bool     // the sign-in hands out no session
@@ -59,9 +64,14 @@ func newFixture(t *testing.T) *fixture {
 	if err := os.CopyFS(fx.dir, os.DirFS("../../testdata/tui")); err != nil {
 		t.Fatal(err)
 	}
-	envs := map[string]map[string]map[string]string{
+	// The secrets may go to the servers of the fixture, as the person
+	// whose secrets they are allows them to: the private file's value in
+	// its $allow, the environment variable in the policy (see model).
+	origins := []string{srv.URL, closed.URL}
+	fx.secrets = policy.Secrets{Env: map[string][]string{"VEGTAM_TEST_KEY": origins}}
+	envs := map[string]map[string]map[string]any{
 		"http-client.env.json":         {"test": {"host": srv.URL, "closed": closed.URL}, "other": {"host": srv.URL}},
-		"http-client.private.env.json": {"test": {"token": privateSecret}},
+		"http-client.private.env.json": {"test": {"token": privateSecret, "$allow": map[string][]string{"token": origins}}},
 	}
 	for name, v := range envs {
 		b, _ := json.Marshal(v)
@@ -132,6 +142,16 @@ func (fx *fixture) asked() []string {
 func newModel(t *testing.T, path, envName string, width, height int) *Model {
 	t.Helper()
 	return open(t, Options{Path: path, Env: envName, Transport: vexec.Transport{Total: 5 * time.Second}, MaxBody: 1 << 20, UserAgent: "vegtam/test"}, width, height)
+}
+
+// model returns the interface on the fixture, ready as Run would make it
+// with the operator's policy of the fixture, on a terminal of the given
+// size.
+func (fx *fixture) model(t *testing.T, envName string, width, height int) *Model {
+	t.Helper()
+	return open(t, Options{
+		Path: fx.dir, Env: envName, Transport: vexec.Transport{Total: 5 * time.Second}, MaxBody: 1 << 20, UserAgent: "vegtam/test", Secrets: fx.secrets,
+	}, width, height)
 }
 
 // open returns the interface with opts, ready as Run would make it, on
@@ -209,7 +229,7 @@ func view(m *Model) string { return m.View().Content }
 
 func TestNavigation(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 100, 30)
+	m := fx.model(t, "", 100, 30)
 	if r := m.rows[m.cursor]; r.index != 0 || !strings.Contains(m.requestText(), "GET {{host}}/echo?key={{token}}") {
 		t.Fatalf("the first request is not selected and shown as written:\n%s", view(m))
 	}
@@ -255,7 +275,7 @@ func TestNavigation(t *testing.T) {
 
 func TestEnvironment(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 100, 30)
+	m := fx.model(t, "", 100, 30)
 	press(m, "e")
 	if m.mode != choosingEnv || strings.Join(m.envs, ",") != ",other,test" || !strings.Contains(view(m), "(none)") {
 		t.Fatalf("e: mode %d, environments %q\n%s", m.mode, m.envs, view(m))
@@ -276,7 +296,7 @@ func TestEnvironment(t *testing.T) {
 // question is refused, and the server gets nothing.
 func TestSendNeedsConfirmation(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 150, 40)
+	m := fx.model(t, "test", 150, 40)
 	goTo(t, m, "create")
 	run(m, m.sendSelected(false))
 	if got := fx.asked(); len(got) != 0 || m.result == nil || m.result.Error == nil || m.result.Error.Kind != core.KindConfirm {
@@ -297,7 +317,7 @@ func TestSendNote(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fx.dir, "note.http"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m := newModel(t, fx.dir, "test", 150, 40)
+	m := fx.model(t, "test", 150, 40)
 	goTo(t, m, "noted")
 	press(m, "enter")
 	v := view(m)
@@ -313,7 +333,7 @@ func TestSendNote(t *testing.T) {
 
 func TestSend(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 150, 40)
+	m := fx.model(t, "test", 150, 40)
 	press(m, "enter")
 	if m.result == nil || m.result.Response == nil || !strings.Contains(view(m), "HTTP/1.1 200 OK") ||
 		!strings.Contains(m.responseText(), "✓ status == 200") {
@@ -401,7 +421,7 @@ func TestSend(t *testing.T) {
 
 func TestCancel(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 100, 30)
+	m := fx.model(t, "test", 100, 30)
 	goTo(t, m, "slow")
 	_, cmd := m.Update(keyMsg("enter"))
 	if cmd == nil || m.flight == nil || !strings.Contains(view(m), "sending; esc cancels") {
@@ -434,7 +454,7 @@ func TestCancel(t *testing.T) {
 func TestLayouts(t *testing.T) {
 	fx := newFixture(t)
 	for _, sz := range []size{{40, 16}, {60, 24}, {80, 24}, {100, 30}, {139, 40}, {140, 40}, {200, 60}} {
-		m := newModel(t, fx.dir, "test", sz.w, sz.h)
+		m := fx.model(t, "test", sz.w, sz.h)
 		press(m, "enter")
 		lines := strings.Split(view(m), "\n")
 		if len(lines) != sz.h {
@@ -452,7 +472,7 @@ func TestLayouts(t *testing.T) {
 // of a request ends the program with the panic kept for Run.
 func TestPanic(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 100, 30)
+	m := fx.model(t, "", 100, 30)
 	m.rows = nil
 	if _, cmd := m.Update(keyMsg("j")); m.panicked == nil || cmd == nil {
 		t.Fatal("a panic in Update: nothing kept, or no quit")
@@ -460,7 +480,7 @@ func TestPanic(t *testing.T) {
 		t.Error("a panic in Update does not quit")
 	}
 
-	m = newModel(t, fx.dir, "", 100, 30)
+	m = fx.model(t, "", 100, 30)
 	stopped := false
 	m.stop = func() { stopped = true }
 	m.rows, m.mode = nil, confirming
@@ -470,7 +490,7 @@ func TestPanic(t *testing.T) {
 
 	// Before the request's goroutine starts, the panic leaves no request
 	// in flight for Run to wait for.
-	m = newModel(t, fx.dir, "test", 100, 30)
+	m = fx.model(t, "test", 100, 30)
 	m.send = nil
 	if _, cmd := m.Update(keyMsg("enter")); m.panicked == nil || cmd == nil || m.flight != nil {
 		t.Errorf("a panic before sending: kept %v, flight %v", m.panicked, m.flight)
@@ -480,7 +500,7 @@ func TestPanic(t *testing.T) {
 	fl := &flight{done: make(chan struct{})}
 	fl.send(t.Context(), nil, m.rows[1])
 	<-fl.done
-	m = newModel(t, fx.dir, "test", 100, 30)
+	m = fx.model(t, "test", 100, 30)
 	if _, quit := m.Update(panicMsg{fl.panic}); fl.panic == nil || m.panicked != fl.panic || quit == nil {
 		t.Error("a panic in the request's goroutine: nothing kept, or no quit")
 	}
@@ -504,7 +524,7 @@ func shownLabels(m *Model) []string {
 
 func TestSearch(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 100, 30)
+	m := fx.model(t, "test", 100, 30)
 	press(m, "tab", "/")
 	if m.mode != searching || m.focus != treePane {
 		t.Fatalf("/: mode %d, focus %d", m.mode, m.focus)
@@ -564,7 +584,7 @@ func styled(c env.Class, p string) string { return placeholderStyles[c].Render(p
 // value, which the preview shows as the error that sending would give.
 func TestHighlight(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 150, 40)
+	m := fx.model(t, "", 150, 40)
 	text := m.request.GetContent()
 	for _, want := range []string{
 		"GET " + styled(env.Unresolved, "{{host}}") + "/echo?key=" + styled(env.Unresolved, "{{token}}") +
@@ -634,7 +654,7 @@ func clipboard(cmd tea.Cmd) (string, bool) {
 // as the comment says, it gives curl the request that vegtam sends.
 func TestCopyCurl(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 150, 40)
+	m := fx.model(t, "test", 150, 40)
 	goTo(t, m, "everywhere")
 	_, cmd := m.Update(keyMsg("y"))
 	got, ok := clipboard(cmd)
@@ -693,14 +713,14 @@ func TestCopyCurl(t *testing.T) {
 	if _, ok = yank(m); ok || !strings.Contains(view(m), "select a request to copy it") {
 		t.Errorf("y on a file:\n%s", view(m))
 	}
-	m = newModel(t, fx.dir, "", 150, 40)
+	m = fx.model(t, "", 150, 40)
 	if _, ok = yank(m); ok || !strings.Contains(view(m), "not copied: unresolved variables: host, token") {
 		t.Errorf("y without an environment:\n%s", view(m))
 	}
 
 	// Nor while a request is in flight: esc would cancel it, not hide
 	// the command.
-	m = newModel(t, fx.dir, "test", 150, 40)
+	m = fx.model(t, "test", 150, 40)
 	goTo(t, m, "slow")
 	_, sent := m.Update(keyMsg("enter"))
 	if _, ok = yank(m); ok || m.curl != "" || !strings.Contains(view(m), "Sending ") {
@@ -716,7 +736,7 @@ func TestCopyCurl(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(fx.dir, "literal.http"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m = newModel(t, fx.dir, "test", 150, 40)
+	m = fx.model(t, "test", 150, 40)
 	goTo(t, m, "literal")
 	if got, ok = yank(m); ok || m.curl != "" || m.note != "not copied: a secret value is in the request outside a placeholder, in header X-Copy" {
 		t.Errorf("y with a secret in the text: %q\n%s", got, view(m))
@@ -740,7 +760,7 @@ func TestPastSecrets(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fx.dir, "literal.http"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m := newModel(t, fx.dir, "test", 150, 40) // the preview of echo reads the private file
+	m := fx.model(t, "test", 150, 40) // the preview of echo reads the private file
 	press(m, "e", "k", "enter")
 	if m.env != "other" {
 		t.Fatalf("env %q", m.env)
@@ -765,7 +785,7 @@ func yank(m *Model) (string, bool) {
 // depth 1, from depth 2, then all of it again, for the next response too.
 func TestFold(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 150, 40)
+	m := fx.model(t, "test", 150, 40)
 	press(m, "enter")
 	full := m.response.GetContent()
 	if !strings.Contains(full, "\"echo\": {\n    \"authorization\": \"Bearer ***\",") {
@@ -823,7 +843,7 @@ func TestFold(t *testing.T) {
 func TestStatusLine(t *testing.T) {
 	fx := newFixture(t)
 	for _, w := range []int{12, 20, 30, 40, 60, 72, 73, 80, 100, 160} {
-		m := newModel(t, fx.dir, "test", w, 24)
+		m := fx.model(t, "test", w, 24)
 		m.note = "a note long enough not to fit beside the keys of any terminal this test tries"
 		line := sgr.ReplaceAllString(m.statusLine(), "")
 		if got := lipgloss.Width(line); got != w {
@@ -857,7 +877,7 @@ func TestStatusLineInsecure(t *testing.T) {
 			t.Errorf("%d columns: %q", w, line)
 		}
 	}
-	if line := newModel(t, fx.dir, "", 100, 24).statusLine(); strings.Contains(line, "INSECURE") {
+	if line := fx.model(t, "", 100, 24).statusLine(); strings.Contains(line, "INSECURE") {
 		t.Errorf("without --insecure: %q", line)
 	}
 }
@@ -866,7 +886,7 @@ func TestStatusLineInsecure(t *testing.T) {
 // screen and draw it again, over what something else wrote on it.
 func TestRedraw(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 100, 30)
+	m := fx.model(t, "", 100, 30)
 	for _, mode := range []mode{browsing, searching, helping} {
 		m.mode = mode
 		_, cmd := m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
@@ -881,13 +901,13 @@ func TestRedraw(t *testing.T) {
 // in the tree.
 func TestHistory(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "test", 150, 40)
+	m := fx.model(t, "test", 150, 40)
 	if press(m, "h"); m.runsOpen || !strings.Contains(view(m), "no history: it is turned off") {
 		t.Errorf("h without a history:\n%s", view(m))
 	}
 
 	log := history.New(filepath.Join(t.TempDir(), "vegtam"))
-	m = open(t, Options{Path: fx.dir, Env: "test", Transport: vexec.Transport{Total: 5 * time.Second}, MaxBody: 1 << 20, History: log}, 150, 40)
+	m = open(t, Options{Path: fx.dir, Env: "test", Transport: vexec.Transport{Total: 5 * time.Second}, MaxBody: 1 << 20, History: log, Secrets: fx.secrets}, 150, 40)
 	if press(m, "h"); !m.runsOpen || !strings.Contains(view(m), "History") || !strings.Contains(view(m), "no runs yet") ||
 		!strings.Contains(m.responseText(), "No runs yet") {
 		t.Errorf("h before any run:\n%s", view(m))
@@ -998,7 +1018,7 @@ func TestHistory(t *testing.T) {
 	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m = open(t, Options{Path: fx.dir, Env: "test", Transport: vexec.Transport{Total: 5 * time.Second}, MaxBody: 1 << 20, History: history.New(blocked)}, 150, 40)
+	m = open(t, Options{Path: fx.dir, Env: "test", Transport: vexec.Transport{Total: 5 * time.Second}, MaxBody: 1 << 20, History: history.New(blocked), Secrets: fx.secrets}, 150, 40)
 	press(m, "enter")
 	if m.result.Error != nil || !strings.Contains(m.statusLine(), "history: ") {
 		t.Errorf("with no place for the history: %+v\n%s", m.result.Error, m.statusLine())
@@ -1010,7 +1030,7 @@ func TestHistory(t *testing.T) {
 func TestHelpScrolls(t *testing.T) {
 	fx := newFixture(t)
 	for _, sz := range []size{{40, 16}, {60, 24}, {80, 24}, {150, 40}} {
-		m := newModel(t, fx.dir, "test", sz.w, sz.h)
+		m := fx.model(t, "test", sz.w, sz.h)
 		press(m, "?")
 		lines := strings.Split(sgr.ReplaceAllString(view(m), ""), "\n")
 		if len(lines) != sz.h || !strings.HasPrefix(lines[sz.h-2], "╰") {
@@ -1037,7 +1057,7 @@ func TestHelpScrolls(t *testing.T) {
 // mark shows the selected line of the list.
 func TestPlainTerminal(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 100, 30)
+	m := fx.model(t, "", 100, 30)
 	goTo(t, m, "create")
 	m.Update(tea.ColorProfileMsg{Profile: colorprofile.NoTTY})
 	v := sgr.ReplaceAllString(view(m), "")
@@ -1058,7 +1078,7 @@ func TestPlainTerminal(t *testing.T) {
 // of an unresolved variable points to e, not to -e.
 func TestNoEnvironmentHint(t *testing.T) {
 	fx := newFixture(t)
-	m := newModel(t, fx.dir, "", 100, 30)
+	m := fx.model(t, "", 100, 30)
 	goTo(t, m, "echo")
 	if text := m.requestText(); !strings.Contains(text, "(no environment selected; e chooses one)") || strings.Contains(text, "-e") {
 		t.Errorf("preview:\n%s", text)

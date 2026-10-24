@@ -20,8 +20,14 @@ type Confirm struct {
 	// a confirmation, unless it has an @note: a person at a terminal runs
 	// it, or the operator's policy lets a run without one do so.
 	Mutations bool
-	All       bool     // every request is confirmed
-	Requests  []string // the requests confirmed, each as Key names it
+	// Person is set when a person at a terminal runs the session. A
+	// request that would send a secret to an origin the secret is not
+	// bound to then needs their confirmation; without a person, nothing
+	// confirms it, and it is an error of kind policy: whoever wrote the
+	// file leads a program, and a confirmation would come from them too.
+	Person   bool
+	All      bool     // every request is confirmed
+	Requests []string // the requests confirmed, each as Key names it
 }
 
 // safe are the methods that need no confirmation. Any other does, one
@@ -61,19 +67,35 @@ func (s *Session) ConfirmOnce(f *core.File, i int) {
 	}
 }
 
-// ask returns what the i-th request of f, whose ref is ref, needs before
-// it is sent, or nil if it needs no confirmation or has one. A
-// confirmation of ConfirmOnce is used up.
-func (s *Session) ask(f *core.File, i int, ref string) *core.Confirmation {
-	r, c := f.Requests[i], s.opts.Confirm
+// confirmed reports whether the i-th request of f has a confirmation, of
+// the run or of ConfirmOnce, which is used up; and whether the
+// confirmation names it: one of --confirm=<ref> or of ConfirmOnce. Only
+// such a one lets a secret go where it is not bound: --confirm alone is
+// given for a run, before its requests are seen, whose files someone
+// else may have named, with a comma that --confirm=<ref> cannot hold.
+func (s *Session) confirmed(f *core.File, i int) (confirmed, named bool) {
+	c := s.opts.Confirm
 	key, err := Key(f.Path, i)
 	once := err == nil && s.once[key]
 	delete(s.once, key)
-	reason := c.Needs(r)
-	switch {
-	case reason == "", c.All, once, err == nil && slices.Contains(c.Requests, key):
+	named = once || err == nil && slices.Contains(c.Requests, key)
+	return named || c.All, named
+}
+
+// ask returns what the i-th request of f, whose ref is ref, needs before
+// it is sent, or nil if it needs no confirmation or confirmed says it has
+// one.
+func (s *Session) ask(f *core.File, i int, ref string, confirmed bool) *core.Confirmation {
+	r := f.Requests[i]
+	reason := s.opts.Confirm.Needs(r)
+	if reason == "" || confirmed {
 		return nil
 	}
+	return confirmation(r, ref, reason)
+}
+
+// confirmation returns what r, whose ref is ref, asks for, for reason.
+func confirmation(r *core.Request, ref, reason string) *core.Confirmation {
 	// The ref as the run names it; --confirm splits its value at commas.
 	flag := "--confirm=" + ref
 	if strings.Contains(ref, ",") {
@@ -102,6 +124,30 @@ func refused(r *core.Request, c *core.Confirmation) error {
 	default:
 		e = core.Errorf(core.KindConfirm, r.Source, "%s %s is not sent without a confirmation, which its @note asks for (%s sends it): %s",
 			c.Method, c.URL, c.Flag, *c.Note)
+	}
+	e.Confirm = c
+	return e
+}
+
+// unbound returns the error of the request of j, which would send the
+// secrets refused to an origin they are not bound to: with a person at a
+// terminal, of kind confirm, which --confirm=<ref> gives; without one, of
+// kind policy, which nothing but binding them lifts.
+func (s *Session) unbound(j *Job, refused []core.Bound) *core.Error {
+	r := j.Request
+	what := r.Method + " " + r.URL + " is not sent"
+	if !s.opts.Confirm.Person {
+		return core.SecretError(core.KindPolicy, r.Source, what, refused)
+	}
+	c := confirmation(r, j.Ref, core.ReasonSecret)
+	c.Secret = &refused[0]
+	e := core.SecretError(core.KindConfirm, r.Source, what+" without a confirmation", refused)
+	if strings.Contains(j.Ref, ",") {
+		// --confirm=<ref> would split the ref, and --confirm alone does not do.
+		c.Flag = ""
+		e.Msg += "; a request in a file whose name holds a comma cannot be named by --confirm=<ref>: bind the secret, or send it from vegtam tui"
+	} else {
+		e.Msg += "; or " + c.Flag + " sends it this once"
 	}
 	e.Confirm = c
 	return e

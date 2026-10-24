@@ -1,7 +1,9 @@
 package output
 
 import (
+	"maps"
 	"net/url"
+	"slices"
 
 	"github.com/vidforull/vegtam/internal/core/netguard"
 	"github.com/vidforull/vegtam/internal/core/policy"
@@ -17,6 +19,7 @@ type Policy struct {
 	Limits   *PolicyLimits  `json:"limits,omitempty"`
 	Network  *PolicyNetwork `json:"network,omitempty"`
 	Hosts    []PolicyHost   `json:"hosts,omitempty"`
+	Secrets  []Secret       `json:"secrets,omitempty"` // {{$env NAME}} and {{$cmd NAME}}, with the origins the policy binds them to
 	Run      PolicyRun      `json:"run"`
 	Never    []string       `json:"never"` // the addresses vegtam never connects to
 	Warnings []Warning      `json:"warnings,omitempty"`
@@ -93,6 +96,15 @@ func NewPolicy(p *policy.Policy, run PolicyRun) *Policy {
 	}
 	for _, h := range p.Hosts {
 		out.Hosts = append(out.Hosts, PolicyHost{Host: h.Name, Origin: h.Origin, CACert: h.CACert, Cert: h.Cert, Key: h.Key})
+	}
+	// By placeholder, those of {{$env NAME}} first; never a value.
+	for _, c := range []struct {
+		fn      string
+		origins map[string][]string
+	}{{"$env", p.Secrets.Env}, {"$cmd", p.Secrets.Cmd}} {
+		for _, name := range slices.Sorted(maps.Keys(c.origins)) {
+			out.Secrets = append(out.Secrets, Secret{Name: "{{" + c.fn + " " + name + "}}", Allowed: append([]string{}, c.origins[name]...)})
+		}
 	}
 	return out
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
+	"github.com/vidforull/vegtam/internal/core/policy"
 )
 
 const (
@@ -336,7 +337,7 @@ func TestReload(t *testing.T) {
 	path := tree(t, "GET https://{{host}}/{{user}}?t={{token}}")
 	l := NewLoader(Options{Env: "dev"})
 	l.Declare("user")
-	l.Capture("user", "7", false)
+	l.Capture("user", "7", false, "https://api.example.test")
 	if p, err := prepare(t, l, path); err != nil || p.URL.Masked() != "https://api.example.test/{{user}}?t={{token}}" {
 		t.Fatalf("before = %v, %v", p, err)
 	}
@@ -400,8 +401,8 @@ Authorization: Bearer {{token}}
 		!strings.HasSuffix(err.Error(), "not captured: user (an earlier request took no value), token (an earlier request took no value)") {
 		t.Errorf("Fill before the captures = %v", err)
 	}
-	l.Capture("token", "c4ptured-t0ken", true)
-	l.Capture("user", "7", false)
+	l.Capture("token", "c4ptured-t0ken", true, "https://api.example.test")
+	l.Capture("user", "7", false, "https://api.example.test")
 	p, err := l.Fill(after)
 	if err != nil {
 		t.Fatal(err)
@@ -504,5 +505,309 @@ func TestFillDryRun(t *testing.T) {
 	if e, ok := errors.AsType[*core.Error](err); !ok || !slices.Equal(e.Variables, []string{"token"}) ||
 		!strings.HasSuffix(e.Msg, "not captured: token (a.http#login took no value)") {
 		t.Errorf("Fill in a dry run after Forget = %v", err)
+	}
+}
+
+// loadDev returns the variables of the environment dev for a .http file
+// in dir, with opts.
+func loadDev(t *testing.T, dir string, opts Options) (*Loader, *Vars) {
+	t.Helper()
+	opts.Env = "dev"
+	l := NewLoader(opts)
+	v := l.must(t, filepath.Join(dir, "a.http"))
+	return l, v
+}
+
+// messages returns what the warnings say, each after the file it is of.
+func messages(t *testing.T, ws []core.Warning, file string) []string {
+	t.Helper()
+	var got []string
+	for _, w := range ws {
+		if w.Source.File != file {
+			t.Errorf("warning %q: of %s, want %s", w.Msg, w.Source.File, file)
+		}
+		got = append(got, w.Msg)
+	}
+	return got
+}
+
+// TestAllow checks that the $allow of the private environment file binds
+// its secrets as $shared and the selected environment give it, the
+// environment's entry for a name replacing that of $shared, each origin
+// as core.Origin writes it, sorted and each once; and that it does not
+// bind {{$env NAME}} nor {{$cmd NAME}}, which are the machine's.
+func TestAllow(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		PublicFile: `{"dev": {"host": "api.example.com"}}`,
+		PrivateFile: `{
+  "$shared": {"token": "shared-t0ken",
+              "$allow": {"token": ["https://shared.example"], "password": ["https://auth.example.com:8443"],
+                         "$env API_TOKEN": ["https://api.example.com"]}},
+  "dev": {"token": "dev-t0ken", "password": "pa55word", "nowhere": "n0where",
+          "$allow": {"token": ["https://API.Example.com:443/", "https://api.example.com", "http://127.0.0.1:8080", "https://auth.example.com.:8443"],
+                     "nowhere": [], "$cmd TOKEN": ["https://api.example.com/"]}},
+  "prod": {"$allow": {"token": ["https://prod.example"]}}
+}`,
+	})
+	_, v := loadDev(t, dir, Options{})
+	want := map[string][]string{
+		"token":    {"http://127.0.0.1:8080", "https://api.example.com", "https://auth.example.com:8443"},
+		"password": {"https://auth.example.com:8443"},
+		"nowhere":  {},
+	}
+	if !maps.EqualFunc(v.allow, want, slices.Equal) {
+		t.Errorf("allow = %q\nwant    %q", v.allow, want)
+	}
+	machine := []string{
+		"dev.$allow.$cmd TOKEN is ignored: {{$cmd TOKEN}} is a value of the machine, not of the file, which may have come with the requests; " +
+			"bind it in the policy (secrets.cmd.TOKEN)",
+		"$shared.$allow.$env API_TOKEN is ignored: {{$env API_TOKEN}} is a value of the machine, not of the file, which may have come with the requests; " +
+			"bind it in the policy (secrets.env.API_TOKEN)",
+	}
+	if got := messages(t, v.Warnings(), filepath.Join(dir, PrivateFile)); !slices.Equal(got, machine) {
+		t.Errorf("warnings = %q", got)
+	}
+	// prod has no password: what $shared binds it to is no matter there.
+	prod, err := NewLoader(Options{Env: "prod"}).For(filepath.Join(dir, "a.http"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = map[string][]string{"token": {"https://prod.example"}}
+	if !maps.EqualFunc(prod.allow, want, slices.Equal) {
+		t.Errorf("allow of prod = %q\nwant            %q", prod.allow, want)
+	}
+	if got := messages(t, prod.Warnings(), filepath.Join(dir, PrivateFile)); !slices.Equal(got, []string{
+		machine[1], "$shared.$allow.password: password is not a variable of the private environment file: ignored",
+	}) {
+		t.Errorf("warnings of prod = %q", got)
+	}
+}
+
+// TestAllowReload checks that a reloaded loader binds secrets as the
+// private environment file binds them then.
+func TestAllowReload(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{PrivateFile: `{"dev": {"token": "t0ken", "$allow": {"token": ["https://old.example"]}}}`})
+	l, v := loadDev(t, dir, Options{})
+	writeFiles(t, dir, map[string]string{PrivateFile: `{"dev": {"token": "t0ken", "$allow": {"token": ["https://new.example"]}}}`})
+	l.Reload()
+	if got := l.must(t, filepath.Join(dir, "a.http")).SecretOrigins(core.Secret{Name: "token"}); !slices.Equal(got, []string{"https://new.example"}) {
+		t.Errorf("after Reload, token goes to %q", got)
+	}
+	if got := v.SecretOrigins(core.Secret{Name: "token"}); !slices.Equal(got, []string{"https://old.example"}) {
+		t.Errorf("the variables read before Reload changed: %q", got)
+	}
+}
+
+func TestAllowErrors(t *testing.T) {
+	want := func(s string) string {
+		return `dev.$allow.token: "` + s + `": want an origin, such as https://api.example.com or http://127.0.0.1:8080`
+	}
+	array := `dev.$allow.token: want an array of origins, such as ["https://api.example.com"]`
+	key := `: want a variable name, "$env NAME" or "$cmd NAME"`
+	for allow, msg := range map[string]string{
+		`{"token": ["api.example.com"]}`:              want("api.example.com"),
+		`{"token": ["*"]}`:                            want("*"),
+		`{"token": ["https://*.example.com"]}`:        `dev.$allow.token: "https://*.example.com": a secret goes to origins named one by one; a wildcard names none`,
+		`{"token": ["https://*"]}`:                    `dev.$allow.token: "https://*": a secret goes to origins named one by one`,
+		`{"token": ["https://api.example.com/v1"]}`:   want("https://api.example.com/v1"),
+		`{"token": ["https://api.example.com?x=1"]}`:  want("https://api.example.com?x=1"),
+		`{"token": ["https://api.example.com?"]}`:     want("https://api.example.com?"),
+		`{"token": ["https://api.example.com#top"]}`:  want("https://api.example.com#top"),
+		`{"token": ["https://me@api.example.com"]}`:   want("https://me@api.example.com"),
+		`{"token": ["https://api.example.com:0"]}`:    want("https://api.example.com:0"),
+		`{"token": ["https://api.example.com:"]}`:     want("https://api.example.com:"),
+		`{"token": ["https://api.example.com:1e3"]}`:  want("https://api.example.com:1e3"),
+		`{"token": ["ftp://api.example.com"]}`:        want("ftp://api.example.com"),
+		`{"token": ["https:api.example.com"]}`:        want("https:api.example.com"),
+		`{"token": ["https://"]}`:                     want("https://"),
+		`{"token": [""]}`:                             want(""),
+		`{"token": ["https://api.example.com", "x"]}`: want("x"),
+		`{"token": "https://api.example.com"}`:        array,
+		`{"token": [1]}`:                              array,
+		`{"token": null}`:                             array,
+		`{"token": {"origin": "https://a.example"}}`:  array,
+		`{"x y": []}`:                                 `dev.$allow: "x y"` + key,
+		`{"": []}`:                                    `dev.$allow: ""` + key,
+		`{"$env": []}`:                                `dev.$allow: "$env"` + key,
+		`{"$env 1X": []}`:                             `dev.$allow: "$env 1X"` + key,
+		`{"$env a.b": []}`:                            `dev.$allow: "$env a.b"` + key,
+		`{"$env  X": []}`:                             `dev.$allow: "$env  X"` + key,
+		`{"$cmd a b": []}`:                            `dev.$allow: "$cmd a b"` + key,
+		`{"$uuid x": []}`:                             `dev.$allow: "$uuid x"` + key,
+		`["token"]`:                                   `dev.$allow: want an object of secrets, each with the origins it may go to`,
+		`"https://api.example.com"`:                   `dev.$allow: want an object of secrets`,
+	} {
+		dir := t.TempDir()
+		writeFiles(t, dir, map[string]string{PrivateFile: `{"dev": {"token": "t0ken", "$allow": ` + allow + `}}`})
+		_, err := NewLoader(Options{Env: "dev"}).For(filepath.Join(dir, "a.http"))
+		e, ok := errors.AsType[*core.Error](err)
+		if !ok || e.Kind != core.KindParse || e.Source.File != filepath.Join(dir, PrivateFile) || !strings.HasPrefix(e.Msg, msg) {
+			t.Errorf("$allow %s: %v; want a parse error of the private file: %s", allow, err, msg)
+		}
+	}
+	// That of $shared, and that of an environment not selected, as a value
+	// of either would be.
+	for src, msg := range map[string]string{
+		`{"$shared": {"$allow": {"token": ["x"]}}, "dev": {}}`: `$shared.$allow.token: "x": want an origin`,
+		`{"dev": {}, "prod": {"$allow": {"token": ["x"]}}}`:    `prod.$allow.token: "x": want an origin`,
+	} {
+		dir := t.TempDir()
+		writeFiles(t, dir, map[string]string{PrivateFile: src})
+		if _, err := NewLoader(Options{Env: "dev"}).For(filepath.Join(dir, "a.http")); !isKind(err, core.KindParse) || !strings.Contains(err.Error(), msg) {
+			t.Errorf("%s: %v; want a parse error with %q", src, err, msg)
+		}
+		if _, err := Names(filepath.Join(dir, "a.http")); !isKind(err, core.KindParse) {
+			t.Errorf("Names with %s: %v; want a parse error", src, err)
+		}
+	}
+}
+
+// TestAllowIsNoVariable checks that $allow, in either file, is not a
+// variable: neither {{$allow}} nor any environment's.
+func TestAllowIsNoVariable(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		PublicFile:  `{"dev": {"$allow": {}}}`,
+		PrivateFile: `{"$shared": {"$allow": {}}, "dev": {"token": "t0ken", "$allow": {"token": ["https://api.example.com"]}}}`,
+		"a.http":    "GET https://api.example.com/?a={{$allow}}&t={{token}}",
+	})
+	path := filepath.Join(dir, "a.http")
+	if names, err := Names(path); err != nil || !slices.Equal(names, []string{"dev"}) {
+		t.Errorf("Names = %q, %v", names, err)
+	}
+	_, v := loadDev(t, dir, Options{})
+	if _, ok := v.private[allowKey]; ok {
+		t.Error("$allow is a private variable")
+	}
+	if _, ok := v.public[allowKey]; ok {
+		t.Error("$allow is a public variable")
+	}
+	f, err := httpfile.ParseFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.Classes(f.Requests[0]); !maps.Equal(got, map[string]Class{"{{$allow}}": Unresolved, "{{token}}": Secret}) {
+		t.Errorf("Classes = %v", got)
+	}
+	if _, err = v.Prepare(t.Context(), f.Requests[0]); !isKind(err, core.KindVariable) ||
+		!strings.Contains(err.Error(), "{{$allow}}: unknown dynamic variable $allow") {
+		t.Errorf("Prepare = %v", err)
+	}
+	_, err = NewLoader(Options{Env: "staging"}).For(path)
+	if e, ok := errors.AsType[*core.Error](err); !ok || !strings.HasSuffix(e.Msg, "(defined: dev)") {
+		t.Errorf("an environment not defined: %v; want the list of dev alone", err)
+	}
+}
+
+// TestAllowPublic checks that the public environment file binds no
+// secret: its $allow, whatever it holds, is ignored, with a warning for
+// $shared and the selected environment.
+func TestAllowPublic(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		PublicFile: `{"$shared": {"$allow": {"token": ["https://exfil.example"]}},
+			"dev": {"host": "https://exfil.example", "$allow": {"token": ["*"], "x y": "no array"}},
+			"prod": {"$allow": "anything"}}`,
+		PrivateFile: `{"dev": {"token": "t0ken"}}`,
+	})
+	_, v := loadDev(t, dir, Options{})
+	got := messages(t, v.Warnings(), filepath.Join(dir, PublicFile))
+	want := []string{
+		"$shared.$allow is ignored: the public environment file comes with the requests and binds no secret; write it in http-client.private.env.json",
+		"dev.$allow is ignored: the public environment file comes with the requests and binds no secret; write it in http-client.private.env.json",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("warnings =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if len(v.allow) > 0 || v.SecretOrigins(core.Secret{Name: "token"}) != nil {
+		t.Errorf("the public file binds %q", v.allow)
+	}
+	if names, err := Names(filepath.Join(dir, "a.http")); err != nil || !slices.Equal(names, []string{"dev", "prod"}) {
+		t.Errorf("Names = %q, %v", names, err)
+	}
+}
+
+// TestAllowNotAVariable checks that a name the private environment file
+// binds but does not define is ignored, with a warning: a public value is
+// no secret, and is sent as it is.
+func TestAllowNotAVariable(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		PublicFile: `{"dev": {"host": "api.example.com"}}`,
+		PrivateFile: `{"$shared": {"$allow": {"user": ["https://api.example.com"]}},
+			"dev": {"token": "t0ken", "$allow": {"host": ["https://api.example.com"], "token": ["https://api.example.com"],
+				"$env UNSET_ANYWHERE": ["https://api.example.com"], "$cmd NONE": []}}}`,
+	})
+	_, v := loadDev(t, dir, Options{})
+	got := messages(t, v.Warnings(), filepath.Join(dir, PrivateFile))
+	want := []string{
+		"dev.$allow.$cmd NONE is ignored: {{$cmd NONE}} is a value of the machine, not of the file, which may have come with the requests; " +
+			"bind it in the policy (secrets.cmd.NONE)",
+		"dev.$allow.$env UNSET_ANYWHERE is ignored: {{$env UNSET_ANYWHERE}} is a value of the machine, not of the file, which may have come with the requests; " +
+			"bind it in the policy (secrets.env.UNSET_ANYWHERE)",
+		"dev.$allow.host: host is not a variable of the private environment file: ignored",
+		"$shared.$allow.user: user is not a variable of the private environment file: ignored",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("warnings =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if keys := slices.Sorted(maps.Keys(v.allow)); !slices.Equal(keys, []string{"token"}) {
+		t.Errorf("allow binds %q", keys)
+	}
+}
+
+// TestSecretOrigins checks where each kind of secret may go: a value of
+// the private file where its $allow says, {{$env NAME}} and {{$cmd NAME}}
+// where the policy alone says, a captured one back where it came from.
+func TestSecretOrigins(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{PrivateFile: `{"dev": {"token": "t0ken", "loose": "l00se",
+		"$allow": {"token": ["https://api.example.com"], "$env API_TOKEN": ["https://api.example.com"], "$cmd TOKEN": ["https://b.example"]}}}`})
+	secrets := policy.Secrets{
+		Env: map[string][]string{"API_TOKEN": {"https://api.example.com", "https://a.example"}, "OTHER": {"https://o.example"}, "token": {"https://policy.example"}},
+		Cmd: map[string][]string{"TOKEN": {"https://a.example"}, "loose": {"https://policy.example"}},
+	}
+	l, v := loadDev(t, dir, Options{Secrets: secrets})
+	l.Capture("session", "s3ss10n", true, "https://login.example")
+	l.Capture("anon", "an0n", true, "")
+	l.Bind("token", "https://bound.example") // in a run, no matter
+	for _, tt := range []struct {
+		s    core.Secret
+		want []string
+	}{
+		{core.Secret{Name: "token"}, []string{"https://api.example.com"}}, // the policy binds {{$env token}}, not {{token}}
+		{core.Secret{Name: "loose"}, nil},
+		{core.Secret{Name: "$env API_TOKEN"}, []string{"https://a.example", "https://api.example.com"}}, // the file's $allow adds none
+		{core.Secret{Name: "$env OTHER"}, []string{"https://o.example"}},
+		{core.Secret{Name: "$env NONE"}, nil},
+		{core.Secret{Name: "$cmd TOKEN"}, []string{"https://a.example"}}, // nor https://b.example
+		{core.Secret{Name: "$cmd loose"}, []string{"https://policy.example"}},
+		{core.Secret{Name: "session", Capture: true}, []string{"https://login.example"}},
+		{core.Secret{Name: "anon", Capture: true}, nil},
+		{core.Secret{Name: "token", Capture: true}, nil}, // not captured
+	} {
+		if got := v.SecretOrigins(tt.s); !slices.Equal(got, tt.want) || tt.want == nil && got != nil {
+			t.Errorf("SecretOrigins(%+v) = %q, want %q", tt.s, got, tt.want)
+		}
+	}
+	if got := l.Bound(); !maps.EqualFunc(got, map[string][]string{"session": {"https://login.example"}, "anon": nil}, slices.Equal) {
+		t.Errorf("Bound() = %v", got)
+	}
+
+	// In a dry run, nothing is captured: a value goes where Bind says the
+	// request that captures it goes.
+	d, dv := loadDev(t, dir, Options{DryRun: true})
+	d.Bind("session", "https://login.example")
+	d.Bind("gone", "https://gone.example")
+	d.Bind("gone", "")
+	for name, want := range map[string][]string{"session": {"https://login.example"}, "gone": nil, "other": nil} {
+		if got := dv.SecretOrigins(core.Secret{Name: name, Capture: true}); !slices.Equal(got, want) {
+			t.Errorf("in a dry run, SecretOrigins(%s) = %q, want %q", name, got, want)
+		}
+	}
+	if got := d.Bound(); !maps.EqualFunc(got, map[string][]string{"session": {"https://login.example"}}, slices.Equal) {
+		t.Errorf("Bound() of a dry run = %v", got)
 	}
 }

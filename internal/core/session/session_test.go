@@ -78,7 +78,8 @@ func TestCapturesCarryOver(t *testing.T) {
 }
 
 // TestPreview checks a dry run that declares what a session has: the
-// captured variable is a placeholder rather than unresolved.
+// captured variable is a placeholder rather than unresolved, and goes
+// where the session captured it from.
 func TestPreview(t *testing.T) {
 	f := newFile(t)
 	s := New(Options{Env: "test", MaxBody: 1 << 20, Confirm: Confirm{Mutations: true}})
@@ -94,6 +95,9 @@ func TestPreview(t *testing.T) {
 
 	preview := New(Options{Env: "test", DryRun: true})
 	preview.Declare(s.Declared()...)
+	for name, origins := range s.Bound() {
+		preview.Bind(name, origins...)
+	}
 	j := preview.Prepare(t.Context(), f, 1)
 	res := preview.Run(t.Context(), j)
 	if res.Error != nil || res.Response != nil {
@@ -303,7 +307,7 @@ func TestBasicOneWord(t *testing.T) {
 	files := map[string]string{
 		"api.http":                     "GET " + srv.URL + "/\nAuthorization: Basic {{user}}:{{password}}\n",
 		"http-client.env.json":         `{"test": {"user": "alice"}}`,
-		"http-client.private.env.json": `{"test": {"password": "` + password + `"}}`,
+		"http-client.private.env.json": `{"test": {"password": "` + password + `", "$allow": {"password": ["` + srv.URL + `"]}}}`,
 	}
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {

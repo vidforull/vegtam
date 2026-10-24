@@ -5,6 +5,7 @@ package session
 
 import (
 	"context"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -33,6 +34,9 @@ type Options struct {
 	UserAgent string
 	Fail      bool   // a response status of 400 or above is an error of kind status
 	EnvHint   string // see env.Options
+	// Secrets are the origins the operator's policy lets the values of
+	// {{$env NAME}} and {{$cmd NAME}} go to.
+	Secrets policy.Secrets
 	// History keeps each request sent, outside a dry run, unless it has
 	// an @no-log directive; nil keeps none.
 	History *history.Log
@@ -54,6 +58,7 @@ type Session struct {
 	historyErr error           // why the entry of the latest run was not kept
 	warned     map[string]bool // the warnings of environment files a job has had
 	once       map[string]bool // the requests ConfirmOnce has confirmed, by Key
+	plain      map[string]bool // the variables whose latest @capture says plain
 	// Secret values that no file holds: the latest values of cookies that
 	// responses set, and the credentials of Basic written as user and
 	// password.
@@ -80,7 +85,10 @@ func New(opts Options) *Session {
 		opts:   opts,
 		warned: map[string]bool{},
 		once:   map[string]bool{},
-		loader: env.NewLoader(env.Options{Env: opts.Env, DryRun: opts.DryRun, Trust: opts.Trust, EnvHint: opts.EnvHint, Hidden: opts.Transport.HiddenEnv}),
+		plain:  map[string]bool{},
+		loader: env.NewLoader(env.Options{
+			Env: opts.Env, DryRun: opts.DryRun, Trust: opts.Trust, EnvHint: opts.EnvHint, Hidden: opts.Transport.HiddenEnv, Secrets: opts.Secrets,
+		}),
 		client: exec.New(exec.Options{MaxBody: opts.MaxBody, UserAgent: opts.UserAgent, Transport: opts.Transport}),
 	}
 }
@@ -105,13 +113,28 @@ func (s *Session) Declared() []string { return slices.Clone(s.declared) }
 
 // Declare makes names variables that an @capture takes, as if a request
 // that captures them had been prepared: a preview declares what the
-// session it previews has.
+// session it previews has. Each is a secret, unless DeclarePlain says
+// otherwise after it.
 func (s *Session) Declare(names ...string) {
 	for _, name := range names {
 		s.loader.Declare(name)
+		delete(s.plain, name)
 		if !slices.Contains(s.declared, name) {
 			s.declared = append(s.declared, name)
 		}
+	}
+}
+
+// Plain returns the declared variables whose latest @capture says plain.
+func (s *Session) Plain() []string { return slices.Sorted(maps.Keys(s.plain)) }
+
+// DeclarePlain declares names as Declare does, as variables that a plain
+// @capture takes: in a dry run, which captures nothing, they are no
+// secrets that could go anywhere.
+func (s *Session) DeclarePlain(names ...string) {
+	s.Declare(names...)
+	for _, name := range names {
+		s.plain[name] = true
 	}
 }
 
@@ -124,6 +147,16 @@ func (s *Session) Lost() map[string]string { return s.loader.Lost() }
 // call that uses name is an error of kind variable, in a dry run too. A
 // preview forgets what the session it previews has lost.
 func (s *Session) Forget(name, ref string) { s.loader.Forget(name, ref) }
+
+// Bound returns the origins each captured secret may go to: in a run,
+// those of the response it came from; in a dry run, those of the request
+// whose @capture would take it.
+func (s *Session) Bound() map[string][]string { return s.loader.Bound() }
+
+// Bind binds the variable name, in a dry run, to origins, as if a request
+// that goes there had taken it: a preview binds what the session it
+// previews has captured.
+func (s *Session) Bind(name string, origins ...string) { s.loader.Bind(name, origins...) }
 
 // Reload makes the requests prepared from now on read the environment and
 // command files again and run their commands again, as a new run would,
@@ -142,6 +175,9 @@ type Job struct {
 	captures []string             // the variables its @capture directives take
 	classes  map[string]env.Class // of its placeholders, as it was prepared
 	ask      *core.Confirmation   // what it needs before it is sent; nil for nothing
+	// named is set when a confirmation names the request (see confirmed):
+	// with a person at a terminal, its secrets may then go where it goes.
+	named bool
 }
 
 // Class returns what the placeholder r of the request stands for, as the
@@ -170,7 +206,9 @@ func (s *Session) Prepare(ctx context.Context, f *core.File, i int) *Job {
 		}
 	}
 	j.Warnings = slices.Concat(j.Warnings, j.Request.Warnings, warnings)
-	j.ask = s.ask(f, i, j.Ref)
+	confirmed, named := s.confirmed(f, i)
+	j.named = named
+	j.ask = s.ask(f, i, j.Ref, confirmed)
 	switch {
 	case j.Err != nil:
 	case j.ask != nil && !s.opts.DryRun:
@@ -181,7 +219,11 @@ func (s *Session) Prepare(ctx context.Context, f *core.File, i int) *Job {
 	}
 	_, captures, _ := assert.Directives(j.Request) // the file parsed, so they do
 	for _, c := range captures {
-		s.Declare(c.Name)
+		if c.Secret {
+			s.Declare(c.Name)
+		} else {
+			s.DeclarePlain(c.Name)
+		}
 		j.captures = append(j.captures, c.Name)
 	}
 	return j
@@ -242,6 +284,9 @@ func (s *Session) Run(ctx context.Context, j *Job) *output.Result {
 		if p, err = s.loader.Fill(j.Prepared); err == nil {
 			res.Request = output.Sent(p, s.Masker())
 			err = s.client.Check(ctx, p, j.vars)
+		}
+		if err == nil {
+			err = s.dryOrigins(j, p, res)
 		}
 	default:
 		err = s.send(ctx, j, res)
@@ -355,9 +400,26 @@ func (s *Session) send(ctx context.Context, j *Job, res *output.Result) error {
 	if err != nil {
 		return err
 	}
-	s.basic(p, j.vars)
+	vars := core.Secrets(j.vars)
 	res.Request = output.Sent(p, s.Masker())
-	resp, trace, err := s.client.Do(ctx, p, j.vars)
+	// Refused here, where a person may confirm it; the client refuses it
+	// too, as every hop of a redirect.
+	if origins, known, oerr := p.Origins(vars); oerr == nil && known {
+		var refused []core.Bound
+		for _, o := range origins {
+			refused = append(refused, core.Unbound(p, vars, o)...)
+		}
+		if len(refused) > 0 {
+			if !s.opts.Confirm.Person || !j.named {
+				return s.unbound(j, refused)
+			}
+			for _, o := range origins {
+				vars = core.Grant(vars, o)
+			}
+		}
+	}
+	s.basic(p, vars)
+	resp, trace, err := s.client.Do(ctx, p, vars)
 	if trace != nil {
 		for _, h := range trace.Hops {
 			for _, c := range h.Set {
@@ -370,11 +432,19 @@ func (s *Session) send(ctx context.Context, j *Job, res *output.Result) error {
 		return err
 	}
 	ev := assert.Evaluate(ctx, j.Request, resp)
-	for _, v := range ev.Captured {
-		s.loader.Capture(v.Name, v.Value, v.Secret)
+	m := s.Masker()
+	for i, v := range ev.Captured {
+		// A plain value that holds a secret, as a response that echoes the
+		// request holds it, is that secret still.
+		if !v.Secret && m.Mask(v.Value) != v.Value {
+			c := *v.Capture
+			c.Secret = true
+			ev.Captured[i].Capture, v.Capture = &c, &c
+		}
+		s.loader.Capture(v.Name, v.Value, v.Secret, resp.Origins...)
 	}
 	// A secret is masked in the very response it was captured from.
-	m := s.Masker()
+	m = s.Masker()
 	res.Response = output.NewResponse(resp, m)
 	output.Diagnose(res, trace, m)
 	res.Asserts = output.Checked(ev.Outcomes, m)
@@ -383,4 +453,82 @@ func (s *Session) send(ctx context.Context, j *Job, res *output.Result) error {
 		return core.Errorf(core.KindStatus, j.Request.Source, "HTTP %d %s", resp.Status, resp.Reason)
 	}
 	return ev.Err
+}
+
+// Bindings returns the secrets of the request of j, by name, with the
+// origins each may go to and the origin the request goes to, as far as
+// they are known now; nil for a request that was not resolved.
+func (s *Session) Bindings(j *Job) []core.Bound {
+	if j.Prepared == nil {
+		return nil
+	}
+	p, err := s.loader.Fill(j.Prepared)
+	if err != nil {
+		p = j.Prepared
+	}
+	origins, _, _ := p.Origins(j.vars)
+	return core.Bindings(j.vars, first(origins), s.secretTexts(p)...)
+}
+
+// first returns the first of origins, that of the URL, or "" for none.
+func first(origins []string) string {
+	if len(origins) == 0 {
+		return ""
+	}
+	return origins[0]
+}
+
+// secretTexts returns the texts of p, as core.Bindings takes them, with
+// each variable that a plain @capture takes as literal text: in a dry run,
+// which captures nothing, it stands in for a value that is no secret; in
+// a run, Fill has put the value there already.
+func (s *Session) secretTexts(p *core.Prepared) []core.Text {
+	if !s.opts.DryRun {
+		return p.Texts()
+	}
+	var texts []core.Text
+	for _, t := range p.Texts() {
+		t = slices.Clone(t)
+		for i, seg := range t {
+			if seg.Secret != nil && seg.Secret.Capture && s.plain[seg.Secret.Name] {
+				t[i] = core.Segment{Text: "{{" + seg.Secret.Name + "}}"}
+			}
+		}
+		texts = append(texts, t)
+	}
+	return texts
+}
+
+// dryOrigins says in res what sending p, the request of j, would do with
+// its secrets: where each may go, and, for one that may not go where p
+// goes, the confirmation that a person would give, or the error of kind
+// policy that a run without one gets. The captures of j are bound to
+// where p goes, as a run binds them to where the response comes from.
+func (s *Session) dryOrigins(j *Job, p *core.Prepared, res *output.Result) error {
+	origins, _, err := p.Origins(j.vars)
+	if err != nil {
+		return core.Errorf(core.KindVariable, j.Request.Source, "%v", err)
+	}
+	for _, name := range j.captures {
+		s.loader.Bind(name, origins...)
+	}
+	texts := s.secretTexts(p)
+	bs := core.Bindings(j.vars, first(origins), texts...)
+	m := s.Masker()
+	res.SecretOrigins = output.Bindings(bs, m)
+	refused := core.Refused(bs)
+	for _, o := range origins[min(1, len(origins)):] {
+		refused = append(refused, core.Refused(core.Bindings(j.vars, o, texts...))...)
+	}
+	switch {
+	case len(refused) == 0, s.opts.Confirm.Person && j.named:
+		return nil
+	case !s.opts.Confirm.Person:
+		return s.unbound(j, refused)
+	case res.Confirm != nil:
+		res.Confirm.Secret = output.NewSecret(&refused[0], m)
+	default:
+		res.Confirm = output.NewConfirm(s.unbound(j, refused).Confirm, m)
+	}
+	return nil
 }

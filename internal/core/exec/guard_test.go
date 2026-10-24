@@ -124,7 +124,7 @@ func TestGuardSecretHost(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
 	_, port, _ := net.SplitHostPort(hostOf(srv))
-	s := secrets{"base": "http://localhost:" + port}
+	s := secrets{"base": "http://localhost:" + port}.to("http://localhost:" + port)
 	_, _, err := New(Options{MaxBody: 1, Transport: Transport{Guard: netguard.Rules{Unattended: true}}}).Do(t.Context(), prepared(http.MethodGet, append(secret("base"), lit("/x")...), nil), s)
 	if !isPolicy(err, "address *** is private") {
 		t.Fatalf("%v; want the address hidden", err)

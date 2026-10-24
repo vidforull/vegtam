@@ -23,6 +23,18 @@ func normalize(fx *fixture, s string) string {
 	return regexp.MustCompile(`"total_ms": ?[0-9.]+`).ReplaceAllString(s, `"total_ms":0`)
 }
 
+// allowedText returns the origins the fixture's secrets may go to as the
+// text of a dry run lists them: sorted, those of the hidden hosts masked.
+func (fx *fixture) allowedText() string {
+	origins := slices.Compact(slices.Sorted(slices.Values(fx.origins)))
+	for i, o := range origins {
+		if o == "http://"+fx.hidden || o == "http://"+fx.live {
+			origins[i] = "***"
+		}
+	}
+	return strings.Join(origins, ", ")
+}
+
 func TestRunText(t *testing.T) {
 	fx := newFixture(t)
 	tests := []struct {
@@ -85,6 +97,10 @@ X-Api-Key: {{$env VEGTAM_TEST_KEY}}
 Content-Type: application/json
 
 {"token": "{{token}}", "key": "{{$env VEGTAM_TEST_KEY}}"}
+
+Secrets:
+  {{token}}                 ORIGINS
+  {{$env VEGTAM_TEST_KEY}}  ORIGINS
 `, ""},
 		{"several requests", []string{"run", "more", "--fail", "--max-body", "5"}, exitOK, `### more/plain.http#1
 HTTP/1.1 200 OK (TIME)
@@ -134,7 +150,7 @@ more/plain.http#1  GET     {{host}}/plain
 			}
 			code, stdout, stderr := runCLI(t, true, args...)
 			stderr = port.ReplaceAllString(normalize(fx, stderr), "127.0.0.1:PORT")
-			stdout = normalize(fx, stdout)
+			stdout = normalize(fx, strings.ReplaceAll(stdout, fx.allowedText(), "ORIGINS"))
 			if code != tt.code || stdout != tt.stdout || stderr != tt.stderr {
 				t.Errorf("exit code %d, want %d\nstdout:\n%s\nwant:\n%s\nstderr:\n%s\nwant:\n%s",
 					code, tt.code, stdout, tt.stdout, stderr, tt.stderr)

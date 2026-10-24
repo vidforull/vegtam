@@ -29,6 +29,22 @@ func (s secrets) SecretValue(sec core.Secret) (string, error) {
 	return "", errors.New("no secret " + sec.Name)
 }
 
+// SecretOrigins binds the secrets of s to no origin: a test that sends
+// one binds it with to.
+func (s secrets) SecretOrigins(core.Secret) []string { return nil }
+
+// to returns s with every secret bound to origins, as the private
+// environment file or the operator's policy binds them.
+func (s secrets) to(origins ...string) bound { return bound{s, origins} }
+
+// bound are secrets that may go to origins.
+type bound struct {
+	secrets
+	origins []string
+}
+
+func (b bound) SecretOrigins(core.Secret) []string { return b.origins }
+
 var testSecrets = secrets{"token": "t0ken", "$env KEY": "k3y"}
 
 func lit(s string) core.Text       { return core.Text{{Text: s}} }
@@ -44,12 +60,13 @@ func prepared(method string, url core.Text, body core.Text, headers ...core.Prep
 	}
 }
 
-func do(t *testing.T, opts Options, p *core.Prepared) (*Response, error) {
+// do sends p with testSecrets, which may go to origins.
+func do(t *testing.T, opts Options, p *core.Prepared, origins ...string) (*Response, error) {
 	t.Helper()
 	if opts.MaxBody == 0 {
 		opts.MaxBody = 1 << 20
 	}
-	r, _, err := New(opts).Do(t.Context(), p, testSecrets)
+	r, _, err := New(opts).Do(t.Context(), p, testSecrets.to(origins...))
 	return r, err
 }
 
@@ -64,7 +81,8 @@ func TestDo(t *testing.T) {
 	p := prepared("POST", lit(srv.URL+"/items?a=1"), core.Text{{Text: "token="}, {Secret: &core.Secret{Name: "token"}}},
 		header("Authorization", core.Text{{Text: "Bearer "}, {Secret: &core.Secret{Name: "$env KEY"}}}),
 		header("Host", lit("api.example.test")))
-	r, err := do(t, Options{UserAgent: "vegtam/test"}, p)
+	// The Host header names a second origin, which the secrets are bound to too.
+	r, err := do(t, Options{UserAgent: "vegtam/test"}, p, srv.URL, "http://api.example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +136,9 @@ func TestRedirectDropsSecrets(t *testing.T) {
 		header("Cookie", lit("session=abc")),
 		header("X-Api-Key", secret("$env KEY")),
 		header("Accept", lit("application/json")))
-	if r, err := do(t, Options{}, p); err != nil || r.Status != 200 {
+	// The secrets may go to both origins: the headers that hold them are
+	// dropped on the way to B all the same.
+	if r, err := do(t, Options{}, p, a.URL, b.URL); err != nil || r.Status != 200 {
 		t.Fatalf("Do = %v, %v", r, err)
 	}
 	if h := seen["/same"]; h.Get("Authorization") != "t0ken" || h.Get("Cookie") != "session=abc" || h.Get("X-Api-Key") != "k3y" {
@@ -144,7 +164,7 @@ func TestRedirectDropsSecrets(t *testing.T) {
 	// A Referer of the request's own goes as far as its origin.
 	clear(seen)
 	p.Headers = append(p.Headers, header("Referer", lit("https://app.example.test/page")))
-	if r, err := do(t, Options{}, p); err != nil || r.Status != 200 {
+	if r, err := do(t, Options{}, p, a.URL, b.URL); err != nil || r.Status != 200 {
 		t.Fatalf("Do = %v, %v", r, err)
 	}
 	if got := seen["/same"].Get("Referer"); got != "https://app.example.test/page" {
@@ -197,7 +217,7 @@ func TestRedirectDowngrade(t *testing.T) {
 		prepared(http.MethodGet, lit(secure.URL+"/start"), nil),
 		prepared(http.MethodGet, lit(secure.URL+"/start"), nil, header("Authorization", secret("token"))),
 	} {
-		_, err := do(t, opts, p)
+		_, err := do(t, opts, p, secure.URL)
 		if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != core.KindNetwork || !strings.Contains(e.Msg, "refused a redirect from https to http") {
 			t.Errorf("error = %v, want the redirect to http refused", err)
 		}
@@ -246,7 +266,9 @@ func TestRedirectSecretBody(t *testing.T) {
 		mu.Lock()
 		got = nil
 		mu.Unlock()
-		_, err := do(t, Options{}, prepared(http.MethodPost, lit(first.URL+"/?code="+strconv.Itoa(tt.code)), tt.body))
+		// The secret may go to both origins: the body is not sent again
+		// all the same.
+		_, err := do(t, Options{}, prepared(http.MethodPost, lit(first.URL+"/?code="+strconv.Itoa(tt.code)), tt.body), first.URL, other.URL)
 		mu.Lock()
 		seen := strings.Join(got, "\n")
 		mu.Unlock()
@@ -423,9 +445,12 @@ func TestErrorsHideSecrets(t *testing.T) {
 			base("http://int.example.test:12ab"), core.KindRequest, `invalid URL {{base}}/v1: invalid port "***" after host`,
 		},
 	}
+	// Each secret may go where its request goes: the errors are those of
+	// sending it.
+	allowed := []string{closed.URL, slow.URL, redirect.URL, "http://127.0.0.1:99999", strings.Replace(closed.URL, "127.0.0.1", "localhost", 1)}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := New(Options{MaxBody: 1, Transport: Transport{Total: 100 * time.Millisecond}}).Do(t.Context(), tt.p, tt.secrets)
+			_, _, err := New(Options{MaxBody: 1, Transport: Transport{Total: 100 * time.Millisecond}}).Do(t.Context(), tt.p, tt.secrets.to(allowed...))
 			e, ok := errors.AsType[*core.Error](err)
 			if !ok || e.Kind != tt.kind || !strings.Contains(e.Msg, tt.want) {
 				t.Fatalf("error = %v; want %s error with %q", err, tt.kind, tt.want)
@@ -478,7 +503,7 @@ func TestBasic(t *testing.T) {
 		{auth(append(lit("Basic alice:"), secret("token")...)), "alice:t0ken"},
 		{auth(slices.Concat(lit("Basic "), secret("user"), lit(":x"))), "the user of Basic holds a colon"},
 	} {
-		r, _, err := New(Options{MaxBody: 1 << 20}).Do(t.Context(), prepared(http.MethodGet, lit(srv.URL), nil, tt.h), s)
+		r, _, err := New(Options{MaxBody: 1 << 20}).Do(t.Context(), prepared(http.MethodGet, lit(srv.URL), nil, tt.h), s.to(srv.URL))
 		got := fmt.Sprint(err)
 		if err == nil {
 			got = string(r.Body)
@@ -487,7 +512,7 @@ func TestBasic(t *testing.T) {
 			t.Errorf("%s: %q, want %q", tt.h.Value.Masked(), got, tt.want)
 		}
 	}
-	_, tr, err := New(Options{MaxBody: 1 << 20}).Do(t.Context(), prepared(http.MethodGet, lit(srv.URL+"/moved"), nil, auth(append(lit("Basic alice "), secret("token")...))), s)
+	_, tr, err := New(Options{MaxBody: 1 << 20}).Do(t.Context(), prepared(http.MethodGet, lit(srv.URL+"/moved"), nil, auth(append(lit("Basic alice "), secret("token")...))), s.to(srv.URL))
 	if err != nil || elsewhere.Load() != "" || !slices.Equal(tr.Hops[0].Dropped, []string{"Authorization"}) {
 		t.Errorf("another origin got %q; dropped %v, %v", elsewhere.Load(), tr.Hops[0].Dropped, err)
 	}
