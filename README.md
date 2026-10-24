@@ -117,6 +117,15 @@ file of the example above:
 `vegtam trust`. A redirect to another origin drops every header that
 holds a secret.
 
+Without a person, no secrets. A program runs in your shell as you, and
+reads what you can; so a run without a person reads no secret value,
+and a request that needs one exits with 6 and the command for you to
+run. What it is shown of a response is sterile: `Set-Cookie`, tokens,
+passwords and JWTs are `***`. The policy alone can send such requests
+through a keeper in your terminal instead, and `vegtam doctor` says
+where your secrets are and who can read them
+([docs/AUTOMATION.md](docs/AUTOMATION.md#without-a-person-no-secrets)).
+
 ### Scripts and agents
 
 vegtam treats a run as a program's when stdin or stdout is not a
@@ -129,26 +138,27 @@ addresses, or use `--insecure`, proxies, `--resolve`, `--connect-to`
 and unix sockets. `vegtam describe --json` tells a program all of this.
 
 The dev server above is on loopback, so the operator allows it in the
-policy. A dry run says what to ask a person about, and `--confirm`
-passes on the answer:
+policy. A dry run says what to ask a person about. The sign-in needs
+the password, which a program does not get: it gets the command for
+the person to run instead.
 
 ```console
 $ cat ~/.config/vegtam/policy.json
 {"network": {"allow": ["127.0.0.1:8080"]}}
-$ vegtam run api.http -e dev --dry-run | jq -c '.results[] | [.ref, .confirm.reason]'
-["api.http#login","method"]
-["api.http#me",null]
-$ vegtam run api.http -e dev --confirm=api.http#login | jq -c '.results[] | [.ref, .response.status]'
-["api.http#login",200]
-["api.http#me",200]
+$ vegtam run api.http -e dev --dry-run 2> /dev/null | jq -c '.results[] | [.ref, .confirm.reason, .error.kind]'
+["api.http#login","method","policy"]
+["api.http#me",null,"policy"]
+$ vegtam run api.http#login -e dev --confirm=api.http#login 2> /dev/null | jq -r .error.person_command
+vegtam run 'api.http#login' -e dev
 ```
 
-Without the policy, the run ends with exit code 6 before anything is
-sent. The program should then ask a person, not write the policy:
+Without `network.allow`, a request that needs no secret ends with exit
+code 6 too, before anything is sent. The program should then ask a
+person, not write the policy:
 
 ```console
-$ vegtam run api.http#login -e dev --confirm=api.http#login > /dev/null; echo $?
-vegtam: api.http:4: Post "http://127.0.0.1:8080/login": address 127.0.0.1:8080 is private (loopback), and no person is at a terminal; allow it in policy: network.allow
+$ vegtam run health.http -e dev > /dev/null; echo $?
+vegtam: health.http:1: Get "http://127.0.0.1:8080/health": address 127.0.0.1:8080 is private (loopback), and no person is at a terminal; allow it in policy: network.allow
 6
 ```
 

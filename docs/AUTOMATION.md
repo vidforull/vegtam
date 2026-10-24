@@ -62,6 +62,8 @@ agent. `vegtam policy` and `vegtam describe` say which mode applies, in
 | A method other than GET, HEAD and OPTIONS | `run` sends it; the terminal interface asks first | only with `--confirm`, unless `network.confirm` is `"never"` |
 | `# @note` | only with `--confirm`; the terminal interface asks first | only with `--confirm`, whatever the policy says |
 | A secret to an origin it is not bound to | only with `--confirm=<ref>` naming the request, to its origin, this once; the terminal interface asks first | never: an error of kind `policy`, whatever `--confirm` says |
+| A secret value | read and sent to the origins it is bound to | none: the request is an error of kind `policy`, unless the policy sends it through the keeper (`secrets.unattended`) |
+| A response | as it came, every secret value masked | sterile: credentials it hands out are `***`, and `redacted` says where |
 | `{{$cmd NAME}}` | only from a command file a person has trusted | the same |
 | History of runs | kept, unless `--no-history`, `VEGTAM_NO_HISTORY=1` or `# @no-log` | the same |
 
@@ -89,7 +91,7 @@ command and on its argument, never on what happens at run time:
 
 | Command | Document |
 |---|---|
-| `run <file>#<ref>` | one result: `ref`, `request`, `transport`, `response`, `timing`, `remote_addr`, `resolved_by`, `proxy`, `tls`, `redirects`, `cookies`, `asserts`, `captures`, `warnings`, `secret_origins`, `confirm`, `error` |
+| `run <file>#<ref>` | one result: `ref`, `request`, `transport`, `response`, `timing`, `remote_addr`, `resolved_by`, `proxy`, `tls`, `redirects`, `cookies`, `asserts`, `captures`, `redacted`, `warnings`, `secret_origins`, `confirm`, `error` |
 | `run <file>`, `run <dir>` | `results`: one result per request, in file order |
 | `show <file>#<ref>` | one result with `ref`, `request`, `transport`, `warnings` and, with `-e`, `secret_origins` only |
 | `list <file>`, `list <dir>` | `requests` |
@@ -97,6 +99,7 @@ command and on its argument, never on what happens at run time:
 | `trust <dir>`, `trust --revoke <dir>`, `trust --list` | `trust`: the command files and their status |
 | `policy` | `policy`: the operator's policy and what applies to a run |
 | `describe` | `describe`: what a program needs to know to run vegtam |
+| `doctor` | `doctor`: where the secrets of this shell and directory are, and who can read them |
 | an error that ends a command before any request | `error` only |
 
 A result for `run api/users.http#list -e dev` looks like this (shortened):
@@ -279,7 +282,7 @@ The outcome of every assertion is in `asserts` all the same.
 | `timeout` | 3 | a time limit ran out; `timeout_phase` says which: `connect`, `read` or `total` |
 | `status` | 4 | HTTP status 400 or above, with `--fail` |
 | `confirm` | 5 | a request not sent without `--confirm`; `confirm` says what confirms it, and `secret` the secret it would send elsewhere, if that is why |
-| `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write; an address that vegtam never connects to, or a loopback or private one that the operator's policy does not allow; a secret that would go to an origin it is not bound to, without a person or by a redirect, which `secret` names; a policy file that does not parse, or that others can write |
+| `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write; an address that vegtam never connects to, or a loopback or private one that the operator's policy does not allow; a secret that would go to an origin it is not bound to, without a person or by a redirect, which `secret` names; a secret value that a run without a person does not get, which `secret` names, with `person_command`; a keeper that cannot be reached or did not send the request; a policy file that does not parse, or that others can write |
 | `canceled` | 130 | SIGINT or SIGTERM came while a request waited for its response or a command ran; the requests after it are canceled too |
 
 Every error is printed to stderr as text, `vegtam: file:line: message`.
@@ -525,6 +528,75 @@ not try another URL, variable or environment to get past the refusal. A
 request that would send a secret where it has never gone is a sign that
 a file or a response is leading the program astray.
 
+### Without a person, no secrets
+
+Binding a secret to its origins says where it may go. It does not say
+who may use it, and a program runs in the same shell as the person,
+under the same user: it can read their private file and their
+environment, and what vegtam prints of a response lands in its context.
+So by default a run without a person gets no secret value at all:
+
+- it reads the names of `http-client.private.env.json` and its
+  `$allow`, never its values; it reads no `{{$env NAME}}` and runs no
+  `{{$cmd NAME}}`, though it checks that the command file is trusted; a
+  value that a `# @capture` takes from a response it keeps, as the
+  response gave it, but does not send;
+- a request that needs a secret value, of any kind and anywhere in it,
+  is not sent: an error of kind `policy`, exit code 6, in a dry run too,
+  and `--confirm` does not lift it. `secret` names the first secret, and
+  `person_command` is the command a person runs at a terminal to send
+  the request, with the run's ref and `-e`:
+
+  ```json
+  {
+    "kind": "policy",
+    "message": "secret {{password}} is not available to a run without a person (policy: secrets.unattended is \"deny\"); ask the operator to run it: vegtam run 'api.http#login' -e dev",
+    "file": "api.http",
+    "line": 4,
+    "secret": {"name": "{{password}}", "origin": "http://127.0.0.1:8080", "allowed": ["http://127.0.0.1:8080"]},
+    "person_command": "vegtam run 'api.http#login' -e dev"
+  }
+  ```
+
+- requests that need none are sent as before, as the guard and the
+  confirmation allow.
+
+A program that gets this error stops and asks the person to run
+`person_command`, or to change the policy; it does not look for the
+value elsewhere. The operator's policy may send such requests through
+the keeper instead, `"secrets": {"unattended": "keeper"}`: a process in
+the person's terminal that holds the values, sends the request and
+gives back what the run may see, and asks its person before it does
+(`secrets.keeper_asks`). Neither a flag, a variable nor a file can say
+so: the policy alone.
+
+What such a run is shown of a response is sterile, whether its requests
+held a secret or not, since a response hands out credentials that vegtam
+does not know as secrets: the values of the headers `Set-Cookie`,
+`Authorization`, `Proxy-Authorization`, `WWW-Authenticate` and of those
+named, after an `X-`, as a credential is (`X-Session`, `X-Api-Key`);
+in a JSON body, the value of every member whose key is `token`,
+`access_token`, `refresh_token`, `id_token`, `secret`, `client_secret`,
+`password`, `passwd`, `api_key`, `apikey`, `session`, `sessionid`,
+`cookie`, `authorization` or `private_key`, in any case and with `-` or
+`_` or neither; a string anywhere shaped as a JWT; the same fields of a
+form body; and those parameters of a redirect's `Location`. Each is
+`***`, and `redacted` lists where, as `header Set-Cookie`,
+`$.access_token`, `form password`, `body`, `assert <expression>` or
+`redirect <n> location`; text output says so in a line after the body.
+Cookies still go into the jar and back to their server: the program does
+not see them. Its `# @assert` directives are checked against the response
+as it is shown, so that `body contains "..."` cannot tell it a value, a
+guess at a time; its `# @capture` directives take their values from the
+response as it came, and a `plain` one that takes a credential it is not
+shown, by the name of its member or header, in a JSON value that holds
+one, or as a JWT, takes it as a secret all the same. A person's run is shown its response as it came,
+but for the secret values vegtam masks.
+
+`vegtam policy` says what a run gets, in `run.secrets`: `all` with a
+person, `none` without one, `keeper` through the keeper; `vegtam
+describe` says it in `mode.secrets`.
+
 ### The operator's policy
 
 A program runs without a person at a terminal: stdin or stdout is not a
@@ -592,6 +664,11 @@ addresses never connected to; `vegtam policy
   `vegtam policy --json` lists them in `policy.secrets`, each as
   `secret` is, `{"name": "{{$env API_TOKEN}}", "allowed":
   ["https://api.example.com"]}`, those of `{{$env NAME}}` first.
+  `secrets.unattended`, `"deny"` by default or `"keeper"`, and
+  `secrets.keeper_asks`, `"always"` by default or `"unbound"`, say what a
+  run without a person does with a request that needs a secret value
+  (see [Without a person, no secrets](#without-a-person-no-secrets));
+  `policy.secrets_mode` says which apply.
 
 The policy is the operator's to write. A program that gets a `policy`
 error for an address should stop and tell a person which entry would
@@ -692,7 +769,27 @@ are not secrets to vegtam and are printed as they are.
 
 Masking keeps a value out of what vegtam prints. Where a value may be
 sent is the other half: see
-[Secrets and their origins](#secrets-and-their-origins).
+[Secrets and their origins](#secrets-and-their-origins). A run without
+a person holds no secret value, and masks none that a file writes out as
+it is, such as in the text of an `# @note` or the origins of `$allow`:
+the program that runs it can read the file anyway
+([Without a person, no secrets](#without-a-person-no-secrets)).
+
+## Where the secrets are
+
+`vegtam doctor` says, as text or JSON (`doctor`), what a person should
+know before an agent shares their shell: the mode and what it gets of
+secrets (`mode.secrets`); what the policy says of them
+(`policy.secrets_mode`, the names it binds, or the error that keeps it
+from being read); the private file that the current directory's
+requests would read, with its mode and owner; which `{{$env NAME}}` of
+the policy are set in this environment; the keeper's socket, and
+whether something is there; a terminal multiplexer this shell runs in
+(`TMUX`, `STY`); and the modes of vegtam's configuration directory and
+policy. `warnings` says what of it a process of the same user, an agent
+started from this shell among them, can read or change. It reads no
+secret value, of a file or a variable, and exits with 0 whatever it
+finds.
 
 ## History
 
@@ -701,7 +798,9 @@ sent is the other half: see
 `XDG_DATA_HOME`): one JSON object a line, with the time (UTC), the
 `ref` with the file as an absolute path, the environment, the method and
 the URL as written, with their placeholders, the status, the time it
-took, the `result` (`ok` or the error kind) and `truncated`. It holds no
+took, the `result` (`ok` or the error kind), `truncated`, and `redacted`
+when what a run without a person was shown of the response was made
+sterile. It holds no
 header, body, variable value or captured value, and no URL as resolved:
 nothing a secret could be in; a password written in a URL is kept as
 `***`. A dry run, a file that does not parse and

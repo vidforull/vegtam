@@ -51,7 +51,8 @@ be left out:
               "confirm": "mutations"},
   "hosts":   {"api.internal.example.com:443": {"cacert": "~/certs/corp.pem", "cert": "~/certs/me.pem", "key": "~/certs/me.key"}},
   "secrets": {"env": {"API_TOKEN": ["https://api.example.com"]},
-              "cmd": {"TOKEN": ["https://api.example.com", "https://auth.example.com:8443"]}}
+              "cmd": {"TOKEN": ["https://api.example.com", "https://auth.example.com:8443"]},
+              "unattended": "deny", "keeper_asks": "always"}
 }
 ```
 
@@ -78,6 +79,16 @@ file. It holds in every mode: a value that the policy does not bind
 goes nowhere, unless a person at a terminal confirms the request (see
 [FORMAT.md](FORMAT.md#where-secrets-may-go)). `vegtam policy --json`
 lists them in `policy.secrets`, by placeholder.
+
+`secrets.unattended` is what a run without a person does with a request
+that needs a secret value: `"deny"`, the default, refuses it with exit
+code 6, and such a run holds no secret value at all; `"keeper"` sends
+it through the keeper, which holds the values in the person's terminal.
+`secrets.keeper_asks` is when the keeper asks its person: `"always"`,
+the default, or `"unbound"`, only for a request that would send a
+secret where it is not bound. Both weaken what a run without a person
+gets, so the policy alone says them, as it says `network.confirm`
+([AUTOMATION.md](AUTOMATION.md#without-a-person-no-secrets)).
 
 ## Flags
 

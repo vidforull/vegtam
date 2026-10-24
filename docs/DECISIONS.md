@@ -1342,3 +1342,102 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   core keeps substitution, origins and the check behind one interface,
   `core.Secrets` (`SecretValue` and `SecretOrigins`), for the keeper to
   take its place.
+
+## 2026-10-24: without a person, no secrets
+
+- **The threat.** Origins say where a secret may go, not who may use
+  it. An agent runs in the person's shell, as the same user: it reads
+  `http-client.private.env.json` and the environment, runs what a
+  command file runs, and what vegtam prints of a response, a token from
+  a sign-in among it, lands in its context and its history. Masking is
+  a property of what vegtam prints, and keeps nothing from a process
+  that can read the files. The answer is to keep the values away from
+  such a run, not to trust it with them.
+- **None by default.** A run without a person, in the sense of the
+  modes, gets no secret value: a request that needs one, of any kind,
+  anywhere in it, is an error of kind `policy`, exit code 6, in a dry
+  run too. `--confirm` does not lift it: the program that passes it is
+  the one the rule is for. The error names the first secret, and
+  `person_command` the command a person runs at a terminal to send the
+  request, with the run's ref and `-e`, and `--confirm=<ref>` for an
+  `@note`. The strict value is the default because the safe setup must
+  be the one a person gets without reading anything: on a laptop, the
+  agent and the person are one user.
+- **Weakened by the policy alone.** `secrets.unattended: "keeper"` sends
+  such requests through the keeper instead, and
+  `secrets.keeper_asks: "unbound"` lets it skip its question for a
+  request whose secrets are all bound where it goes. No flag, variable
+  or file can say either: whoever writes the arguments, the environment
+  or a `.http` file is what the rule is for.
+- **Held, not hidden.** Such a run holds no value to begin with, rather
+  than holding one and refusing to send it. It reads the private file's
+  names and `$allow` and not its values: the file is decoded into raw
+  bytes, each checked to be a string, a number or a boolean, and every
+  byte zeroed; no Go string is made of a value. It reads no
+  `{{$env NAME}}`, which is a secret by its name whether set or not, and
+  runs no `{{$cmd NAME}}`, though it still checks that the command file
+  is trusted, as a dry run does, so that a dry run says what a run
+  would. The session asks the secrets of a request for no value either:
+  where it would, to learn where a request goes, the value is
+  `core.ErrHeld`, which is `ErrLate` too, so a URL whose host is a
+  secret goes to an origin not known before it is sent. A value that a
+  `# @capture` takes from a response the run keeps as it came, and does
+  not send.
+- **What it cannot mask.** A run that holds no value cannot hide one
+  that a file writes out: the text of an `@note`, or the hosts of
+  `$allow`, show as written. The program can read those files anyway.
+- **Before the confirmation.** Without a person, resolving a request
+  reads no secret and runs no command, so the session resolves it
+  before it asks for `--confirm`: a request that needs a secret value
+  says so first, whatever confirms it.
+- **A sterile response.** A response hands out credentials that vegtam
+  does not know as secrets until something captures them: a session
+  cookie, a token in the body of a sign-in, a JWT in a redirect. A run
+  without a person is shown none of them, whether its own requests held
+  a secret or not: the values of `Set-Cookie`, `Authorization`,
+  `Proxy-Authorization` and `WWW-Authenticate`, and of a header that,
+  after an `X-`, is named as a credential is; in a JSON body, the value
+  of each member named `token`, `access_token`, `refresh_token`,
+  `id_token`, `secret`, `client_secret`, `password`, `passwd`,
+  `api_key`, `apikey`, `session`, `sessionid`, `cookie`, `authorization`
+  or `private_key`, in any case and with `-`, `_` or neither, whatever
+  its type, but `null` and `""`; a string anywhere shaped as a JWT; the
+  same fields of a form, the same parameters of a redirect's
+  `Location`, and the `actual` of an assertion on any of them. Each is
+  `***`, and `redacted` says where; the history marks the entry. The
+  scanner works on the bytes, so the rest of the body stays as the
+  server wrote it, and it reads a body cut off at `--max-body` as far as
+  it goes. Cookies still go into the jar and back to their server. A
+  person's run is shown the response as it came: it is theirs.
+- **Assertions on what it is shown.** An assertion says passed or failed,
+  and that is a bit of what it looked at: `body contains "a"`, `"b"`,
+  and so on, would read a token that a server echoes, or one that a
+  response hands out, a character at a time, a few dozen assertions to a
+  request. So a run without a person checks its assertions against the
+  response as it is shown it, masked and sterile; its captures take their
+  values from the response as it came, which they must send on. A
+  `plain` capture of such a credential, by the name of its member or
+  header, in a JSON value that holds one, or as a JWT, is a secret all
+  the same: as plain text, the requests after it would show it, and send
+  it anywhere.
+- **By name, and so not all.** Names are a guess: a token under
+  `"t"` passes, and a field named `session` that holds a user's name is
+  hidden. The list is short and common on purpose; a value that vegtam
+  knows is masked by value as well. Whatever passes, the run cannot
+  send it anywhere a secret could go: it holds no secret to send with
+  it, and the keeper checks where the values it holds go.
+- **The keeper is behind an interface.** `session.Options.Keeper` takes
+  the requests of a run without a person that need a value; nil, as
+  `"deny"` has it, refuses them. Once a request prepared in a run needs
+  the keeper, every request of the run goes through it, so that the
+  cookies and the captures of its responses, which stay in the keeper,
+  go with the requests after them; a run prepares all its requests
+  before it sends the first. The keeper's side of it is
+  `Session.Relay`, which sends a request as `Run` does, with the values
+  it holds; the tests use one in their own process.
+- **`vegtam doctor`.** A person who lets an agent into their shell
+  should see what it can reach: the private file of the directory, the
+  environment variables the policy binds that are set, the keeper's
+  socket, a multiplexer that another process can type into, and the
+  modes of the configuration. It reads no secret value, and exits with
+  0: it is a diagnosis.
