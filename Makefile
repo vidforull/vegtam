@@ -123,6 +123,8 @@ fuzz:
 	go test -run '^$$' -fuzz '^FuzzEnvFile$$' -fuzztime $(FUZZTIME) ./internal/core/env
 	go test -run '^$$' -fuzz '^FuzzParseOrigin$$' -fuzztime $(FUZZTIME) ./internal/core
 	go test -run '^$$' -fuzz '^FuzzJSON$$' -fuzztime $(FUZZTIME) ./internal/core/redact
+	go test -run '^$$' -fuzz '^FuzzOpen$$' -fuzztime $(FUZZTIME) ./internal/core/store
+	go test -run '^$$' -fuzz '^FuzzDecode$$' -fuzztime $(FUZZTIME) ./internal/keeper
 
 tools:
 	@v=$$(golangci-lint version --short 2>/dev/null) || { \
