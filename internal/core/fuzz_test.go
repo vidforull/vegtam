@@ -15,7 +15,7 @@ import (
 func FuzzParseTemplate(f *testing.F) {
 	for _, s := range []string{
 		"", "plain", "{{host}}/users/{{ id }}?k={{$env KEY}}", "{{$cmd TOKEN}}}", "a{{b}}{{c}}d",
-		"{{", "{{}}", "{{$env}}", "{{a b c}}", "}}{{x}}", "{{x}", "{{{x}}}", "{{ $env\tKEY }}",
+		"{{", "{{}}", "{{$env}}", "{{a b c}}", "}}{{x}}", "{{x}", "{{{x}}}", "{{ $env\tKEY }}", "{{$env } }}",
 	} {
 		f.Add(s)
 	}

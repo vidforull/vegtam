@@ -74,7 +74,8 @@ func parseRef(s string) (*Ref, error) {
 		return &Ref{Name: f[0]}, nil
 	case len(f) == 1 && funcName.MatchString(f[0]):
 		return &Ref{Func: f[0]}, nil
-	case len(f) == 2 && funcName.MatchString(f[0]):
+	case len(f) == 2 && funcName.MatchString(f[0]) && !strings.ContainsAny(f[1], "{}"):
+		// A brace in the argument would end the placeholder written back.
 		return &Ref{Func: f[0], Name: f[1]}, nil
 	}
 	return nil, errors.New("malformed placeholder")
