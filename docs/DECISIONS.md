@@ -1441,3 +1441,54 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   socket, a multiplexer that another process can type into, and the
   modes of the configuration. It reads no secret value, and exits with
   0: it is a diagnosis.
+
+## 2026-10-24: a store of secrets
+
+- **A file of the person's, encrypted.** The keeper needs values that no
+  program of the same user can read from a file: `secrets.enc` in
+  vegtam's configuration directory, mode 0600 in a directory of 0700,
+  refused if another user owns it or others can read or write it. Its
+  values are sealed with XChaCha20-Poly1305 under a key that Argon2id
+  derives from a password (3 passes, 64 MiB, 4 lanes: RFC 9106's second
+  recommendation), with a random 24-byte nonce for each save, so that
+  nothing needs a counter. The format has a version, and a file that asks
+  for parameters outside sane bounds is refused before anything is
+  derived: a file made up must not make vegtam allocate gigabytes.
+- **Names and origins in the clear.** They are no secret: a `.http` file
+  holds the names, and a private environment file holds the origins in
+  `$allow`. In the clear, a run without a person knows which placeholders
+  are secrets of the store and where each may go, without the password,
+  and `vegtam secret list` needs none. The seal covers them as additional
+  data, each field as a netstring, so that changing one fails as a wrong
+  password does; the netstrings, not JSON, so that no change of a JSON
+  encoder changes the bytes.
+- **The password is typed.** At the controlling terminal, without echo;
+  never from a flag, a variable or a file, which a program could pass.
+  A new store asks for it twice. A run asks for it once, when it first
+  needs a value of the store, and a dry run never. The terminal interface
+  owns the terminal once it runs, so it asks before it starts, if there
+  is a store; enter alone goes without it.
+- **The file first, then the store.** A `{{name}}` takes, in order: a
+  value a capture took; a value of the private environment file beside
+  the requests; a value of the store; a value of the public file. The
+  private file is nearer the requests, and a person who keeps one there
+  means it; when both hold a name, a warning says that the file's value
+  is used, with its `$allow`. A secret of either beats the public file's
+  value of the same name, which a cloned repository may write. The
+  keeper reads the store alone, and no private file: a program could
+  put one where the keeper would look.
+- **Flat, by name.** The store has no environments: one value for each
+  name. `vegtam secret import -e dev` takes those of `$shared` and of one
+  environment; a person who needs two tokens of one name for two
+  environments names them apart. Environments in the store would ask the
+  keeper which one a run means, and that is the run's to say, which the
+  keeper must not trust.
+- **The header, proved by the password.** A person's run decides where
+  each secret of the store may go from the header, read when the run
+  begins, before it asks for the password; another process could change
+  the header for that run, and put the file back while the person types.
+  So once the password opens the store, the run compares what it holds
+  with what the header said, and refuses the store if they differ.
+- **No lock between processes.** Two writers of the store, a person's
+  `vegtam secret` while another runs, keep the last one's file; each
+  writes it whole and atomically.
