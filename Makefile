@@ -122,6 +122,7 @@ fuzz:
 	go test -run '^$$' -fuzz '^FuzzParsePolicy$$' -fuzztime $(FUZZTIME) ./internal/core/policy
 	go test -run '^$$' -fuzz '^FuzzEnvFile$$' -fuzztime $(FUZZTIME) ./internal/core/env
 	go test -run '^$$' -fuzz '^FuzzParseOrigin$$' -fuzztime $(FUZZTIME) ./internal/core
+	go test -run '^$$' -fuzz '^FuzzJSON$$' -fuzztime $(FUZZTIME) ./internal/core/redact
 
 tools:
 	@v=$$(golangci-lint version --short 2>/dev/null) || { \
