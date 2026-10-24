@@ -120,6 +120,8 @@ fuzz:
 	go test -run '^$$' -fuzz '^FuzzPrintable$$' -fuzztime $(FUZZTIME) ./internal/cli
 	go test -run '^$$' -fuzz '^FuzzFormatJSON$$' -fuzztime $(FUZZTIME) ./internal/core/output
 	go test -run '^$$' -fuzz '^FuzzParsePolicy$$' -fuzztime $(FUZZTIME) ./internal/core/policy
+	go test -run '^$$' -fuzz '^FuzzEnvFile$$' -fuzztime $(FUZZTIME) ./internal/core/env
+	go test -run '^$$' -fuzz '^FuzzParseOrigin$$' -fuzztime $(FUZZTIME) ./internal/core
 
 tools:
 	@v=$$(golangci-lint version --short 2>/dev/null) || { \
