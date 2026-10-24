@@ -11,8 +11,9 @@ import (
 // an @capture took, the origin of the response it came from, and in a dry
 // run that of the request whose @capture would take it (see Bind); for a
 // value of the private environment file, the origins the file binds it to
-// ($allow); for {{$env NAME}} and {{$cmd NAME}}, those of the operator's
-// policy alone. A file binds only the values it holds: the private file
+// ($allow); for one of the person's store, those the store binds it to;
+// for {{$env NAME}} and {{$cmd NAME}}, those of the operator's policy
+// alone. A file binds only the values it holds: the private file
 // is found from the directory of the .http file up, so a repository can
 // bring one, which may bind its own values anywhere but must not bind the
 // machine's. Neither the public environment file nor a .http file binds
@@ -33,8 +34,10 @@ func (v *Vars) SecretOrigins(s core.Secret) []string {
 		origins = l.opts.Secrets.Env[n]
 	} else if n, ok := strings.CutPrefix(s.Name, "$cmd "); ok {
 		origins = l.opts.Secrets.Cmd[n]
-	} else {
+	} else if _, ok := v.private[s.Name]; ok {
 		origins = v.allow[s.Name]
+	} else if stored, ok := l.inStore(s.Name); ok {
+		origins = stored
 	}
 	origins = slices.Clone(origins)
 	slices.Sort(origins)

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/output"
 	"github.com/vidforull/vegtam/internal/core/policy"
+	"github.com/vidforull/vegtam/internal/keeper"
 )
 
 func newDoctorCmd(cfg *Config) *cobra.Command {
@@ -52,7 +55,8 @@ keeper is the unix socket of the keeper, a process you run in your
 terminal to hold the secrets, and what is at it:
 $XDG_RUNTIME_DIR/vegtam/keeper.sock, or keeper.sock in vegtam's
 directory of your cache, ~/.cache/vegtam or ~/Library/Caches/vegtam on
-macOS. vegtam does not yet ask whether a keeper answers there.
+macOS: whether a keeper of yours answers there, its pid, and the
+terminal multiplexer it runs in, if it does.
 
 multiplexer is tmux or screen, when TMUX or STY says that this shell
 runs in one: another process can read and type into a session of a
@@ -66,8 +70,8 @@ read the policy, they learn what vegtam may do.
 
 The warnings come last, one to a line.`,
 		Args: cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			d := cfg.doctor()
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			d := cfg.doctor(cmd.Context())
 			if cfg.asJSON() {
 				cfg.writeJSON(output.Document{SchemaVersion: output.SchemaVersion, Doctor: d})
 				return nil
@@ -81,7 +85,7 @@ The warnings come last, one to a line.`,
 // doctor returns what vegtam doctor prints. It reads no secret: of the
 // private environment file its mode and owner, of a variable whether it
 // holds a value.
-func (c *Config) doctor() *output.Doctor {
+func (c *Config) doctor(ctx context.Context) *output.Doctor {
 	d := &output.Doctor{}
 	d.Mode.Unattended, d.Mode.Why = c.mode()
 	// The configuration directory first: the policy file is in it.
@@ -96,7 +100,7 @@ func (c *Config) doctor() *output.Doctor {
 	pol := doctorPolicy(d, c.masker)
 	d.Mode.Secrets = runSecrets(d.Mode.Unattended, pol)
 	doctorSecrets(d, pol)
-	doctorKeeper(d)
+	doctorKeeper(ctx, d)
 	for _, m := range multiplexers {
 		if env.Has(m.Variable) {
 			d.Multiplexers = append(d.Multiplexers, m)
@@ -181,7 +185,7 @@ func doctorPrivateFile(d *output.Doctor, dir string) {
 }
 
 // doctorKeeper sets where the keeper listens and what is there.
-func doctorKeeper(d *output.Doctor) {
+func doctorKeeper(ctx context.Context, d *output.Doctor) {
 	k := &d.Keeper
 	path, err := policy.KeeperSocket()
 	if err != nil {
@@ -196,13 +200,30 @@ func doctorKeeper(d *output.Doctor) {
 		k.Why = "nothing is at the socket"
 	case s.Type != output.PathSocket:
 		k.Why = "what is at the path is not a socket"
+	case !s.Owned:
+		k.Why = "the socket belongs to another user"
+		warn(d, path, "the keeper's socket belongs to another user: whatever answers on it is not your keeper")
 	default:
-		k.Why = "vegtam does not yet ask whether a keeper answers on the socket"
-		if !s.Owned {
-			warn(d, path, "the keeper's socket belongs to another user: whatever answers on it is not your keeper")
+		dctx, cancel := context.WithTimeout(ctx, keeperDial)
+		defer cancel()
+		c, err := keeper.Dial(dctx, path)
+		if err != nil {
+			k.Why = err.Error()
+			return
+		}
+		k.Running = true
+		k.PID, k.Multiplexer = c.Keeper()
+		if err := c.Close(); err != nil {
+			k.Why = err.Error()
+		}
+		if k.Multiplexer != "" {
+			warn(d, path, "the keeper runs in %s: another process can read what it shows and type the codes it asks for", k.Multiplexer)
 		}
 	}
 }
+
+// keeperDial is how long doctor waits for the keeper to answer.
+const keeperDial = 2 * time.Second
 
 // doctorConfig warns of vegtam's configuration directory dir and of the
 // policy file in it when another user owns them, or others can write
@@ -299,8 +320,13 @@ func doctorText(d *output.Doctor) string {
 		fmt.Fprintf(tw, "environment\tholds %s\n", strings.Join(names, ", "))
 	}
 	keeper := pathText(d.Keeper.Socket)
-	if d.Keeper.Socket.Exists {
-		keeper += "; " + d.Keeper.Why
+	switch k := d.Keeper; {
+	case k.Running && k.Multiplexer != "":
+		keeper += fmt.Sprintf("; a keeper answers, pid %d, in %s", k.PID, k.Multiplexer)
+	case k.Running:
+		keeper += fmt.Sprintf("; a keeper answers, pid %d", k.PID)
+	case k.Socket.Exists:
+		keeper += "; " + k.Why
 	}
 	fmt.Fprintf(tw, "keeper\t%s\n", keeper)
 	for _, m := range d.Multiplexers {

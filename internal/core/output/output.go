@@ -41,6 +41,7 @@ var Schema string
 //   - policy: Policy;
 //   - describe: Describe;
 //   - doctor: Doctor;
+//   - secret: Store;
 //   - an error that ends a command before any request: Result.Error.
 type Document struct {
 	SchemaVersion int        `json:"schema_version"`
@@ -52,6 +53,7 @@ type Document struct {
 	Policy        *Policy    `json:"policy,omitempty"`
 	Describe      *Describe  `json:"describe,omitempty"`
 	Doctor        *Doctor    `json:"doctor,omitempty"`
+	Store         *Store     `json:"store,omitempty"`
 }
 
 // Result is the outcome of one request. Timing and the fields after it,

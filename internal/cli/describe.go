@@ -86,7 +86,8 @@ var never = []string{
 		"of http-client.private.env.json, reads no {{$env NAME}}, runs no {{$cmd NAME}}, and is shown no Set-Cookie, " +
 		"Authorization, WWW-Authenticate or token field of a response (result.redacted)",
 	"write a secret value it reads or captures to a file: the history of runs keeps no header, body or value, and cookies " +
-		"stay in memory; the only files vegtam writes are the history, the trust store (vegtam trust) and those of import",
+		"stay in memory; the only files vegtam writes are the history, the trust store (vegtam trust), those of import, " +
+		"and the store of secrets (vegtam secret), whose values are encrypted under a password typed at a terminal",
 	"read its policy from anywhere but $XDG_CONFIG_HOME/vegtam/policy.json, or ~/.config/vegtam/policy.json: " +
 		"not from a directory of .http files, nor the current one",
 	"take a proxy, an address to connect to, a CA, a client certificate or an unchecked certificate from a .http or environment file",

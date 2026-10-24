@@ -60,6 +60,9 @@ type Loader struct {
 
 	ssl   map[string]envMap   // the SSLConfiguration of each environment, by environment file path
 	allow map[string]allowMap // the $allow of each environment, by environment file path
+
+	stored    map[string]string   // the values the store handed out, for the masker
+	inStoreOf map[string][]string // the secrets the store holds, with their origins; nil until asked
 }
 
 // Options configure a Loader.
@@ -78,6 +81,14 @@ type Options struct {
 	// Secrets are the origins the operator's policy binds the values of
 	// {{$env NAME}} and {{$cmd NAME}} to: nothing else binds them.
 	Secrets policy.Secrets
+	// Store is the person's store of secrets: a {{name}} that the
+	// private environment file does not give is taken from it. A run
+	// without a person knows its names alone.
+	Store Store
+	// NoPrivate is set in a keeper, which reads no private environment
+	// file: a run without a person may have put one where it looks. Its
+	// secrets come from the store alone.
+	NoPrivate bool
 	// Held is set for a run without a person, which holds no secret
 	// value. Of the private environment file the loader keeps the names
 	// and $allow, never the values; it reads no {{$env NAME}}, and runs no
@@ -85,6 +96,15 @@ type Options struct {
 	// a dry run does: each is a secret by its name alone. SecretValue gives
 	// core.ErrHeld for every secret, captured ones too.
 	Held bool
+}
+
+// Store is the person's encrypted store of secrets (see package store),
+// as the loader reads it: the secrets it holds, by name, each with the
+// origins it may go to, which need no password; and the value of one,
+// which may ask for the password, once.
+type Store interface {
+	Origins() map[string][]string
+	Value(name string) (string, error)
 }
 
 // captured is a value an @capture took.
@@ -112,7 +132,24 @@ func NewLoader(opts Options) *Loader {
 		files: map[string]envMap{}, process: map[string]string{},
 		declared: map[string]bool{}, captured: map[string]captured{}, lost: map[string]string{}, bound: map[string][]string{},
 		cmdFiles: map[string]*commands{}, ran: map[string]ran{}, ssl: map[string]envMap{}, allow: map[string]allowMap{},
+		stored: map[string]string{},
 	}
+}
+
+// inStore reports whether the person's store holds a secret named name,
+// and the origins it may go to.
+func (l *Loader) inStore(name string) ([]string, bool) {
+	if l.opts.Store == nil {
+		return nil, false
+	}
+	if l.inStoreOf == nil {
+		l.inStoreOf = maps.Clone(l.opts.Store.Origins())
+		if l.inStoreOf == nil {
+			l.inStoreOf = map[string][]string{}
+		}
+	}
+	origins, ok := l.inStoreOf[name]
+	return origins, ok
 }
 
 // Masker returns a Masker for every secret the loader has handed out or
@@ -124,6 +161,7 @@ func (l *Loader) Masker() *core.Masker {
 	for _, v := range l.dirs {
 		values = slices.AppendSeq(values, maps.Values(v.private))
 	}
+	values = slices.AppendSeq(values, maps.Values(l.stored))
 	for _, r := range l.ran {
 		values = append(values, r.value)
 	}
@@ -265,6 +303,12 @@ type Vars struct {
 	warnings []core.Warning
 }
 
+// stored reports whether the person's store holds the secret name.
+func (v *Vars) stored(name string) bool {
+	_, ok := v.loader.inStore(name)
+	return ok
+}
+
 // Warnings returns what the environment files of v say that vegtam does
 // not apply.
 func (v *Vars) Warnings() []core.Warning { return v.warnings }
@@ -307,7 +351,7 @@ func (l *Loader) load(dir string) (*Vars, error) {
 		dst  map[string]string
 	}{{PublicFile, v.public}, {PrivateFile, v.private}} {
 		path := Nearest(abs, f.name)
-		if path == "" {
+		if path == "" || f.name == PrivateFile && l.opts.NoPrivate {
 			continue
 		}
 		m, err := l.read(path)
@@ -339,6 +383,12 @@ func (l *Loader) load(dir string) (*Vars, error) {
 	}
 	if private != "" {
 		v.warnings = append(v.warnings, v.bind(private, l.allow[private], env)...)
+		for _, name := range slices.Sorted(maps.Keys(v.private)) {
+			if _, ok := l.inStore(name); ok {
+				v.warnings = append(v.warnings, core.Warning{Source: core.Source{File: private}, Msg: fmt.Sprintf(
+					"{{%s}} is in this file and in the store of secrets: the file's value is used, and its $allow", name)})
+			}
+		}
 	}
 	return v, nil
 }
@@ -369,6 +419,37 @@ func (v *Vars) bind(path string, allow allowMap, env string) []core.Warning {
 		ws = append(ws, core.Warning{Source: core.Source{File: path}, Msg: msg})
 	}
 	return ws
+}
+
+// Private is what a private environment file gives one environment: the
+// values of $shared and of the environment, which replace them name by
+// name, and the origins its $allow binds each to, as Loader reads them.
+type Private struct {
+	Values   map[string]string
+	Allow    map[string][]string
+	Warnings []core.Warning
+}
+
+// ReadPrivate reads the private environment file at path for the
+// environment env, or for $shared alone if env is "". It returns the
+// environments the file defines too, without $shared, sorted, for a caller
+// that must choose one.
+func ReadPrivate(path, env string) (*Private, []string, error) {
+	l := NewLoader(Options{})
+	m, err := l.read(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	envs := slices.Sorted(maps.Keys(m))
+	envs = slices.DeleteFunc(envs, func(s string) bool { return strings.HasPrefix(s, "$") })
+	if _, ok := m[env]; env != "" && !ok {
+		return nil, envs, core.Errorf(core.KindUsage, core.Source{File: path}, "environment %q is not defined (defined: %s)", env, strings.Join(envs, ", "))
+	}
+	v := &Vars{loader: l, private: map[string]string{}, allow: map[string][]string{}}
+	maps.Copy(v.private, m[shared])
+	maps.Copy(v.private, m[env])
+	ws := v.bind(path, l.allow[path], cmp.Or(env, shared))
+	return &Private{Values: v.private, Allow: v.allow, Warnings: ws}, envs, nil
 }
 
 // Names returns the environments that the environment files for the
@@ -696,6 +777,14 @@ func (v *Vars) SecretValue(s core.Secret) (string, error) {
 	if val, ok := v.private[s.Name]; ok {
 		return val, nil
 	}
+	if _, ok := l.inStore(s.Name); ok {
+		val, err := l.opts.Store.Value(s.Name)
+		if err != nil {
+			return "", err
+		}
+		l.stored[s.Name] = val
+		return val, nil
+	}
 	return "", fmt.Errorf("no secret named %q", s.Name)
 }
 
@@ -857,7 +946,7 @@ func (v *Vars) class(r core.Ref) Class {
 		switch {
 		case v.loader.declared[r.Name]:
 			return Captured
-		case private:
+		case private, v.stored(r.Name):
 			return Secret
 		case public:
 			return Plain

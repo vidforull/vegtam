@@ -34,7 +34,10 @@ func TestDescribe(t *testing.T) {
 	for _, c := range d.Commands {
 		names = append(names, c.Name)
 	}
-	want := []string{"describe", "doctor", "import", "import postman", "list", "policy", "run", "schema", "show", "trust", "tui", "version"}
+	want := []string{
+		"describe", "doctor", "import", "import postman", "keeper", "list", "policy", "run", "schema",
+		"secret allow", "secret deny", "secret import", "secret list", "secret rm", "secret set", "show", "trust", "tui", "version",
+	}
 	if !slices.Equal(names, want) {
 		t.Errorf("commands %q, want %q", names, want)
 	}

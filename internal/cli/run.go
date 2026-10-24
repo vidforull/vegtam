@@ -146,7 +146,16 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 	}
 	// Without a person, the run holds no secret value: the requests that
 	// need one go through the keeper, if the operator's policy says so,
-	// and are refused otherwise.
+	// and are refused otherwise. A dry run asks for no password.
+	var none error
+	switch {
+	case cfg.unattended():
+		none = core.ErrHeld
+	case f.dryRun:
+		none = core.ErrLate
+	}
+	opts.Store = cfg.personStore(none)
+	defer closeStore(opts.Store)
 	if cfg.unattended() && pol.Secrets.Keeper() {
 		opts.Keeper = cfg.keeper(opts)
 	}
@@ -215,14 +224,14 @@ func parseTarget(arg string) target {
 
 // request returns the file and the index of the request t names.
 func (t target) request() (*core.File, int, error) {
-	usage := func(format string, args ...any) error {
+	fail := func(format string, args ...any) error {
 		return core.Errorf(core.KindUsage, core.Source{File: t.path}, format, args...)
 	}
 	if t.ref == "" {
-		return nil, 0, usage("name a request: %s#<name> or %s#<N>", t.path, t.path)
+		return nil, 0, fail("name a request: %s#<name> or %s#<N>", t.path, t.path)
 	}
 	if fi, err := os.Stat(t.path); err == nil && fi.IsDir() {
-		return nil, 0, usage("is a directory; #%s needs a .http file", t.ref)
+		return nil, 0, fail("is a directory; #%s needs a .http file", t.ref)
 	}
 	f, err := httpfile.ParseFile(t.path)
 	if err != nil {
@@ -232,13 +241,13 @@ func (t target) request() (*core.File, int, error) {
 		return f, slices.Index(f.Requests, r), nil
 	}
 	if len(f.Requests) == 0 {
-		return nil, 0, usage("no request %q: the file has no requests", t.ref)
+		return nil, 0, fail("no request %q: the file has no requests", t.ref)
 	}
 	var refs []string
 	for i := range f.Requests {
 		refs = append(refs, strings.TrimPrefix(output.Ref(f, i), f.Path+"#"))
 	}
-	return nil, 0, usage("no request %q (requests: %s)", t.ref, strings.Join(refs, ", "))
+	return nil, 0, fail("no request %q (requests: %s)", t.ref, strings.Join(refs, ", "))
 }
 
 // jobs resolves the requests t names. A file that does not parse and a

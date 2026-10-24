@@ -47,6 +47,12 @@ type Options struct {
 	// zero value sends none of them. A dry run sends nothing, and says in
 	// each result what sending it would need.
 	Confirm Confirm
+	// Store is the person's store of secrets: a {{name}} that the private
+	// environment file does not give comes from it (see env.Options).
+	Store env.Store
+	// NoPrivate is set in a keeper, which reads no private environment
+	// file: its secrets come from the store alone.
+	NoPrivate bool
 	// Keeper sends, for a run without a person (Confirm.Person unset), the
 	// requests of a run in which one needs a secret value: such a run
 	// holds none (see env.Options.Held). Nil, as the policy's
@@ -126,7 +132,7 @@ func New(opts Options) *Session {
 		plain:  map[string]bool{},
 		loader: env.NewLoader(env.Options{
 			Env: opts.Env, DryRun: opts.DryRun, Trust: opts.Trust, EnvHint: opts.EnvHint, Hidden: opts.Transport.HiddenEnv, Secrets: opts.Secrets,
-			Held: !opts.Confirm.Person && opts.Serve == nil,
+			Held: !opts.Confirm.Person && opts.Serve == nil, Store: opts.Store, NoPrivate: opts.NoPrivate,
 		}),
 		client: exec.New(exec.Options{MaxBody: opts.MaxBody, UserAgent: opts.UserAgent, Transport: opts.Transport}),
 	}

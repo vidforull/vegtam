@@ -148,6 +148,12 @@ type Config struct {
 	// local, if set, is the keeper of a run without a person, for tests: a
 	// session of their own process that holds the values.
 	local func(session.Options) session.Keeper
+	// term, if set, is where a person types a password or a secret's
+	// value, for tests; the controlling terminal otherwise.
+	term terminal
+	// protect, if set, is what the keeper does to protect its process, for
+	// tests, which share theirs; keeper.Protect otherwise.
+	protect func() []string
 }
 
 // keeper returns the keeper that a run without a person, whose session
@@ -318,7 +324,7 @@ func Run(ctx context.Context, args []string, cfg Config) (code int) {
 	root.SetErr(cfg.errOut)
 	root.PersistentFlags().BoolVar(&cfg.json, "json", false, "print JSON even on a terminal")
 	root.AddCommand(newRunCmd(&cfg), newShowCmd(&cfg), newListCmd(&cfg), newTUICmd(&cfg), newImportCmd(&cfg),
-		newTrustCmd(&cfg), newPolicyCmd(&cfg), newSchemaCmd(&cfg), newDescribeCmd(&cfg), newDoctorCmd(&cfg), newVersionCmd(&cfg))
+		newTrustCmd(&cfg), newPolicyCmd(&cfg), newSchemaCmd(&cfg), newDescribeCmd(&cfg), newDoctorCmd(&cfg), newVersionCmd(&cfg), newSecretCmd(&cfg), newKeeperCmd(&cfg))
 
 	cmd, err := root.ExecuteContextC(ctx)
 	if err == nil {

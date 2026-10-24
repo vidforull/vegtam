@@ -253,8 +253,8 @@ func (s *Store) read(f *os.File, fail func(string, ...any) error) (map[string]st
 	return r.Trusted, nil
 }
 
-// save writes m to the store's file: to a new file, synced and renamed
-// over the old one, so that a reader never sees half of it.
+// save writes m to the store's file, as WriteFile does, so that a reader
+// never sees half of it.
 func (s *Store) save(m map[string]string) error {
 	fail := func(err error) error { return core.Errorf(core.KindPolicy, core.Source{File: s.path}, "%v", err) }
 	var b bytes.Buffer
@@ -266,22 +266,12 @@ func (s *Store) save(m map[string]string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fail(err)
 	}
-	tmp, err := os.CreateTemp(dir, ".trust-*.json") //nolint:forbidigo // mode 0600; Sync, Close and Rename are checked below
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return fail(err)
 	}
-	_, err = tmp.Write(b.Bytes())
-	if err == nil {
-		err = tmp.Sync()
-	}
-	if err2 := tmp.Close(); err == nil {
-		err = err2
-	}
-	if err == nil {
-		err = os.Rename(tmp.Name(), s.path)
-	}
-	if err != nil {
-		os.Remove(tmp.Name())
+	defer root.Close()
+	if err := WriteFile(root, filepath.Base(s.path), b.Bytes()); err != nil {
 		return fail(err)
 	}
 	return nil

@@ -84,9 +84,17 @@ func runTUI(ctx context.Context, cfg *Config, f tuiFlags, path string) error {
 	// Bubble Tea writes to the terminal itself, not through the masked
 	// writer: it draws the screen in pieces, which masking each write could
 	// not follow. The interface masks everything it shows before drawing.
+	// The interface owns the terminal once it runs: the store's password,
+	// if there is a store, is asked for now.
+	st := cfg.personStore(nil)
+	if ps, ok := st.(*personStore); ok {
+		ps.unlockOrSkip()
+	}
+	defer closeStore(st)
 	m, err := tui.New(tui.Options{
 		Path: path, Env: f.env, Trust: policy.DefaultStore(), Transport: tr, MaxBody: int64(f.maxBody),
 		UserAgent: "vegtam/" + cfg.Version, History: cfg.history(f.noHistory), Secrets: pol.Secrets, Input: cfg.Stdin, Output: cfg.Stdout,
+		Store: st,
 	})
 	if err != nil {
 		return err

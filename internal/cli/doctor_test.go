@@ -1,15 +1,18 @@
 package cli
 
 import (
-	"net"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/output"
+	"github.com/vidforull/vegtam/internal/keeper"
 )
 
 // doctorMarker is a secret value that doctor must never print: it is in
@@ -88,6 +91,25 @@ func messages(ws []output.Warning) []string {
 	return list
 }
 
+// serveKeeper runs a keeper at socket until the test ends, which answers
+// nothing but its greeting.
+func serveKeeper(t *testing.T, socket string) {
+	t.Helper()
+	l, err := keeper.Listen(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error)
+	go func() { done <- l.Serve(ctx, func(keeper.Peer) keeper.Conn { return nil }) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := errors.Join(<-done, l.Close()); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
 // TestDoctor checks what doctor says, in JSON and as text, of a policy
 // with the keeper, a private environment file, variables that hold
 // secrets, a multiplexer and a socket where the keeper's goes: and that
@@ -102,15 +124,7 @@ func TestDoctor(t *testing.T) {
 		t.Fatal(err)
 	}
 	socket := filepath.Join(runtime, "vegtam", "keeper.sock")
-	l, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := l.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	serveKeeper(t, socket)
 
 	d := runDoctor(t)
 	if d.Mode != (output.DescribeMode{Unattended: true, Why: "stdin or stdout is not a terminal", Secrets: output.RunSecretsKeeper}) {
@@ -138,7 +152,7 @@ func TestDoctor(t *testing.T) {
 	}
 	mine("private file", *s.PrivateFile, private, "file", "0600")
 	mine("socket", d.Keeper.Socket, socket, "socket", "")
-	if k := d.Keeper; k.Running || k.Why != "vegtam does not yet ask whether a keeper answers on the socket" {
+	if k := d.Keeper; !k.Running || k.Why != "" || k.PID != os.Getpid() || k.Multiplexer != "tmux" {
 		t.Errorf("keeper %+v", k)
 	}
 	if !slices.Equal(d.Multiplexers, []output.DoctorMultiplexer{{Name: "tmux", Variable: "TMUX"}}) {
@@ -150,6 +164,7 @@ func TestDoctor(t *testing.T) {
 		private + ": its secrets can be read by any process that runs as your user, agents started from this shell among them",
 		"VEGTAM_DOCTOR_PROXY is set in the environment, which every process started from this shell inherits, agents among them",
 		"VEGTAM_DOCTOR_TOKEN is set in the environment, which every process started from this shell inherits, agents among them",
+		socket + ": the keeper runs in tmux: another process can read what it shows and type the codes it asks for",
 		"this shell runs in tmux (TMUX is set): another process can read and type into a session of a multiplexer, " +
 			"and so read what vegtam shows there and answer what it asks",
 	}
@@ -168,7 +183,7 @@ func TestDoctor(t *testing.T) {
 		"binds 2 {{$env NAME}}: VEGTAM_DOCTOR_TOKEN, VEGTAM_DOCTOR_UNSET; 1 {{$cmd NAME}}: TOKEN",
 		"private file " + private + ": file 0600, yours",
 		"environment holds VEGTAM_DOCTOR_PROXY, VEGTAM_DOCTOR_TOKEN",
-		"keeper " + socket + ": socket " + d.Keeper.Socket.Mode + ", yours; vegtam does not yet ask whether a keeper answers on the socket",
+		"keeper " + socket + ": socket " + d.Keeper.Socket.Mode + ", yours; a keeper answers, pid " + strconv.Itoa(os.Getpid()) + ", in tmux",
 		"multiplexer tmux (TMUX is set)",
 		"config " + config + ": directory 0700, yours",
 		"",

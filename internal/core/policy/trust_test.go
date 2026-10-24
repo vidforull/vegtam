@@ -36,7 +36,7 @@ func TestStore(t *testing.T) {
 			t.Errorf("%s: mode %v, %v; want %v", path, fi.Mode().Perm(), err, want)
 		}
 	}
-	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(s.Path()), ".trust-*")); len(left) > 0 {
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(s.Path()), ".trust.json.*")); len(left) > 0 {
 		t.Errorf("temporary files left: %q", left)
 	}
 	if was, err := s.Revoke(file); !was || err != nil {

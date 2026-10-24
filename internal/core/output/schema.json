@@ -50,9 +50,34 @@
     },
     "policy": {"$ref": "#/$defs/policy"},
     "describe": {"$ref": "#/$defs/describe"},
-    "doctor": {"$ref": "#/$defs/doctor"}
+    "doctor": {"$ref": "#/$defs/doctor"},
+    "store": {"$ref": "#/$defs/store"}
   },
   "$defs": {
+    "store": {
+      "type": "object",
+      "description": "The person's store of secrets, as vegtam secret prints it: the name of each secret and where it may go, never a value.",
+      "required": ["path", "exists", "secrets"],
+      "properties": {
+        "path": {"type": "string", "description": "The store's file, secrets.enc in vegtam's configuration directory."},
+        "exists": {"type": "boolean", "description": "false: there is no store yet; vegtam secret set or import makes one."},
+        "secrets": {
+          "type": "array",
+          "description": "Each secret, sorted by name.",
+          "items": {
+            "type": "object",
+            "required": ["name", "allowed"],
+            "properties": {
+              "name": {"type": "string", "description": "As {{name}} names it in a request."},
+              "allowed": {"type": "array", "items": {"type": "string"}, "description": "The origins it may go to; empty: it goes nowhere."}
+            }
+          }
+        },
+        "imported": {"type": "array", "items": {"type": "string"}, "description": "For vegtam secret import: the names it put in the store."},
+        "from": {"type": "string", "description": "For vegtam secret import: the file and the environment they came from."},
+        "warnings": {"$ref": "#/$defs/warnings"}
+      }
+    },
     "doctor": {
       "type": "object",
       "description": "Where the secrets of this shell and of the current directory are, and who besides the person can read them or act for them: vegtam doctor. Names, paths and permission bits only: doctor reads no secret value, neither of a file nor of a variable. Its exit code is 0 whatever it finds.",
@@ -100,12 +125,14 @@
         },
         "keeper": {
           "type": "object",
-          "description": "The keeper: a process the person runs in their terminal, which holds the secrets and answers on a unix socket. Fields that the keeper says of itself, once asked, will be added.",
+          "description": "The keeper: a process the person runs in their terminal, which holds the secrets and answers on a unix socket (see vegtam keeper --help).",
           "required": ["socket", "running"],
           "properties": {
             "socket": {"$ref": "#/$defs/doctor_path"},
-            "running": {"type": "boolean", "description": "true once a keeper has answered on the socket. vegtam does not ask it yet, so false: socket.type says whether a socket is there."},
-            "why": {"type": "string", "description": "Why running is false."}
+            "running": {"type": "boolean", "description": "true when a keeper of this user answered on the socket, in the protocol of this vegtam."},
+            "why": {"type": "string", "description": "Why running is false: nothing is at the socket, or what answered."},
+            "pid": {"type": "integer", "description": "The keeper's pid, as it says."},
+            "multiplexer": {"type": "string", "description": "The terminal multiplexer the keeper runs in, as it says (tmux, screen, script): another process can read and type into its terminal. Absent outside one."}
           }
         },
         "multiplexers": {

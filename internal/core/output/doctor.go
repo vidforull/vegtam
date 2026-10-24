@@ -45,14 +45,18 @@ type DoctorSecrets struct {
 	Environment []string `json:"environment,omitempty"`
 }
 
-// DoctorKeeper is where the keeper listens, and whether it is there. What
-// the keeper says of itself, once asked, will come in fields of its own.
+// DoctorKeeper is where the keeper listens, whether it answers there, and
+// what it says of itself.
 type DoctorKeeper struct {
 	Socket DoctorPath `json:"socket"`
-	// Running is true once a keeper has answered on Socket. vegtam does
-	// not ask it yet, so it is false.
+	// Running is true when a keeper of this user answered on Socket, in
+	// the protocol of this vegtam.
 	Running bool   `json:"running"`
 	Why     string `json:"why,omitempty"` // why Running is false
+	PID     int    `json:"pid,omitempty"` // the keeper's
+	// Multiplexer is the terminal multiplexer the keeper runs in, as it
+	// says: another process can read and type into its terminal.
+	Multiplexer string `json:"multiplexer,omitempty"`
 }
 
 // DoctorMultiplexer is a terminal multiplexer that the shell runs in.

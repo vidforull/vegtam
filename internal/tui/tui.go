@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/history"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
@@ -35,6 +36,9 @@ type Options struct {
 	Secrets policy.Secrets
 	Input   io.Reader // a terminal
 	Output  io.Writer // a terminal
+	// Store is the person's store of secrets, unlocked or not; nil for
+	// none.
+	Store env.Store
 }
 
 // Panic is a panic inside the interface. Bubble Tea would print its value
@@ -151,7 +155,7 @@ func (m *Model) sessionOptions(dryRun bool) session.Options {
 	o := m.opts
 	return session.Options{
 		Env: m.env, DryRun: dryRun, Trust: o.Trust, Transport: o.Transport, MaxBody: o.MaxBody, UserAgent: o.UserAgent, History: o.History,
-		EnvHint: "e chooses one", Secrets: o.Secrets, Confirm: session.Confirm{Person: true},
+		EnvHint: "e chooses one", Secrets: o.Secrets, Confirm: session.Confirm{Person: true}, Store: o.Store,
 	}
 }
 
