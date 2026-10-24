@@ -435,6 +435,26 @@ func TestKeeperProxyCredentials(t *testing.T) {
 	}
 }
 
+// TestKeeperKeepsNoLog checks that a keeper keeps in its history a request
+// whose @no-log the run that hands it wrote: its person's record of what
+// it sent is not the run's to cut.
+func TestKeeperKeepsNoLog(t *testing.T) {
+	a := newOriginsServer(t, nil)
+	log := history.New(filepath.Join(t.TempDir(), "vegtam"))
+	k := newKeeper(t, Options{MaxBody: 1 << 20, History: log, For: "pid 1 (agent) uid 1"}, true, nil)
+	in, err := k.Send(t.Context(), &Outbound{
+		Ref: "x.http#1", MaxBody: 1 << 20, Method: "GET", URL: core.Text{{Text: a.URL + "/"}},
+		Request: &core.Request{Method: "GET", URL: a.URL + "/", Directives: []core.Directive{{Kind: core.NoLog}}, Source: core.Source{File: "x.http", Line: 1}},
+	})
+	if err != nil || in.Result.Error != nil {
+		t.Fatalf("%v, %+v", err, in.Result.Error)
+	}
+	runs, err := log.Last(5)
+	if err != nil || len(runs) != 1 || runs[0].For != "pid 1 (agent) uid 1" {
+		t.Errorf("the keeper's history: %+v, %v", runs, err)
+	}
+}
+
 // TestKeeperAsksFirst checks that a keeper runs the {{$cmd NAME}} of a
 // request only once its person says yes, and shows them no host that a
 // secret gives.

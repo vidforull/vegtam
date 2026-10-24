@@ -87,7 +87,9 @@ func TestHistoryNoSecrets(t *testing.T) {
 	}
 	want := history.Entry{
 		Time: first.Time, Ref: api + "#echo", Env: "test", Method: "POST", URL: "{{host}}/echo?key={{token}}&env={{$env VEGTAM_TEST_KEY}}",
-		Status: 200, DurationMS: first.DurationMS, Result: "ok", Redacted: true, // the echo has a field named authorization
+		Status: 200, DurationMS: first.DurationMS, Result: "ok",
+		Redacted: true, // the echo has a field named authorization
+		Keeper:   true, // the fixture's runs send their secrets through the test's keeper
 	}
 	if first != want {
 		t.Errorf("first entry:\n%+v\nwant\n%+v", first, want)

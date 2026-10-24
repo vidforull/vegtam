@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -158,6 +159,13 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 	defer closeStore(opts.Store)
 	if cfg.unattended() && pol.Secrets.Keeper() {
 		opts.Keeper = cfg.keeper(opts)
+		if c, ok := opts.Keeper.(io.Closer); ok {
+			defer func() {
+				if cerr := c.Close(); cerr != nil {
+					fmt.Fprintf(cfg.errOut, "vegtam: the keeper: %s\n", cfg.text(cerr.Error()))
+				}
+			}()
+		}
 	}
 	s := session.New(opts)
 	cfg.secrets = s.Masker

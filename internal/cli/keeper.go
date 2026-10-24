@@ -14,6 +14,7 @@ import (
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/exec"
+	"github.com/vidforull/vegtam/internal/core/history"
 	"github.com/vidforull/vegtam/internal/core/policy"
 	"github.com/vidforull/vegtam/internal/core/session"
 	"github.com/vidforull/vegtam/internal/core/store"
@@ -126,12 +127,18 @@ func runKeeper(ctx context.Context, cfg *Config, multiplexer bool) error {
 			fmt.Fprintf(cfg.errOut, "vegtam: %s\n", cfg.text(werr.Error()))
 		}
 	}
-	say(fmt.Sprintf("vegtam keeper: listening at %s; %d secrets in the store; it asks %s. Ctrl-C stops it.",
-		socket, len(st.Names()), asksWhen(pol)))
+	held := fmt.Sprintf("%d secrets", len(st.Names()))
+	if len(st.Names()) == 1 {
+		held = "1 secret"
+	}
+	say(fmt.Sprintf("vegtam keeper: listening at %s; %s in the store; it asks %s. Ctrl-C stops it.", socket, held, asksWhen(pol)))
 	var wg sync.WaitGroup
 	wg.Go(func() { keeper.Watch(ctx, pol.Path, pol, keeperWatch, say) })
 	defer wg.Wait()
-	k := &keeperRuns{cfg: cfg, pol: pol, tr: tr, store: unlocked{st}, asker: &keeper.Asker{Term: term, Timeout: keeperAsk}, say: say, stop: cancel}
+	k := &keeperRuns{
+		cfg: cfg, pol: pol, tr: tr, store: unlocked{st}, history: cfg.history(false),
+		asker: &keeper.Asker{Term: term, Timeout: keeperAsk}, say: say, stop: cancel,
+	}
 	return l.Serve(ctx, k.conn)
 }
 
@@ -184,9 +191,13 @@ type keeperRuns struct {
 	pol   *policy.Policy
 	tr    exec.Transport
 	store env.Store
-	asker *keeper.Asker
-	say   func(string)
-	stop  func() // once no one can answer: the input of the terminal ended
+	// history is the person's history of runs, as it was when the keeper
+	// started: the keeper's entries go there, each with the process it
+	// sent for.
+	history *history.Log
+	asker   *keeper.Asker
+	say     func(string)
+	stop    func() // once no one can answer: the input of the terminal ended
 }
 
 // conn returns the keeper's side of the run of peer: a session of its own,
@@ -205,7 +216,7 @@ func (c *keeperConn) Send(ctx context.Context, o *session.Outbound) (*session.In
 	if c.s == nil {
 		c.s = session.New(session.Options{
 			Trust: policy.DefaultStore(), Transport: k.tr, MaxBody: o.MaxBody, UserAgent: "vegtam/" + k.cfg.Version,
-			Fail: o.Fail, Secrets: k.pol.Secrets, History: k.cfg.history(false), Store: k.store, NoPrivate: true,
+			Fail: o.Fail, Secrets: k.pol.Secrets, History: k.history, For: c.peer.String(), Store: k.store, NoPrivate: true,
 			Confirm: session.Confirm{Mutations: true},
 			Serve: &session.Serve{Always: k.pol.Secrets.AsksAlways(), Ask: func(ctx context.Context, p *core.Prepared, bs []core.Bound) error {
 				err := k.asker.Ask(ctx, c.peer, p, bs)

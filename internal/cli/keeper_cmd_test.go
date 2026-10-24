@@ -67,6 +67,7 @@ type runningKeeper struct {
 	input     *io.PipeWriter
 	done      chan int
 	stop      context.CancelFunc
+	once      sync.Once
 	protected atomic.Bool // the keeper protected its process; tests share theirs, and keep it as it is
 }
 
@@ -99,17 +100,23 @@ func startKeeper(t *testing.T, password string, args ...string) *runningKeeper {
 			protect: func() []string { k.protected.Store(true); return nil },
 		})
 	}()
-	t.Cleanup(func() {
-		stop()
-		if err := w.Close(); err != nil {
-			t.Error(err)
-		}
-		<-k.done
-	})
+	t.Cleanup(func() { k.shut(t) })
 	if k.screen.await(0, regexp.MustCompile(`vegtam keeper: listening at |vegtam: `)) == nil {
 		t.Fatalf("the keeper never started:\n%s", k.screen.String())
 	}
 	return k
+}
+
+// shut stops the keeper, and waits until it has ended; once.
+func (k *runningKeeper) shut(t *testing.T) {
+	t.Helper()
+	k.once.Do(func() {
+		k.stop()
+		if err := k.input.Close(); err != nil {
+			t.Error(err)
+		}
+		<-k.done
+	})
 }
 
 // answer waits for the keeper's next question after from and types code,

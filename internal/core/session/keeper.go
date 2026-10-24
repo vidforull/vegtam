@@ -144,6 +144,7 @@ func (s *Session) relayed(ctx context.Context, j *Job, res *output.Result) error
 			}
 		}
 	}
+	j.kept = true
 	in, err := s.opts.Keeper.Send(ctx, o)
 	if e, ok := errors.AsType[*core.Error](err); ok {
 		return e

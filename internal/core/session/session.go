@@ -62,6 +62,9 @@ type Options struct {
 	// Serve is set in a keeper: the session sends what runs without a
 	// person relay to it (see Relay), with the values it holds.
 	Serve *Serve
+	// For is, in a keeper, the process whose run it sends for, as its
+	// history names it.
+	For string
 }
 
 // Session is one run: the environment loader that hands out variables and
@@ -226,6 +229,7 @@ type Job struct {
 	// withheld is, in a run without a person, the first secret the request
 	// needs the value of; nil for none.
 	withheld *core.Bound
+	kept     bool // the keeper sent it
 }
 
 // Class returns what the placeholder r of the request stands for, as the
@@ -384,10 +388,13 @@ func (s *Session) HistoryError() error { return s.historyErr }
 // history: what its file says of it, and how it ended. Its URL is kept
 // as written, with any secret value in it masked all the same; nothing
 // it resolved to is kept. A dry run is no run, a file that does not parse
-// has no request, and a request with @no-log is not kept.
+// has no request, and a request with @no-log is not kept, but by a
+// keeper.
 func (s *Session) record(j *Job, res *output.Result, start time.Time) {
 	s.historyErr = nil
-	if s.opts.History == nil || s.opts.DryRun || j.Request == nil || j.Request.NoLog() {
+	// A keeper keeps every request it sends: the run that hands it one
+	// wrote its directives, @no-log too.
+	if s.opts.History == nil || s.opts.DryRun || j.Request == nil || j.Request.NoLog() && s.opts.Serve == nil {
 		return
 	}
 	e := history.Entry{
@@ -407,7 +414,7 @@ func (s *Session) record(j *Job, res *output.Result, start time.Time) {
 	if res.Error != nil {
 		e.Result = string(res.Error.Kind)
 	}
-	e.Redacted = len(res.Redacted) > 0
+	e.Redacted, e.Keeper, e.For = len(res.Redacted) > 0, j.kept, s.opts.For
 	s.historyErr = s.opts.History.Add(e)
 }
 

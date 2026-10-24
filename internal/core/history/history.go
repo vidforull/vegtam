@@ -55,6 +55,12 @@ type Entry struct {
 	// Redacted is set when what a run without a person was shown of the
 	// response was made sterile (see output.Result.Redact).
 	Redacted bool `json:"redacted,omitzero"`
+	// Keeper is set when the keeper sent the request for the run, which
+	// held no secret value of it.
+	Keeper bool `json:"keeper,omitzero"`
+	// For is, in the keeper's entries, the process it sent the request
+	// for, such as "pid 4242 (agent) uid 501".
+	For string `json:"for,omitempty"`
 }
 
 // Log is the history file in a directory. A Log holds no state of its
@@ -77,7 +83,7 @@ func (l *Log) Path() string { return filepath.Join(l.dir, FileName) }
 func (l *Log) Add(e Entry) error {
 	e.Time = e.Time.UTC()
 	e.URL = password.ReplaceAllString(e.URL, "$1:***@")
-	for _, s := range []*string{&e.Ref, &e.Env, &e.Method, &e.URL, &e.Result} {
+	for _, s := range []*string{&e.Ref, &e.Env, &e.Method, &e.URL, &e.Result, &e.For} {
 		*s = cut(*s)
 	}
 	if err := os.MkdirAll(l.dir, 0o700); err != nil {

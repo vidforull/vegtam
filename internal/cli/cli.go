@@ -18,6 +18,7 @@ import (
 	"github.com/vidforull/vegtam/internal/core/output"
 	"github.com/vidforull/vegtam/internal/core/policy"
 	"github.com/vidforull/vegtam/internal/core/session"
+	"github.com/vidforull/vegtam/internal/keeper"
 	"github.com/vidforull/vegtam/internal/tui"
 )
 
@@ -158,18 +159,24 @@ type Config struct {
 
 // keeper returns the keeper that a run without a person, whose session
 // would have opts, sends the requests that need a secret value through.
+// It is the keeper at its socket (see policy.KeeperSocket), which the run
+// connects to with its first request that needs it, once for the run.
 func (c *Config) keeper(opts session.Options) session.Keeper {
 	if c.local != nil {
 		return c.local(opts)
 	}
-	return noKeeper{}
+	path, err := policy.KeeperSocket()
+	if err != nil {
+		return noKeeper{err}
+	}
+	return keeper.NewLazy(path)
 }
 
-// noKeeper is the keeper of a vegtam that has none to reach.
-type noKeeper struct{}
+// noKeeper is the keeper of a vegtam that has no place for its socket.
+type noKeeper struct{ err error }
 
-func (noKeeper) Send(context.Context, *session.Outbound) (*session.Inbound, error) {
-	return nil, errors.New("no keeper is running: start vegtam keeper in your terminal")
+func (k noKeeper) Send(context.Context, *session.Outbound) (*session.Inbound, error) {
+	return nil, fmt.Errorf("no place for the keeper's socket: %w", k.err)
 }
 
 // asJSON reports whether output should be JSON.
