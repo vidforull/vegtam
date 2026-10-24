@@ -253,7 +253,9 @@ Authorization: Bearer {{token}}
 - **Secret by default.** A captured value is a secret unless the
   directive says `plain`: it is masked in all output from then on,
   starting with the response it came from, and requests show it as its
-  placeholder, `{{token}}`. A plain value is inserted as it is and shown.
+  placeholder, `{{token}}`. It goes back only to the origin of that
+  response (see [Where secrets may go](#where-secrets-may-go)). A plain
+  value is inserted as it is and shown.
 - **Order.** "After this one" means the requests that `run` sends later
   in the same run: the rest of the file and, for a directory, the files
   after it. A captured variable takes precedence over the environment
@@ -320,7 +322,9 @@ ones.
 `SSLConfiguration`, which JetBrains reads from these files, is accepted
 and not applied, with a warning: `verifyHostCertificate: false` does
 not turn off the check of server certificates, and the client
-certificate comes from `--cert` and `--key`.
+certificate comes from `--cert` and `--key`. `$allow`, in the private
+file, is no variable either: it says where the secrets may go (see
+[Where secrets may go](#where-secrets-may-go)).
 
 Without `-e`, no environment file is read and only `{{$env NAME}}`
 resolves. Every unresolved placeholder is an error; all the names missing
@@ -394,6 +398,71 @@ value, such as error messages and response headers and bodies, every
 secret value, including its URL- and JSON-escaped and base64-encoded
 forms, is replaced with `***`.
 
+### Where secrets may go
+
+Every secret is bound to the origins it may be sent to: a scheme, a
+host in lower case and a port unless it is the scheme's own, such as
+`https://api.example.com`, compared exactly. A request that would send
+a secret to another origin, in its URL, a header or its body, is not
+sent: nothing is looked up or connected to. A secret bound to no origin
+goes nowhere. A `Host` header that names another host than the URL's is
+a second origin of the request, over the URL's scheme, as a server that
+routes by it takes it: each secret must be bound to both.
+
+- **Private values** go to the origins that `$allow` names for them, in
+  the same environment of `http-client.private.env.json`:
+
+  ```json
+  {"dev": {"token": "...", "password": "...",
+           "$allow": {"token": ["https://api.example.com"],
+                      "password": ["https://api.example.com", "https://auth.example.com:8443"]}}}
+  ```
+
+  `$shared` may have an `$allow` too. An environment's entry for a name
+  replaces that of `$shared`; the lists are not joined. A name the file
+  has no value for in the environment is ignored, with a warning.
+- **`{{$env NAME}}` and `{{$cmd NAME}}`** go to the origins that the
+  operator's policy binds them to, `secrets.env` and `secrets.cmd` (see
+  [TRANSPORT.md](TRANSPORT.md#the-policy)), and to no other. They are
+  values of the machine, not of a file, and the private file is the
+  nearest one above the `.http` file, which a cloned repository can
+  bring along: it binds its own values only. A `"$env NAME"` or
+  `"$cmd NAME"` key in `$allow` is ignored, with a warning that names
+  the entry of the policy to write.
+- **Captured values** go back to the origin of the response they were
+  taken from, and nowhere else, with nothing to declare; in a dry run,
+  which captures nothing, to the origin of the request that captures
+  them. A `plain` capture is no secret and goes anywhere, unless its
+  value holds a secret value, as a response that echoes the token does:
+  it is then a secret too, bound to the origin of that response. Only a
+  run sees the value, so a dry run takes a `plain` capture for no
+  secret, and neither checks it nor lists it.
+- **`Basic {{user}} {{password}}`** sends two secrets, and each is
+  checked on its own: both must be bound to the origin of the request.
+
+An origin is `https://host`, `https://host:port` or, for instance,
+`http://127.0.0.1:8080`; a final `/` is allowed. One without a scheme,
+with a path, a query, a `#` or a user, or with a `*`, makes the file an
+error of kind `parse`, exit code 2: an origin is named whole, and nothing
+binds a secret by a pattern or by another secret's origins. `$allow` is
+never a variable, and JetBrains' client ignores it. In
+`http-client.env.json` it is ignored, with a warning: that file comes
+with the requests, as a `.http` file does, and whoever wrote them may
+not be the person whose secrets they are.
+
+For a person's `vegtam run`, a request that would send a secret where
+it is not bound is an error of kind `confirm`, exit code 5, and
+`--confirm=<ref>` sends it, to the origin of the request only, this
+once. `--confirm` alone does not: it is given for a whole run, before
+its requests are seen; a request in a file whose name holds a comma,
+which `--confirm=<ref>` cannot name, is sent from the terminal
+interface or once its secret is bound. The terminal interface asks, and
+a second enter sends. Without a
+person it is an error of kind `policy`, exit code 6, which `--confirm`
+does not lift (see
+[AUTOMATION.md](AUTOMATION.md#secrets-and-their-origins)). `vegtam show
+-e <env>` and `run --dry-run` say where each secret of a request may go.
+
 When a redirect leads to another origin (scheme, host or port),
 `Authorization`, `Cookie`, `Proxy-Authorization`, `Referer` and every
 header whose value holds a secret are dropped for the rest of the redirect
@@ -401,7 +470,10 @@ chain. No redirect sends the URL it came from as the `Referer`, as other
 clients do: its query may hold a token. A `Referer` the request has itself
 is sent on as far as its origin. A 307 or 308 redirect sends the body again, so one to another
 origin is refused if the body holds a secret. A redirect from `https` to
-`http` is always refused. A refused redirect is a `network` error.
+`http` is always refused. A refused redirect is a `network` error. A
+redirect to an origin that a secret in the URL is not bound to is
+refused too, as a `policy` error in every mode: a server that passes its
+query on, as an open redirect does, would send the secret there.
 
 ## Cookies
 
@@ -508,6 +580,20 @@ Detection goes by name, so a secret under an ordinary name, such as a
 token in a URL path, stays where it is: read the imported files before
 committing them.
 
+**Where secrets go.** Each secret that the imported requests send is
+bound, with `$allow` in the private file, to the origin they send it
+to, read from their URLs with the public values of each environment:
+with `base_url` set to `https://api.example.com/v1`,
+`{{base_url}}/users` binds it to `https://api.example.com`. The binding
+is in `$shared` if every environment gives the same origin, else in
+each environment. A secret whose requests go to more than one origin,
+or to one that a secret or a variable without a value names, is bound
+to none: the report says to declare its `$allow`, and until then the
+requests that send it are refused. Requests written commented out do
+not count. Nor is a secret bound in an environment where it has no
+value, since vegtam binds only the variables of the file: the report
+asks to set it, and then the error of a run says where to bind it.
+
 A variable whose value refers to other variables, such as
 `"api_root": "{{base_url}}/v2"`, is imported as it is and reported:
 vegtam inserts values without resolving placeholders in them.
@@ -536,5 +622,5 @@ and it overwrites no file without `--force`.
 | response handlers and output redirects (`> {% ... %}`, `> script.js`, `>> file`, `<> file`) | error |
 | JetBrains directives such as `@no-redirect`, `@no-auto-encoding` | error |
 | dynamic variables other than `$env` and `$cmd` (`$uuid`, `$timestamp`, `$random.*`) | error |
-| environment values that are objects, such as `Security`, other than `SSLConfiguration` | error |
+| environment values that are objects, such as `Security`, other than `SSLConfiguration` and `$allow` | error |
 | WebSocket, gRPC and GraphQL requests | error (method not recognised) |

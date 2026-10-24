@@ -1,9 +1,9 @@
 # Transport
 
 How vegtam sends a request: TLS, the HTTP version, time limits,
-proxies, routes and sockets, and cookies; what the operator's policy
-allows a run without a person; and what `--verbose` says about each
-exchange. The flags are those of `vegtam run` and `vegtam tui`; where
+proxies, routes and sockets, redirects and cookies; what the operator's
+policy allows a run without a person; and what `--verbose` says about
+each exchange. The flags are those of `vegtam run` and `vegtam tui`; where
 one has a counterpart in curl, [Flags](#flags) says how they differ.
 
 ## Where a setting comes from
@@ -31,6 +31,7 @@ from the policy alone:
 | loopback and private addresses | no | connected to | only those of `network.allow` | `network.allow` |
 | cloud metadata, link-local, multicast, unspecified addresses | no | never | never | never |
 | cookie jar | `@no-cookie-jar` | `--no-cookies` | the same | |
+| where a secret may go | no | `--confirm=<ref>`, for that request, to its origin | no | `secrets`, for `{{$env NAME}}` and `{{$cmd NAME}}`; a value of `http-client.private.env.json`, its `$allow` |
 
 ## The policy
 
@@ -48,7 +49,9 @@ be left out:
               "insecure_hosts": ["dev.example.com:8443"], "resolve": ["api.example.com:443:127.0.0.1"],
               "connect_to": ["api.example.com:443:staging.example.com:8443"], "unix_sockets": ["/var/run/docker.sock"],
               "confirm": "mutations"},
-  "hosts":   {"api.internal.example.com:443": {"cacert": "~/certs/corp.pem", "cert": "~/certs/me.pem", "key": "~/certs/me.key"}}
+  "hosts":   {"api.internal.example.com:443": {"cacert": "~/certs/corp.pem", "cert": "~/certs/me.pem", "key": "~/certs/me.key"}},
+  "secrets": {"env": {"API_TOKEN": ["https://api.example.com"]},
+              "cmd": {"TOKEN": ["https://api.example.com", "https://auth.example.com:8443"]}}
 }
 ```
 
@@ -64,6 +67,17 @@ tells the local resolver the name, with `socks5h` too. The proxy looks
 it up again, and may get another answer: its own rules are the last
 word there. `network.confirm` is about requests, not the network: see
 [AUTOMATION.md](AUTOMATION.md#confirmation).
+
+`secrets` says where the values of `{{$env NAME}}` and `{{$cmd NAME}}`
+may go, by `NAME`: `env` for environment variables, `cmd` for the
+commands of any command file. Each origin is written as in `$allow`,
+`https://host` or `https://host:port`. Nothing else binds these values:
+they are the machine's, and `$allow` in `http-client.private.env.json`,
+a file that a cloned repository can bring, binds only the values of that
+file. It holds in every mode: a value that the policy does not bind
+goes nowhere, unless a person at a terminal confirms the request (see
+[FORMAT.md](FORMAT.md#where-secrets-may-go)). `vegtam policy --json`
+lists them in `policy.secrets`, by placeholder.
 
 ## Flags
 
@@ -94,6 +108,18 @@ curl uses 1080 for all; `socks5` is `socks5h`, the proxy looks up the
 name, as in Go; `--verbose` masks secrets, where curl's `-v`
 prints `Authorization` and `Cookie` as they are; `SSLKEYLOGFILE` is not
 read; HTTP/3 is not supported.
+
+## Redirects
+
+Redirects are followed, and each secret is kept to the origins it may
+go to. On the way to another origin, `Authorization`, `Cookie`,
+`Proxy-Authorization` and every header that holds a secret are
+dropped, and a 307 or 308 whose body holds a secret is refused. A
+redirect to an origin that a secret in the URL is not bound to is
+refused before that hop, as an error of kind `policy` in every mode: a
+server that passes its query on, as an open redirect does, would send
+the secret there. A redirect from `https` to `http` is always refused.
+[FORMAT.md](FORMAT.md#where-secrets-may-go) has the rules.
 
 ## Diagnostics
 

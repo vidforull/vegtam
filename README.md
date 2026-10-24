@@ -57,7 +57,8 @@ Authorization: Bearer {{token}}
 Beside it, `http-client.env.json` holds
 `{"dev": {"host": "http://127.0.0.1:8080"}}`. The private file,
 `http-client.private.env.json`, is kept out of version control and
-holds `{"dev": {"password": "correct-horse-battery-staple"}}`:
+holds `{"dev": {"password": "correct-horse-battery-staple"}}`, with
+`$allow` to say where the password may go ([Secrets](#secrets)):
 
 ```console
 $ vegtam run api.http -e dev
@@ -96,6 +97,20 @@ Wherever a request is shown, a secret is its placeholder, such as
 base64-encoded. Masking goes by value, so a secret that comes back
 hashed or in another letter case is not recognised
 ([docs/AUTOMATION.md](docs/AUTOMATION.md#secrets)).
+
+A secret goes only where it belongs: a value of the private file to
+the origins its `$allow` names, `{{$env NAME}}` and `{{$cmd NAME}}` to
+those of the operator's policy, and a capture back to the origin of its
+response. A request that would send it elsewhere, as a cloned `.http`
+file or a link in a response might, is not sent, and a secret bound to
+no origin goes nowhere
+([docs/FORMAT.md](docs/FORMAT.md#where-secrets-may-go)). The private
+file of the example above:
+
+```json
+{"dev": {"password": "correct-horse-battery-staple",
+         "$allow": {"password": ["http://127.0.0.1:8080"]}}}
+```
 
 `{{$cmd NAME}}` runs a command from `http-client.cmd.json`, such as
 `pass show dev/api-token`, once a person has read the file and run
@@ -191,7 +206,7 @@ variables. [docs/TUI.md](docs/TUI.md) has every key.
 
 - `.http` and environment files in JetBrains' format, a subset ([docs/FORMAT.md](docs/FORMAT.md)).
 - Checks and chains: `@assert`, `@capture`, and `@note` for a request that needs a second look.
-- Secrets from private files, environment variables and trusted commands, masked by value.
+- Secrets from private files, environment variables and trusted commands, masked by value and sent only to the origins they are bound to.
 - A terminal interface, a history of runs, and import from Postman.
 - Transport: CAs and PEM client certificates per host, HTTP/2, time limits, cookies, proxies, curl's `--resolve` and `--connect-to`, unix sockets, and `--verbose` ([docs/TRANSPORT.md](docs/TRANSPORT.md)).
 - For programs: JSON with a schema, exit codes, `describe`, `--confirm`, and the operator's policy.

