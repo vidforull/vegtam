@@ -88,7 +88,10 @@ it through the keeper, which holds the values in the person's terminal.
 the default, or `"unbound"`, only for a request that would send a
 secret where it is not bound. Both weaken what a run without a person
 gets, so the policy alone says them, as it says `network.confirm`
-([AUTOMATION.md](AUTOMATION.md#without-a-person-no-secrets)).
+([AUTOMATION.md](AUTOMATION.md#without-a-person-no-secrets),
+[KEEPER.md](KEEPER.md)). The keeper reads the policy once, when it
+starts, and sends with its rules for a run without a person: its
+`network`, `limits` and `hosts`, not the flags of the run it sends for.
 
 ## Flags
 

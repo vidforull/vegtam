@@ -167,6 +167,17 @@ terminal. With a shell of its own, it can run vegtam as a person would
 ([docs/AUTOMATION.md](docs/AUTOMATION.md#the-operators-policy)).
 [docs/AUTOMATION.md](docs/AUTOMATION.md) is the whole contract.
 
+### Agents and secrets
+
+An agent that needs a secret sends its request through the keeper, a
+process in your terminal: `vegtam secret` puts your secrets in an
+encrypted store, `vegtam keeper` holds them, and the policy says
+`"secrets": {"unattended": "keeper"}`. The keeper sends the request
+itself, after you type the code it shows, and gives the agent the
+response with every secret masked: the agent never holds a value. It
+keeps the agent's own process out, not another user's: for that, run the
+agent in a container or a virtual machine ([docs/KEEPER.md](docs/KEEPER.md)).
+
 ### Terminal interface
 
 The terminal interface shows the requests, the selected one as it
@@ -216,7 +227,7 @@ variables. [docs/TUI.md](docs/TUI.md) has every key.
 
 - `.http` and environment files in JetBrains' format, a subset ([docs/FORMAT.md](docs/FORMAT.md)).
 - Checks and chains: `@assert`, `@capture`, and `@note` for a request that needs a second look.
-- Secrets from private files, environment variables and trusted commands, masked by value and sent only to the origins they are bound to.
+- Secrets from private files, environment variables, trusted commands and an encrypted store, masked by value and sent only to the origins they are bound to; none for a run without a person, unless a keeper in your terminal sends for it ([docs/KEEPER.md](docs/KEEPER.md)).
 - A terminal interface, a history of runs, and import from Postman.
 - Transport: CAs and PEM client certificates per host, HTTP/2, time limits, cookies, proxies, curl's `--resolve` and `--connect-to`, unix sockets, and `--verbose` ([docs/TRANSPORT.md](docs/TRANSPORT.md)).
 - For programs: JSON with a schema, exit codes, `describe`, `--confirm`, and the operator's policy.
@@ -261,6 +272,7 @@ HEAD or OPTIONS, and secrets masked by value.
 - [docs/FORMAT.md](docs/FORMAT.md): the `.http` subset, directives, environments, secrets, Postman.
 - [docs/AUTOMATION.md](docs/AUTOMATION.md): the contract for scripts and agents.
 - [docs/TRANSPORT.md](docs/TRANSPORT.md): TLS, proxies, routes, time limits, the policy file, diagnostics.
+- [docs/KEEPER.md](docs/KEEPER.md): the store of secrets and the keeper, for agents that must not see them.
 - [docs/TUI.md](docs/TUI.md): the terminal interface and its keys.
 - [docs/RELEASE.md](docs/RELEASE.md): how a release is built and checked.
 - [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and why.

@@ -1492,3 +1492,88 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
 - **No lock between processes.** Two writers of the store, a person's
   `vegtam secret` while another runs, keep the last one's file; each
   writes it whole and atomically.
+
+## 2026-10-24: the keeper
+
+- **Isolation, not a well-behaved agent.** The threat is the one of
+  "without a person, no secrets": a program in the person's shell reads
+  what they can, and what vegtam shows it lands in its context. No rule
+  that vegtam gives the program can be relied on, since the program
+  decides what it runs. What can be relied on is that the values are
+  not in its process. So a run without a person holds none, and the
+  keeper, a process of the person's in their own terminal, holds them,
+  as `ssh-agent -c` holds keys: it never gives a value away. It sends
+  the request itself, and gives back the result, masked and sterile. A
+  keeper that handed out values on request would hand them to the
+  program that asks.
+- **The whole run, over one connection.** Once one request of a run needs
+  it, every request of the run goes through it: the cookies of its
+  responses and the secret values its captures take stay in the keeper,
+  and the requests after them need them. The run prepares all its
+  requests before it sends the first, so it knows. A run that needs no
+  secret never connects, and needs no keeper. A value the run captured
+  itself before, from a response it was given, it hands to the keeper
+  with the request that sends it: it is the program's own.
+- **What the keeper reads.** The store, its own environment for
+  `{{$env NAME}}`, and the command files that the person trusted, which
+  it runs itself, once its person has said yes: the run names the file of
+  the request, any file the person trusted. Not the private environment file near the requests: a
+  program can write one there, and the keeper would read the program's
+  values as the person's, and send them where the program's `$allow`
+  says. The person moves their values to the store with
+  `vegtam secret import`.
+- **Where each value goes, checked in the keeper.** The keeper holds the
+  bindings as it holds the values: those of the store, of the policy and
+  of the captures it took. The run's own check is no check at all: the
+  program could change it.
+- **A code, not Enter.** The keeper asks before each request with a
+  secret, or with `keeper_asks: "unbound"` only before one that sends a
+  secret where it is not bound. The answer is four characters drawn for
+  that question, typed: Enter is pressed by reflex, and by anything that
+  can write to the terminal, and a "y" is learnt by heart. The question
+  shows the method, the URL with its placeholders, the names of the
+  headers and the size of the body, and for each secret where in the
+  request it is and whether it is bound to where the request goes. Anything
+  else, no answer within a minute, or the end of the input, refuses it;
+  a line typed before the question is no answer to it. The question
+  shows which process asks, by the pid and uid the system gives, and its
+  name, which only says what the process calls itself.
+- **A confirmed request may go where a secret is not bound.** The keeper
+  asks of such a request whatever `keeper_asks` says, and marks the
+  secret as not bound; the code sends it there, once, as
+  `--confirm=<ref>` does a person's own request. Refusing it outright was
+  the other way: it would make the keeper's person less able than the
+  same person at their own terminal, for the same request, seen whole.
+  Binding the secret is the way for a request that belongs there.
+- **No tmux, screen or script without --multiplexer.** There another
+  process can read what the keeper shows and type the code it asks for:
+  the code would prove nothing. A person who means to run it there says
+  so with a flag of the keeper's, which a program does not pass, as the
+  keeper is started by a person in their terminal.
+- **The keeper protects itself, where the system lets it.** It makes its
+  process undumpable on Linux, so that other processes of the user
+  cannot attach to it or read its memory, and denies attaching on macOS;
+  it locks the password's and the key's memory, so that they are not
+  written to swap; it makes its files 0600. Its socket is 0600 in a
+  directory of 0700, with a lock file for one keeper a socket, and it
+  serves the processes of its own user; a run talks only to a keeper of
+  its own user.
+- **The policy, read once.** The keeper reads the policy when it starts.
+  What weakens its rules is the operator's to change, and the file is
+  one that a process of the user can write: a change to its secrets is
+  shown in the keeper's terminal, and applies when the keeper starts
+  again.
+- **Versioned.** The protocol says its version first, and each side
+  refuses another: a keeper and a run of two vegtams that read the
+  requests differently must not guess.
+- **What is left open.** One user is one zone of trust. A process of the
+  user can still read the store's file, whose password is typed and
+  never kept; watch the terminal; stop the keeper; or lead the person to
+  type a code for a request they did not read. A process that attaches
+  to the keeper before it makes itself undumpable, or as root, sees its
+  memory. Full isolation is the program in a container, a virtual
+  machine or under another user, with the socket passed to it. A run
+  without a person in CI has no secrets, and no one to start a keeper.
+  The flags of transport of the program's run, such as `--insecure`,
+  do not reach the keeper, which sends with the policy's rules. These
+  are said in docs/KEEPER.md.

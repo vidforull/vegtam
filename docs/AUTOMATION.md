@@ -100,6 +100,7 @@ command and on its argument, never on what happens at run time:
 | `policy` | `policy`: the operator's policy and what applies to a run |
 | `describe` | `describe`: what a program needs to know to run vegtam |
 | `doctor` | `doctor`: where the secrets of this shell and directory are, and who can read them |
+| `secret list`, `secret set`, `secret rm`, `secret allow`, `secret deny`, `secret import` | `store`: the names of the store's secrets and where each may go, never a value |
 | an error that ends a command before any request | `error` only |
 
 A result for `run api/users.http#list -e dev` looks like this (shortened):
@@ -568,7 +569,29 @@ the keeper instead, `"secrets": {"unattended": "keeper"}`: a process in
 the person's terminal that holds the values, sends the request and
 gives back what the run may see, and asks its person before it does
 (`secrets.keeper_asks`). Neither a flag, a variable nor a file can say
-so: the policy alone.
+so: the policy alone. [KEEPER.md](KEEPER.md) says how to set it up.
+
+With the keeper, a run without a person that needs a secret sends every
+one of its requests through it, from the first, over one connection;
+a run that needs none never connects to it. What the program gets is
+the same result as ever, masked and sterile: `captures` name the
+secret values the keeper keeps, as they always did, and the requests
+after them use them through it. The program's own flags of transport,
+such as `--insecure`, `--cacert` or `--resolve`, do not reach the
+keeper, which sends with the policy's rules for a run without a person.
+A dry run does not connect to it. Its errors are of kind `policy`, exit
+code 6:
+
+- `no keeper is running at <socket>: start vegtam keeper in your
+  terminal`: nothing listens at the socket;
+- `the keeper speaks version N; this vegtam speaks 1`: run a keeper of
+  the same vegtam;
+- `... is not sent: the keeper's operator did not confirm it: ...`: its
+  person typed another code, or none within a minute; for a secret that
+  would go where it is not bound, the message says that first;
+- `the keeper closed the connection`: it stopped.
+
+Ask the person; do not try another way to send the request.
 
 What such a run is shown of a response is sterile, whether its requests
 held a secret or not, since a response hands out credentials that vegtam
@@ -738,9 +761,10 @@ code 2. A program that has to reach a server with a private CA passes
 
 ## Secrets
 
-Values from `http-client.private.env.json`, from `{{$env NAME}}` and
-`{{$cmd NAME}}` placeholders and from `# @capture` directives without
-`plain` are secrets (see [FORMAT.md](FORMAT.md)). vegtam never prints
+Values from `http-client.private.env.json`, from the store of secrets
+(`vegtam secret`), from `{{$env NAME}}` and `{{$cmd NAME}}` placeholders
+and from `# @capture` directives without `plain` are secrets (see
+[FORMAT.md](FORMAT.md)). vegtam never prints
 them:
 
 - requests are shown with the placeholder, `Bearer {{token}}`;
@@ -784,7 +808,8 @@ secrets (`mode.secrets`); what the policy says of them
 from being read); the private file that the current directory's
 requests would read, with its mode and owner; which `{{$env NAME}}` of
 the policy are set in this environment; the keeper's socket, and
-whether something is there; a terminal multiplexer this shell runs in
+whether a keeper of yours answers there, with its pid and the
+multiplexer it runs in, if any; a terminal multiplexer this shell runs in
 (`TMUX`, `STY`); and the modes of vegtam's configuration directory and
 policy. `warnings` says what of it a process of the same user, an agent
 started from this shell among them, can read or change. It reads no
@@ -798,9 +823,10 @@ finds.
 `XDG_DATA_HOME`): one JSON object a line, with the time (UTC), the
 `ref` with the file as an absolute path, the environment, the method and
 the URL as written, with their placeholders, the status, the time it
-took, the `result` (`ok` or the error kind), `truncated`, and `redacted`
+took, the `result` (`ok` or the error kind), `truncated`, `redacted`
 when what a run without a person was shown of the response was made
-sterile. It holds no
+sterile, `keeper: true` when the keeper sent the request, and, in the
+keeper's own entries, `for`, the process it sent it for. It holds no
 header, body, variable value or captured value, and no URL as resolved:
 nothing a secret could be in; a password written in a URL is kept as
 `***`. A dry run, a file that does not parse and

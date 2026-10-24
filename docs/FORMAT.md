@@ -388,9 +388,12 @@ request shows `{{$cmd NAME}}`.
 
 ## Secrets
 
-Values from `http-client.private.env.json`, from `{{$env NAME}}` and
-from `{{$cmd NAME}}` are secrets, and so are captured values not marked
-`plain`. A resolved
+Values from `http-client.private.env.json`, from the person's store of
+secrets (`vegtam secret`, see [KEEPER.md](KEEPER.md)), from
+`{{$env NAME}}` and from `{{$cmd NAME}}` are secrets, and so are
+captured values not marked `plain`. A `{{name}}` takes, in order, a
+value a capture took, one of the private file, one of the store, and
+one of the public file. A resolved
 request holds only their names; the values are inserted
 when the request is sent. Wherever a request is shown, a secret appears as
 its placeholder (`Bearer {{token}}`). In other text that might contain a
@@ -421,6 +424,8 @@ routes by it takes it: each secret must be bound to both.
   `$shared` may have an `$allow` too. An environment's entry for a name
   replaces that of `$shared`; the lists are not joined. A name the file
   has no value for in the environment is ignored, with a warning.
+- **Values of the store** go to the origins that `vegtam secret allow`
+  gives them; `vegtam secret import` takes those of `$allow`.
 - **`{{$env NAME}}` and `{{$cmd NAME}}`** go to the origins that the
   operator's policy binds them to, `secrets.env` and `secrets.cmd` (see
   [TRANSPORT.md](TRANSPORT.md#the-policy)), and to no other. They are
