@@ -11,7 +11,7 @@ import (
 func runCLI(t *testing.T, tty bool, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	code = Run(t.Context(), args, Config{Stdout: &out, Stderr: &errOut, TTY: tty, Version: "v1.2.3"})
+	code = Run(t.Context(), args, Config{Stdout: &out, Stderr: &errOut, TTY: tty, Version: "v1.2.3", local: testKeeper})
 	return code, out.String(), errOut.String()
 }
 

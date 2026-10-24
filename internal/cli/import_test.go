@@ -15,6 +15,9 @@ import (
 const postmanExport = "../../testdata/postman/export"
 
 func TestImportPostman(t *testing.T) {
+	// The dry runs below say where each secret may go: as the keeper's
+	// runs would, which nothing refuses for holding no value.
+	writePolicy(t, `{"secrets": {"unattended": "keeper"}}`)
 	out := filepath.Join(t.TempDir(), "imported")
 	code, stdout, stderr := runCLI(t, false, "import", "postman", postmanExport, "-o", out)
 	if code != exitOK || stderr != "" {

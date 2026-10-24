@@ -56,8 +56,10 @@ CA file or the variable of the proxy's credentials cannot stop it.`,
 			res := &output.Result{Ref: output.Ref(f, i), Request: output.Written(f.Requests[i]), Transport: output.NewTransport(st)}
 			warnings = slices.Concat(f.Requests[i].Warnings, warnings)
 			if envName != "" {
+				// A run without a person reads no secret value, for show too.
 				s := session.New(session.Options{
 					Env: envName, DryRun: true, Trust: policy.DefaultStore(), Transport: tr, Secrets: pol.Secrets,
+					Confirm: session.Confirm{Person: !cfg.unattended()},
 				})
 				cfg.secrets = s.Masker
 				j := s.Prepare(cmd.Context(), f, i)

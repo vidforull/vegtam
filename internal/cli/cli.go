@@ -17,6 +17,7 @@ import (
 	"github.com/vidforull/vegtam/internal/core/history"
 	"github.com/vidforull/vegtam/internal/core/output"
 	"github.com/vidforull/vegtam/internal/core/policy"
+	"github.com/vidforull/vegtam/internal/core/session"
 	"github.com/vidforull/vegtam/internal/tui"
 )
 
@@ -72,7 +73,8 @@ var exitCodes = []struct {
 	{exitPolicy, "blocked by policy: a {{$cmd NAME}} whose command file is not trusted (see vegtam trust --help), " +
 		"an address that vegtam never connects to or that the operator's policy does not allow, " +
 		"a secret that would go to an origin it is not bound to, from a request with no person at a terminal or " +
-		"from a redirect (see vegtam run --help), or a policy file that cannot be read (see vegtam policy --help)"},
+		"from a redirect (see vegtam run --help), a secret value that a run with no person at a terminal does not get, " +
+		"a keeper that cannot be reached or did not send the request, or a policy file that cannot be read (see vegtam policy --help)"},
 	{exitCanceled, "interrupted by Ctrl-C (SIGINT) or SIGTERM"},
 }
 
@@ -143,6 +145,25 @@ type Config struct {
 	// Commands write to out and errOut, never to Stdout and Stderr, so
 	// that everything they print goes through masker.
 	out, errOut io.Writer
+	// local, if set, is the keeper of a run without a person, for tests: a
+	// session of their own process that holds the values.
+	local func(session.Options) session.Keeper
+}
+
+// keeper returns the keeper that a run without a person, whose session
+// would have opts, sends the requests that need a secret value through.
+func (c *Config) keeper(opts session.Options) session.Keeper {
+	if c.local != nil {
+		return c.local(opts)
+	}
+	return noKeeper{}
+}
+
+// noKeeper is the keeper of a vegtam that has none to reach.
+type noKeeper struct{}
+
+func (noKeeper) Send(context.Context, *session.Outbound) (*session.Inbound, error) {
+	return nil, errors.New("no keeper is running: start vegtam keeper in your terminal")
 }
 
 // asJSON reports whether output should be JSON.
@@ -297,7 +318,7 @@ func Run(ctx context.Context, args []string, cfg Config) (code int) {
 	root.SetErr(cfg.errOut)
 	root.PersistentFlags().BoolVar(&cfg.json, "json", false, "print JSON even on a terminal")
 	root.AddCommand(newRunCmd(&cfg), newShowCmd(&cfg), newListCmd(&cfg), newTUICmd(&cfg), newImportCmd(&cfg),
-		newTrustCmd(&cfg), newPolicyCmd(&cfg), newSchemaCmd(&cfg), newDescribeCmd(&cfg), newVersionCmd(&cfg))
+		newTrustCmd(&cfg), newPolicyCmd(&cfg), newSchemaCmd(&cfg), newDescribeCmd(&cfg), newDoctorCmd(&cfg), newVersionCmd(&cfg))
 
 	cmd, err := root.ExecuteContextC(ctx)
 	if err == nil {

@@ -42,7 +42,8 @@ vegtam does what it does on its own. Every field may be left out:
               "cert": "~/certs/me.pem", "key": "~/certs/me.key"}},
     "secrets": {"env": {"API_TOKEN": ["https://api.example.com"]},
                 "cmd": {"TOKEN": ["https://api.example.com",
-                                  "https://auth.example.com:8443"]}}
+                                  "https://auth.example.com:8443"]},
+                "unattended": "deny", "keeper_asks": "always"}
   }
 
 limits are ceilings on the time limits of every request: on the flags,
@@ -88,7 +89,17 @@ http-client.private.env.json binds its own values, in "$allow"; neither
 the public environment file nor a .http file binds any. A secret goes
 to its origins alone, and one bound to none goes nowhere: a request
 that would send it elsewhere is not sent, unless a person at a terminal
-confirms that request by name.`,
+confirms that request by name.
+
+secrets.unattended is what a run without a person does with a request
+that needs a secret value: "deny", the default, refuses it, exit code
+6, and such a run holds no secret value at all; "keeper" sends it
+through the keeper, a process in the person's terminal that holds the
+values, sends the request, and gives back what the run may see.
+secrets.keeper_asks is when the keeper asks its person: "always", the
+default, before each request with a secret; "unbound" only before one
+that would send a secret where it is not bound. Whatever weakens these
+is said here alone: no flag, variable or file can say it.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			pol, err := cfg.loadPolicy()
@@ -109,12 +120,25 @@ confirms that request by name.`,
 // policyDoc returns pol as vegtam policy prints it, with what applies to
 // a run in the mode of this one.
 func (c *Config) policyDoc(pol *policy.Policy) *output.Policy {
-	run := output.PolicyRun{Unattended: c.unattended()}
+	run := output.PolicyRun{Unattended: c.unattended(), Secrets: runSecrets(c.unattended(), pol)}
 	run.ConfirmMutations = run.Unattended && pol.Network.ConfirmMutations()
 	if proxy, _ := proxyOf(pol, run.Unattended, httpproxy.FromEnvironment(), "", nil); proxy != nil {
 		run.HTTPSProxy, run.HTTPProxy, run.NoProxy = output.ProxyURL(proxy.HTTPSProxy), output.ProxyURL(proxy.HTTPProxy), proxy.NoProxy
 	}
 	return output.NewPolicy(pol, run)
+}
+
+// runSecrets returns what a run does with a request that needs a secret
+// value, as output.PolicyRun.Secrets says, with pol, or with no policy
+// that can be read if pol is nil.
+func runSecrets(unattended bool, pol *policy.Policy) string {
+	switch {
+	case !unattended:
+		return output.RunSecretsAll
+	case pol != nil && pol.Secrets.Keeper():
+		return output.RunSecretsKeeper
+	}
+	return output.RunSecretsNone
 }
 
 // policyText returns p as text.
@@ -168,12 +192,20 @@ func policyText(p *output.Policy) string {
 		fmt.Fprintf(tw, "host %s\t%s\n", h.Host, strings.Join(parts, ", "))
 	}
 	secretRows(tw, p.Secrets)
+	fmt.Fprintf(tw, "unattended\t%s\n", p.SecretsMode.Unattended)
+	fmt.Fprintf(tw, "keeper asks\t%s\n", p.SecretsMode.KeeperAsks)
 	tw.Flush()
 	r := p.Run
 	if r.Unattended {
 		b.WriteString("\nThis run has no person at a terminal: loopback and private addresses only as network.allow names them.\n")
 	} else {
 		b.WriteString("\nThis run has a person at a terminal: loopback and private addresses are allowed.\n")
+	}
+	switch r.Secrets {
+	case output.RunSecretsNone:
+		b.WriteString("It gets no secret value: a request that needs one is not sent (secrets.unattended is \"deny\").\n")
+	case output.RunSecretsKeeper:
+		b.WriteString("A request that needs a secret value goes through the keeper, which asks its person; this run never sees the value.\n")
 	}
 	if r.ConfirmMutations {
 		b.WriteString("A method other than GET, HEAD or OPTIONS, and a request with # @note, are sent only with --confirm.\n")

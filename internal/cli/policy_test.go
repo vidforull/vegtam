@@ -309,9 +309,9 @@ func TestGuardRun(t *testing.T) {
 				decode(t, stdout, &doc)
 				want := "is private (loopback), and no person is at a terminal; allow it in policy: network.allow"
 				if tt.policy == "" {
-					// Without a policy, {{$env VEGTAM_TEST_KEY}} is bound to no
-					// origin, which is refused before the address is.
-					want = "secret {{$env VEGTAM_TEST_KEY}} may not go to " + fx.host + ": it is bound to no origin"
+					// Without a policy, a run without a person gets no secret
+					// value, which is refused before the address is.
+					want = "secret {{token}} is not available to a run without a person"
 				}
 				if doc.Error.Kind != "policy" || !strings.Contains(doc.Error.Message, want) {
 					t.Errorf("error %+v", doc.Error)
@@ -324,15 +324,16 @@ func TestGuardRun(t *testing.T) {
 			}
 		})
 	}
-	// Without a policy, a request whose secrets may go there is refused
-	// for its address.
+	// With a policy that allows no address, a request whose secrets may go
+	// there is refused for its address, by the keeper too.
 	if err := os.WriteFile(fx.path("guard.http"), []byte("GET {{host}}/echo?key={{token}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	writePolicy(t, `{"secrets": {"unattended": "keeper"}}`)
 	code, stdout, stderr := runCLI(t, false, "run", fx.path("guard.http"), "-e", "test")
 	if code != exitPolicy || !strings.Contains(stderr, "is private (loopback), and no person is at a terminal; allow it in policy: network.allow") ||
 		strings.Contains(stdout+stderr, privateSecret) {
-		t.Errorf("no policy, {{token}} alone = %d\n%s\n%s", code, stdout, stderr)
+		t.Errorf("no address allowed, {{token}} alone = %d\n%s\n%s", code, stdout, stderr)
 	}
 }
 
@@ -598,7 +599,7 @@ func TestProxyAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	fx.allow(t, "http://192.0.2.1")
-	writePolicy(t, `{"network": {"proxy": "`+proxy.URL+`", "proxy_auth": "$env VEGTAM_TEST_PROXY_AUTH"}}`)
+	writePolicy(t, `{"network": {"proxy": "`+proxy.URL+`", "proxy_auth": "$env VEGTAM_TEST_PROXY_AUTH"}, "secrets": {"unattended": "keeper"}}`)
 	t.Setenv("VEGTAM_TEST_PROXY_AUTH", credentials)
 	forms := []string{"Pr0xy/P4ss+word", base64.StdEncoding.EncodeToString([]byte(credentials)), url.QueryEscape("Pr0xy/P4ss+word"), url.PathEscape("Pr0xy/P4ss+word")}
 	for _, args := range [][]string{{"--json"}, {"--verbose"}} {

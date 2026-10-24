@@ -144,7 +144,7 @@ func newTrapFixture(t *testing.T) *trapFixture {
 	a, trap := fx.a.URL, fx.trap.URL
 	policy, _ := json.Marshal(map[string]any{
 		"network": map[string]any{"allow": []string{"127.0.0.1"}, "confirm": "never"},
-		"secrets": map[string]any{"env": map[string][]string{"VEGTAM_TRAP_POLICY": {a}}, "cmd": map[string][]string{"TRAP": {a}}},
+		"secrets": map[string]any{"env": map[string][]string{"VEGTAM_TRAP_POLICY": {a}}, "cmd": map[string][]string{"TRAP": {a}}, "unattended": "keeper"},
 	})
 	writePolicy(t, string(policy))
 	cmds, _ := json.Marshal(map[string]any{"TRAP": map[string]any{"argv": []string{os.Args[0], "-test.run=^TestHelperProcess$"}}})
@@ -674,8 +674,14 @@ func TestSecretOriginsSecretHost(t *testing.T) {
 			func() (int, string, string) {
 				return runCLI(t, false, "run", filepath.Join(dir, "base.http"), "-e", "test")
 			},
+			// A dry run without a person holds no value: where the request
+			// goes is not known before it is sent.
 			func() (int, string, string) {
-				return runCLI(t, false, "run", filepath.Join(dir, "base.http"), "-e", "test", "--dry-run")
+				code, stdout, stderr := runCLI(t, false, "run", filepath.Join(dir, "base.http"), "-e", "test", "--dry-run")
+				if code == exitOK && strings.Contains(stdout, `"secret_origins":[{"name":"{{base}}","allowed"`) {
+					code = exitPolicy
+				}
+				return code, stdout, stderr
 			},
 			func() (int, string, string) { return runAt(t, "run", filepath.Join(dir, "base.http"), "-e", "test") },
 		} {

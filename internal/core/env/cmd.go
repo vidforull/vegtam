@@ -187,7 +187,7 @@ func (l *Loader) findCommands(dir string) (*commands, error) {
 	if err != nil {
 		return nil, err
 	}
-	path := nearest(abs, CommandFileName)
+	path := Nearest(abs, CommandFileName)
 	if path == "" {
 		return nil, fmt.Errorf("no %s in %s or above", CommandFileName, abs)
 	}
@@ -213,10 +213,15 @@ func (l *Loader) findCommands(dir string) (*commands, error) {
 }
 
 // command checks that the command of r may run: its command file is
-// trusted and has it. Outside a dry run, it also runs it, once for the
-// whole run, so that the masker knows the value before anything is
-// printed.
+// trusted and has it. Outside a dry run, and but for a run without a
+// person, it also runs it, once for the whole run, so that the masker
+// knows the value before anything is printed.
 func (v *Vars) command(ctx context.Context, r core.Ref, src core.Source) error {
+	return v.commandRun(ctx, r, src, !v.loader.opts.DryRun && !v.loader.opts.Held)
+}
+
+// commandRun is command, which runs the command only with run.
+func (v *Vars) commandRun(ctx context.Context, r core.Ref, src core.Source, run bool) error {
 	cf, err := v.commandFile()
 	if _, ok := errors.AsType[*core.Error](err); ok {
 		return err
@@ -233,13 +238,34 @@ func (v *Vars) command(ctx context.Context, r core.Ref, src core.Source) error {
 	if _, ok := cf.Commands[r.Name]; !ok {
 		return fmt.Errorf("%s: no command %s in %s (commands: %s)", r, r.Name, cf.Path, strings.Join(slices.Sorted(maps.Keys(cf.Commands)), ", "))
 	}
-	if v.loader.opts.DryRun {
+	if !run {
 		return nil
 	}
 	if _, err = v.loader.run(ctx, cf, r.Name); errors.Is(err, context.Canceled) {
 		return core.Errorf(core.KindCanceled, src, "%v", err)
 	}
 	return err
+}
+
+// Commands checks the commands of the {{$cmd NAME}} secrets of p, which a
+// run without a person resolved and a keeper sends, as Prepare checks them
+// for a request of its own: their command file, found from the directory
+// of the request's file up, must be trusted and have them. With run, it
+// runs them too, once: a keeper runs them once its person says yes.
+func (v *Vars) Commands(ctx context.Context, p *core.Prepared, run bool) error {
+	for _, t := range p.Texts() {
+		for _, seg := range t {
+			if seg.Secret == nil || seg.Secret.Capture {
+				continue
+			}
+			if name, ok := strings.CutPrefix(seg.Secret.Name, "$cmd "); ok {
+				if err := v.commandRun(ctx, core.Ref{Func: "$cmd", Name: name}, p.Request.Source, run); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // commandValue returns the value of {{$cmd name}} for the requests of v:

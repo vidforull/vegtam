@@ -20,10 +20,12 @@ type Describe struct {
 	History     DescribeHistory `json:"history"`
 }
 
-// DescribeMode is whether a person is at a terminal, and why.
+// DescribeMode is whether a person is at a terminal, and why, and what
+// such a run does with a request that needs a secret value.
 type DescribeMode struct {
 	Unattended bool   `json:"unattended"`
 	Why        string `json:"why"`
+	Secrets    string `json:"secrets"` // RunSecretsAll, RunSecretsNone or RunSecretsKeeper
 }
 
 // DescribeCommand is a command, its arguments and its flags.

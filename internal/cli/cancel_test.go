@@ -48,7 +48,7 @@ func TestCanceled(t *testing.T) {
 			timer := time.AfterFunc(100*time.Millisecond, cancel)
 			var stdout, stderr bytes.Buffer
 			start := time.Now()
-			code := Run(ctx, tt.args, Config{Stdout: &stdout, Stderr: &stderr, TTY: tty})
+			code := Run(ctx, tt.args, Config{Stdout: &stdout, Stderr: &stderr, TTY: tty, local: testKeeper})
 			timer.Stop()
 			cancel()
 			if code != exitCanceled || !strings.Contains(stderr.String(), "context canceled") {

@@ -37,31 +37,31 @@ func (f *File) Find(ref string) (*Request, bool) {
 // Request is one request as written in a .http file. URL, header values
 // and Body keep their {{...}} placeholders; package env resolves them.
 type Request struct {
-	Name       string // from "# @name"; empty when the request has none
-	Method     string
-	URL        string
-	Version    string // HTTP11, HTTP2 or HTTP2PriorKnowledge, if written after the URL
-	Headers    []Header
-	Body       string // inline body
-	BodyFile   string // path from a "< path" body, as written
-	Directives []Directive
-	Source     Source    // the request line
-	Warnings   []Warning // of the parser: the directives of other clients it ignored
+	Name       string      `json:"name,omitempty"` // from "# @name"; empty when the request has none
+	Method     string      `json:"method"`
+	URL        string      `json:"url"`
+	Version    string      `json:"version,omitempty"` // HTTP11, HTTP2 or HTTP2PriorKnowledge, if written after the URL
+	Headers    []Header    `json:"headers,omitempty"`
+	Body       string      `json:"body,omitempty"`      // inline body
+	BodyFile   string      `json:"body_file,omitempty"` // path from a "< path" body, as written
+	Directives []Directive `json:"directives,omitempty"`
+	Source     Source      `json:"source"`             // the request line
+	Warnings   []Warning   `json:"warnings,omitempty"` // of the parser: the directives of other clients it ignored
 }
 
 // Header is one "Name: value" line.
 type Header struct {
-	Name  string
-	Value string
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // Directive is an "# @assert", "# @capture", "# @tag", "# @no-log",
 // "# @no-cookie-jar", "# @note" or time limit comment, kept as written for
 // the stages that act on it.
 type Directive struct {
-	Kind  string // "assert", "capture", "tag", NoLog, NoCookieJar, Note, Timeout, ConnectionTimeout or MaxTime
-	Value string // "" for NoLog and NoCookieJar, and may be for Note
-	Line  int
+	Kind  string `json:"kind"`            // "assert", "capture", "tag", NoLog, NoCookieJar, Note, Timeout, ConnectionTimeout or MaxTime
+	Value string `json:"value,omitempty"` // "" for NoLog and NoCookieJar, and may be for Note
+	Line  int    `json:"line,omitempty"`
 }
 
 // The HTTP versions a request line or a flag may ask for.
@@ -108,8 +108,8 @@ func (r *Request) NoCookieJar() bool {
 
 // Source locates a line in a .http file.
 type Source struct {
-	File string
-	Line int
+	File string `json:"file"`
+	Line int    `json:"line,omitempty"`
 }
 
 func (s Source) String() string {

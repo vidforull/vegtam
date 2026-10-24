@@ -99,9 +99,10 @@ func TestTrust(t *testing.T) {
 		t.Errorf("trust = %d\n%s\nwant\n%s", code, stdout, want)
 	}
 
-	// The value goes on the wire and is masked in the response.
+	// The value goes on the wire and is masked in the response, and the
+	// field named authorization hidden whole from a run without a person.
 	code, stdout, _ = run(true, "run", "cmd/key.http#echo", "-e", "test", "--confirm")
-	if code != exitOK || !strings.Contains(stdout, `"authorization": "Bearer ***"`) || !strings.Contains(stdout, `"key": "***"`) {
+	if code != exitOK || !strings.Contains(stdout, `"authorization": "***"`) || !strings.Contains(stdout, `"key": "***"`) {
 		t.Errorf("run trusted = %d\n%s", code, stdout)
 	}
 	code, stdout, _ = run(false, "run", "cmd/key.http#echo", "-e", "test", "--dry-run")

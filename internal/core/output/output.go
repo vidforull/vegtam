@@ -1,5 +1,5 @@
 // Package output defines the JSON documents that run, show, list, import,
-// trust, policy and describe print, and the JSON Schema that describes them. The documents are a
+// trust, policy, describe and doctor print, and the JSON Schema that describes them. The documents are a
 // contract for scripts and agents: fields are only ever added. Building a
 // document masks every secret value in it.
 package output
@@ -40,6 +40,7 @@ var Schema string
 //   - trust: Trust;
 //   - policy: Policy;
 //   - describe: Describe;
+//   - doctor: Doctor;
 //   - an error that ends a command before any request: Result.Error.
 type Document struct {
 	SchemaVersion int        `json:"schema_version"`
@@ -50,6 +51,7 @@ type Document struct {
 	Trust         []*Trusted `json:"trust,omitzero"`
 	Policy        *Policy    `json:"policy,omitempty"`
 	Describe      *Describe  `json:"describe,omitempty"`
+	Doctor        *Doctor    `json:"doctor,omitempty"`
 }
 
 // Result is the outcome of one request. Timing and the fields after it,
@@ -69,7 +71,11 @@ type Result struct {
 	Cookies    *Cookies   `json:"cookies,omitempty"`
 	Asserts    []Assert   `json:"asserts,omitempty"`  // nil without a response
 	Captures   []Capture  `json:"captures,omitempty"` // the values taken; nil without a response
-	Warnings   []Warning  `json:"warnings,omitempty"`
+	// Redacted is what a run without a person at a terminal was not shown,
+	// by place, such as "header Set-Cookie" or "$.access_token" (see
+	// Redact).
+	Redacted []string  `json:"redacted,omitempty"`
+	Warnings []Warning `json:"warnings,omitempty"`
 	// SecretOrigins are, of a dry run and of show, the secrets of the
 	// request and where each may go.
 	SecretOrigins []Secret `json:"secret_origins,omitempty"`
@@ -172,8 +178,12 @@ type Error struct {
 	Phase     string    `json:"timeout_phase,omitempty"` // for kind "timeout": connect, read or total
 	Confirm   *Confirm  `json:"confirm,omitempty"`       // for kind "confirm"
 	// Secret is the first secret that the request would send to an origin
-	// it is not bound to, for kind "policy" or "confirm".
+	// it is not bound to, for kind "policy" or "confirm"; or the first that
+	// a run without a person holds no value of.
 	Secret *Secret `json:"secret,omitempty"`
+	// PersonCommand is, for the latter, the command a person at a terminal
+	// runs to send the request.
+	PersonCommand string `json:"person_command,omitempty"`
 }
 
 // Confirm is what a request needs before it is sent: why, the request,
@@ -426,7 +436,7 @@ func NewError(err error, m *core.Masker) *Error {
 	}
 	return &Error{
 		Kind: e.Kind, Message: m.Mask(e.Msg), File: e.Source.File, Line: e.Source.Line, Variables: e.Variables, Phase: e.Phase,
-		Confirm: NewConfirm(e.Confirm, m), Secret: NewSecret(e.Secret, m),
+		Confirm: NewConfirm(e.Confirm, m), Secret: NewSecret(e.Secret, m), PersonCommand: m.Mask(e.PersonCommand),
 	}
 }
 

@@ -84,7 +84,7 @@ X-Key: {{ $env VEGTAM_TEST_KEY }}
 	}
 
 	// The prepared request refers to secrets by name only.
-	b, err := json.Marshal(p) //nolint:musttag // every field of the internal type, whatever its name
+	b, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,5 +809,17 @@ func TestSecretOrigins(t *testing.T) {
 	}
 	if got := d.Bound(); !maps.EqualFunc(got, map[string][]string{"session": {"https://login.example"}}, slices.Equal) {
 		t.Errorf("Bound() of a dry run = %v", got)
+	}
+}
+
+// TestHas checks that Has says whether a variable holds a value: an
+// empty one holds none.
+func TestHas(t *testing.T) {
+	t.Setenv("VEGTAM_TEST_HAS", processKey)
+	t.Setenv("VEGTAM_TEST_HAS_EMPTY", "")
+	for name, want := range map[string]bool{"VEGTAM_TEST_HAS": true, "VEGTAM_TEST_HAS_EMPTY": false, "VEGTAM_TEST_HAS_NONE": false} {
+		if got := Has(name); got != want {
+			t.Errorf("Has(%s) = %v, want %v", name, got, want)
+		}
 	}
 }

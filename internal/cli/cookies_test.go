@@ -7,11 +7,17 @@ import (
 
 // TestCookieOutput signs in and sends the session cookie, and checks what
 // the output says of the cookies: their names, never their values, and
-// that --no-cookies keeps none.
+// that --no-cookies keeps none. A person sees the attributes of each
+// Set-Cookie; a run without a person, none of it.
 func TestCookieOutput(t *testing.T) {
 	fx := newFixture(t)
 	file := fx.cookieFile(t)
 	code, stdout, stderr := runCLI(t, true, "run", file, "-e", "test", "-v", "--confirm")
+	if code != exitOK || !strings.Contains(stdout, "Set-Cookie: ***\nSet-Cookie: ***\n") ||
+		!strings.Contains(stdout, "redacted (no person at a terminal): header Set-Cookie\n") || !strings.Contains(stdout, "X-Cookie: ***\n") {
+		t.Errorf("without a person = %d\n%s\n%s", code, stdout, stderr)
+	}
+	code, stdout, stderr = runAt(t, "run", file, "-e", "test", "-v", "--confirm")
 	for _, want := range []string{
 		"Set-Cookie: session=***; Path=/; HttpOnly\nSet-Cookie: lang=***; Path=/\n",
 		"* cookies: set session, lang\n",

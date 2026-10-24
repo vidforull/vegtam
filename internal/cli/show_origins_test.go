@@ -17,12 +17,12 @@ const showSecret = "Sh0wK3y/v+al"
 
 // originsFile writes a .http file whose requests send a private token and
 // an environment variable to an origin that neither is bound to, beside
-// its environment files, with a policy that binds nothing, and returns
-// the file. Nothing listens at that origin: show and a dry run send
-// nothing.
+// its environment files, with a policy that binds nothing, and sends a
+// run's secrets through the keeper, and returns the file. Nothing listens
+// at that origin: show and a dry run send nothing.
 func originsFile(t *testing.T) string {
 	t.Helper()
-	writePolicy(t, `{}`)
+	writePolicy(t, `{"secrets": {"unattended": "keeper"}}`)
 	t.Setenv("VEGTAM_TEST_SHOW", showSecret)
 	dir := t.TempDir()
 	files := map[string]string{
@@ -98,7 +98,7 @@ Secrets:
 
 	// The operator's policy binds the environment variable there; nothing
 	// binds the token.
-	writePolicy(t, `{"secrets": {"env": {"VEGTAM_TEST_SHOW": ["http://127.0.0.1:9"]}}}`)
+	writePolicy(t, `{"secrets": {"env": {"VEGTAM_TEST_SHOW": ["http://127.0.0.1:9"]}, "unattended": "keeper"}}`)
 	_, stdout, stderr = runCLI(t, true, "show", file+"#steal", "-e", "test")
 	if !strings.HasSuffix(stdout, "Secrets:\n  {{token}}                  bound to no origin; refused for http://127.0.0.1:9\n"+
 		"  {{$env VEGTAM_TEST_SHOW}}  http://127.0.0.1:9\n") {

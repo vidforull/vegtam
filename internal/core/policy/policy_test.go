@@ -121,6 +121,10 @@ func TestParseErrors(t *testing.T) {
 		`{"secrets": {"env": {"A": "https://api.example.com"}}}`:              "cannot unmarshal string",
 		`{"secrets": {"env": ["A"]}}`:                                         "cannot unmarshal array",
 		`{"secrets": {"vars": {}}}`:                                           `unknown field "vars"`,
+		`{"secrets": {"unattended": "allow"}}`:                                `secrets.unattended "allow": want "deny", the default, or "keeper"`,
+		`{"secrets": {"unattended": "Deny"}}`:                                 `secrets.unattended "Deny": want "deny"`,
+		`{"secrets": {"unattended": true}}`:                                   "cannot unmarshal bool",
+		`{"secrets": {"keeper_asks": "never"}}`:                               `secrets.keeper_asks "never": want "always", the default, or "unbound"`,
 	} {
 		_, err := Parse("policy.json", []byte(in))
 		if e, ok := errors.AsType[*core.Error](err); !ok || e.Kind != core.KindPolicy || !strings.Contains(err.Error(), want) {
@@ -146,6 +150,34 @@ func TestParseSecrets(t *testing.T) {
 	for _, in := range []string{`{}`, `{"secrets": {}}`, `{"secrets": null}`, `{"secrets": {"env": {}, "cmd": null}}`} {
 		if p, err := Parse("policy.json", []byte(in)); err != nil || p.Secrets.Env != nil || p.Secrets.Cmd != nil {
 			t.Errorf("%s: %+v, %v; want no secrets", in, p, err)
+		}
+	}
+}
+
+// TestParseUnattended checks secrets.unattended and secrets.keeper_asks,
+// and that their defaults are the strict ones: no secret without a person,
+// and a keeper that asks each time.
+func TestParseUnattended(t *testing.T) {
+	for in, want := range map[string]Secrets{
+		`{}`:                                                 {},
+		`{"secrets": {"unattended": "deny"}}`:                {Unattended: UnattendedDeny},
+		`{"secrets": {"unattended": "keeper"}}`:              {Unattended: UnattendedKeeper},
+		`{"secrets": {"keeper_asks": "always"}}`:             {KeeperAsks: KeeperAsksAlways},
+		`{"secrets": {"keeper_asks": "unbound"}}`:            {KeeperAsks: KeeperAsksUnbound},
+		`{"secrets": {"unattended": "", "keeper_asks": ""}}`: {},
+	} {
+		p, err := Parse("policy.json", []byte(in))
+		if err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		if p.Secrets.Unattended != want.Unattended || p.Secrets.KeeperAsks != want.KeeperAsks {
+			t.Errorf("%s: %q, %q; want %q, %q", in, p.Secrets.Unattended, p.Secrets.KeeperAsks, want.Unattended, want.KeeperAsks)
+		}
+		if keeper := want.Unattended == UnattendedKeeper; p.Secrets.Keeper() != keeper {
+			t.Errorf("%s: Keeper() = %v", in, !keeper)
+		}
+		if always := want.KeeperAsks != KeeperAsksUnbound; p.Secrets.AsksAlways() != always {
+			t.Errorf("%s: AsksAlways() = %v", in, !always)
 		}
 	}
 }

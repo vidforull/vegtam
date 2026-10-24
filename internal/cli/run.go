@@ -88,7 +88,20 @@ exit code 6, which --confirm does not lift; with one, an error of kind
 confirm, exit code 5, and --confirm=file#name sends it this once. A
 redirect that would carry a secret of the URL to an origin it is not
 bound to is refused, exit code 6, with a person at a terminal too. A dry
-run says where each secret may go, in secret_origins.`,
+run says where each secret may go, in secret_origins.
+
+Without a person at a terminal, a run gets no secret value at all: it
+reads the names of http-client.private.env.json and not its values,
+reads no {{$env NAME}} and runs no {{$cmd NAME}}. A request that needs a
+secret value is an error of kind policy, exit code 6, whatever confirms
+it, and error.person_command is the command a person runs to send it.
+The operator's policy may send such a run's requests through the keeper
+instead, a process in the person's terminal that holds the values and
+asks before it uses them (secrets.unattended "keeper", see vegtam policy
+--help). Such a run is shown no Set-Cookie, Authorization,
+Proxy-Authorization or WWW-Authenticate header of a response, no field
+named as a token, a password or a session is, and no JWT: each is ***,
+and result.redacted says where.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return run(cmd.Context(), cfg, f, args[0])
@@ -126,11 +139,18 @@ func run(ctx context.Context, cfg *Config, f runFlags, arg string) error {
 	if confirm.Requests, err = t.confirmed(f.confirm.refs); err != nil {
 		return err
 	}
-	s := session.New(session.Options{
+	opts := session.Options{
 		Env: f.env, DryRun: f.dryRun, Trust: policy.DefaultStore(), Transport: tr,
 		MaxBody: int64(f.maxBody), UserAgent: "vegtam/" + cfg.Version, Fail: f.fail,
 		History: cfg.history(f.noHistory || f.dryRun), Confirm: confirm, Secrets: pol.Secrets,
-	})
+	}
+	// Without a person, the run holds no secret value: the requests that
+	// need one go through the keeper, if the operator's policy says so,
+	// and are refused otherwise.
+	if cfg.unattended() && pol.Secrets.Keeper() {
+		opts.Keeper = cfg.keeper(opts)
+	}
+	s := session.New(opts)
 	cfg.secrets = s.Masker
 	jobs, err := t.jobs(ctx, s)
 	// Every request is resolved before the first is sent, so the masker

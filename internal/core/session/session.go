@@ -5,7 +5,10 @@ package session
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"maps"
+	"net/http"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -44,6 +47,15 @@ type Options struct {
 	// zero value sends none of them. A dry run sends nothing, and says in
 	// each result what sending it would need.
 	Confirm Confirm
+	// Keeper sends, for a run without a person (Confirm.Person unset), the
+	// requests of a run in which one needs a secret value: such a run
+	// holds none (see env.Options.Held). Nil, as the policy's
+	// secrets.unattended "deny" has it, sends none of those: each is an
+	// error of kind policy that names the command a person would run.
+	Keeper Keeper
+	// Serve is set in a keeper: the session sends what runs without a
+	// person relay to it (see Relay), with the values it holds.
+	Serve *Serve
 }
 
 // Session is one run: the environment loader that hands out variables and
@@ -63,7 +75,33 @@ type Session struct {
 	// responses set, and the credentials of Basic written as user and
 	// password.
 	cookies, credentials []string
+	// relay is set once a request prepared in a run without a person
+	// needs a secret value and a keeper sends it: every request of the run
+	// then goes through the keeper.
+	relay bool
+	// peek, if set, stands between the session and the secrets of its
+	// requests: tests count what is asked of them.
+	peek func(core.Secrets) core.Secrets
 }
+
+// src returns the secrets of the request of j. A run without a person
+// asks them for no value: it says where each may go, and nothing more.
+func (s *Session) src(j *Job) core.Secrets {
+	var src core.Secrets = j.vars
+	if s.peek != nil {
+		src = s.peek(src)
+	}
+	if s.held() {
+		src = withheld{src}
+	}
+	return src
+}
+
+// withheld are the secrets of a run without a person, which gives no
+// value: each is core.ErrHeld.
+type withheld struct{ core.Secrets }
+
+func (withheld) SecretValue(core.Secret) (string, error) { return "", core.ErrHeld }
 
 // The values of cookies that the masker hides wherever they are: from
 // minCookieSecret bytes to maxCookieSecret, the most a cookie may be. A
@@ -88,6 +126,7 @@ func New(opts Options) *Session {
 		plain:  map[string]bool{},
 		loader: env.NewLoader(env.Options{
 			Env: opts.Env, DryRun: opts.DryRun, Trust: opts.Trust, EnvHint: opts.EnvHint, Hidden: opts.Transport.HiddenEnv, Secrets: opts.Secrets,
+			Held: !opts.Confirm.Person && opts.Serve == nil,
 		}),
 		client: exec.New(exec.Options{MaxBody: opts.MaxBody, UserAgent: opts.UserAgent, Transport: opts.Transport}),
 	}
@@ -178,6 +217,9 @@ type Job struct {
 	// named is set when a confirmation names the request (see confirmed):
 	// with a person at a terminal, its secrets may then go where it goes.
 	named bool
+	// withheld is, in a run without a person, the first secret the request
+	// needs the value of; nil for none.
+	withheld *core.Bound
 }
 
 // Class returns what the placeholder r of the request stands for, as the
@@ -188,7 +230,9 @@ func (j *Job) Class(r core.Ref) env.Class { return j.classes[r.String()] }
 // captures take for the requests prepared after it. A request that needs
 // a confirmation it does not have is refused here, outside a dry run,
 // before it is resolved: nothing of it is sent, and none of its
-// {{$cmd NAME}} runs.
+// {{$cmd NAME}} runs. A run without a person, whose resolving reads no
+// secret and runs no command, resolves it first: one that needs a secret
+// value is refused for that, without a keeper, whatever confirms it.
 func (s *Session) Prepare(ctx context.Context, f *core.File, i int) *Job {
 	j := &Job{Ref: output.Ref(f, i), Request: f.Requests[i]}
 	var warnings []core.Warning
@@ -211,11 +255,25 @@ func (s *Session) Prepare(ctx context.Context, f *core.File, i int) *Job {
 	j.ask = s.ask(f, i, j.Ref, confirmed)
 	switch {
 	case j.Err != nil:
-	case j.ask != nil && !s.opts.DryRun:
+	case j.ask != nil && !s.opts.DryRun && !s.held():
 		j.Err = refused(j.Request, j.ask)
 	default:
 		j.classes = j.vars.Classes(j.Request)
 		j.Prepared, j.Err = j.vars.Prepare(ctx, j.Request)
+		if !s.held() {
+			break
+		}
+		if j.Err == nil {
+			j.withheld = s.heldSecret(j, j.Prepared)
+		}
+		switch {
+		case j.withheld != nil && s.opts.Keeper == nil && !s.opts.DryRun:
+			j.Prepared, j.Err = nil, s.denied(j, j.withheld)
+		case j.ask != nil && !s.opts.DryRun:
+			j.Prepared, j.Err = nil, refused(j.Request, j.ask)
+		case j.withheld != nil && s.opts.Keeper != nil:
+			s.relay = true
+		}
 	}
 	_, captures, _ := assert.Directives(j.Request) // the file parsed, so they do
 	for _, c := range captures {
@@ -283,11 +341,16 @@ func (s *Session) Run(ctx context.Context, j *Job) *output.Result {
 		var p *core.Prepared
 		if p, err = s.loader.Fill(j.Prepared); err == nil {
 			res.Request = output.Sent(p, s.Masker())
-			err = s.client.Check(ctx, p, j.vars)
+			err = s.client.Check(ctx, p, s.src(j))
 		}
 		if err == nil {
 			err = s.dryOrigins(j, p, res)
 		}
+		if j.withheld != nil && s.opts.Keeper == nil {
+			err = s.denied(j, j.withheld)
+		}
+	case s.relay:
+		err = s.relayed(ctx, j, res)
 	default:
 		err = s.send(ctx, j, res)
 	}
@@ -298,6 +361,10 @@ func (s *Session) Run(ctx context.Context, j *Job) *output.Result {
 	}
 	if err != nil {
 		res.Error = output.NewError(err, s.Masker())
+	}
+	// What a run without a person sees is sterile: a person's is not.
+	if !s.opts.Confirm.Person {
+		res.Redact()
 	}
 	s.record(j, res, start)
 	return res
@@ -334,6 +401,7 @@ func (s *Session) record(j *Job, res *output.Result, start time.Time) {
 	if res.Error != nil {
 		e.Result = string(res.Error.Kind)
 	}
+	e.Redacted = len(res.Redacted) > 0
 	s.historyErr = s.opts.History.Add(e)
 }
 
@@ -348,7 +416,7 @@ func (s *Session) Curl(ctx context.Context, j *Job, m *core.Masker) (string, err
 	}
 	p, err := s.loader.Fill(j.Prepared)
 	if err == nil {
-		err = s.client.Check(ctx, p, j.vars)
+		err = s.client.Check(ctx, p, s.src(j))
 	}
 	if err != nil {
 		return "", err
@@ -400,22 +468,41 @@ func (s *Session) send(ctx context.Context, j *Job, res *output.Result) error {
 	if err != nil {
 		return err
 	}
-	vars := core.Secrets(j.vars)
+	if s.held() {
+		// A plain value a capture took may have turned out to be a secret.
+		if b := s.heldSecret(j, p); b != nil && s.opts.Keeper != nil {
+			s.relay = true
+			return s.relayed(ctx, j, res)
+		} else if b != nil {
+			return s.denied(j, b)
+		}
+	}
+	vars := s.src(j)
 	res.Request = output.Sent(p, s.Masker())
 	// Refused here, where a person may confirm it; the client refuses it
 	// too, as every hop of a redirect.
-	if origins, known, oerr := p.Origins(vars); oerr == nil && known {
-		var refused []core.Bound
+	origins, known, oerr := p.Origins(vars)
+	var refused []core.Bound
+	if oerr == nil && known {
 		for _, o := range origins {
 			refused = append(refused, core.Unbound(p, vars, o)...)
 		}
-		if len(refused) > 0 {
-			if !s.opts.Confirm.Person || !j.named {
-				return s.unbound(j, refused)
-			}
-			for _, o := range origins {
-				vars = core.Grant(vars, o)
-			}
+	}
+	switch {
+	case s.opts.Serve != nil:
+		if vars, err = s.askKeeper(ctx, j, p, vars, origins, refused); err != nil {
+			return err
+		}
+		// Its commands run once its person has said yes, or need not.
+		if cerr := j.vars.Commands(ctx, p, true); cerr != nil {
+			return cerr
+		}
+	case len(refused) == 0:
+	case !s.opts.Confirm.Person || !j.named:
+		return s.unbound(j, refused)
+	default:
+		for _, o := range origins {
+			vars = core.Grant(vars, o)
 		}
 	}
 	s.basic(p, vars)
@@ -431,12 +518,21 @@ func (s *Session) send(ctx context.Context, j *Job, res *output.Result) error {
 		output.Diagnose(res, trace, s.Masker())
 		return err
 	}
+	return s.received(ctx, j, resp, trace, res)
+}
+
+// received evaluates the directives of the request of j on resp, its
+// response, which trace says how it came, and sets the response, the
+// outcomes and the captures of res, as send says.
+func (s *Session) received(ctx context.Context, j *Job, resp *exec.Response, trace *exec.Trace, res *output.Result) error {
 	ev := assert.Evaluate(ctx, j.Request, resp)
 	m := s.Masker()
 	for i, v := range ev.Captured {
 		// A plain value that holds a secret, as a response that echoes the
-		// request holds it, is that secret still.
-		if !v.Secret && m.Mask(v.Value) != v.Value {
+		// request holds it, is that secret still; and for a run without a
+		// person, so is a credential the response hands out, which it is
+		// not shown.
+		if !v.Secret && (m.Mask(v.Value) != v.Value || !s.opts.Confirm.Person && output.Credential(v.Source, v.Value)) {
 			c := *v.Capture
 			c.Secret = true
 			ev.Captured[i].Capture, v.Capture = &c, &c
@@ -446,6 +542,15 @@ func (s *Session) send(ctx context.Context, j *Job, res *output.Result) error {
 	// A secret is masked in the very response it was captured from.
 	m = s.Masker()
 	res.Response = output.NewResponse(resp, m)
+	if !s.opts.Confirm.Person {
+		// A run without a person checks its assertions on what it is
+		// shown; what its captures take comes from the response as it came.
+		var err error
+		ev.Outcomes, err = assert.Check(ctx, j.Request, sterile(resp, res.Response))
+		if e, ok := errors.AsType[*core.Error](ev.Err); !ok || e.Kind != core.KindCapture {
+			ev.Err = err
+		}
+	}
 	output.Diagnose(res, trace, m)
 	res.Asserts = output.Checked(ev.Outcomes, m)
 	res.Captures = output.Captures(ev.Captured)
@@ -453,6 +558,29 @@ func (s *Session) send(ctx context.Context, j *Job, res *output.Result) error {
 		return core.Errorf(core.KindStatus, j.Request.Source, "HTTP %d %s", resp.Status, resp.Reason)
 	}
 	return ev.Err
+}
+
+// sterile returns resp as a run without a person is shown it, from out,
+// the response it prints: every secret value masked, and what a response
+// hands out redacted (see output.Result.Redact).
+func sterile(resp *exec.Response, out *output.Response) *exec.Response {
+	shown := &output.Result{Response: &output.Response{
+		Proto: out.Proto, Status: out.Status, Reason: out.Reason, Headers: slices.Clone(out.Headers),
+		Body: out.Body, Encoding: out.Encoding, Truncated: out.Truncated,
+	}}
+	shown.Redact()
+	r := *resp
+	r.Header = http.Header{}
+	for _, h := range shown.Response.Headers {
+		r.Header.Add(h.Name, h.Value)
+	}
+	r.Body = []byte(shown.Response.Body)
+	if shown.Response.Encoding == "base64" {
+		if b, err := base64.StdEncoding.DecodeString(shown.Response.Body); err == nil {
+			r.Body = b
+		}
+	}
+	return &r
 }
 
 // Bindings returns the secrets of the request of j, by name, with the
@@ -466,8 +594,8 @@ func (s *Session) Bindings(j *Job) []core.Bound {
 	if err != nil {
 		p = j.Prepared
 	}
-	origins, _, _ := p.Origins(j.vars)
-	return core.Bindings(j.vars, first(origins), s.secretTexts(p)...)
+	origins, _, _ := p.Origins(s.src(j))
+	return core.Bindings(s.src(j), first(origins), s.secretTexts(p)...)
 }
 
 // first returns the first of origins, that of the URL, or "" for none.
@@ -505,7 +633,7 @@ func (s *Session) secretTexts(p *core.Prepared) []core.Text {
 // policy that a run without one gets. The captures of j are bound to
 // where p goes, as a run binds them to where the response comes from.
 func (s *Session) dryOrigins(j *Job, p *core.Prepared, res *output.Result) error {
-	origins, _, err := p.Origins(j.vars)
+	origins, _, err := p.Origins(s.src(j))
 	if err != nil {
 		return core.Errorf(core.KindVariable, j.Request.Source, "%v", err)
 	}
@@ -513,12 +641,12 @@ func (s *Session) dryOrigins(j *Job, p *core.Prepared, res *output.Result) error
 		s.loader.Bind(name, origins...)
 	}
 	texts := s.secretTexts(p)
-	bs := core.Bindings(j.vars, first(origins), texts...)
+	bs := core.Bindings(s.src(j), first(origins), texts...)
 	m := s.Masker()
 	res.SecretOrigins = output.Bindings(bs, m)
 	refused := core.Refused(bs)
 	for _, o := range origins[min(1, len(origins)):] {
-		refused = append(refused, core.Refused(core.Bindings(j.vars, o, texts...))...)
+		refused = append(refused, core.Refused(core.Bindings(s.src(j), o, texts...))...)
 	}
 	switch {
 	case len(refused) == 0, s.opts.Confirm.Person && j.named:

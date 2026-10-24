@@ -21,8 +21,9 @@ import (
 
 // WriteResponse writes the response of res: the status and the time, the
 // headers and what the request went through (WriteTrace) if headers is
-// set, the body, JSON formatted by FormatJSON with fold, and the outcomes
-// of its directives.
+// set, the body, JSON formatted by FormatJSON with fold, what a run
+// without a person was not shown (Result.Redact), and the outcomes of its
+// directives.
 func WriteResponse(b *strings.Builder, res *Result, headers bool, fold int) {
 	r := res.Response
 	status := strings.TrimSpace(fmt.Sprintf("%s %d %s", r.Proto, r.Status, r.Reason))
@@ -41,6 +42,10 @@ func WriteResponse(b *strings.Builder, res *Result, headers bool, fold int) {
 	}
 	if r.Truncated {
 		b.WriteString("[truncated: the body is longer than --max-body]\n")
+	}
+	if len(res.Redacted) > 0 {
+		// A form's field may have a line break in its name.
+		fmt.Fprintf(b, "redacted (no person at a terminal): %s\n", strings.ReplaceAll(strings.Join(res.Redacted, ", "), "\n", `\n`))
 	}
 	if len(res.Asserts) > 0 || len(res.Captures) > 0 {
 		b.WriteString("\n")

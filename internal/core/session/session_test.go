@@ -59,7 +59,7 @@ func newFile(t *testing.T) *core.File {
 // next, and masked in its response.
 func TestCapturesCarryOver(t *testing.T) {
 	f := newFile(t)
-	s := New(Options{Env: "test", MaxBody: 1 << 20})
+	s := New(Options{Env: "test", MaxBody: 1 << 20, Confirm: Confirm{Person: true}})
 	s.ConfirmOnce(f, 0)
 	login := s.Run(t.Context(), s.Prepare(t.Context(), f, 0))
 	if login.Error != nil || len(login.Captures) != 1 {
@@ -82,18 +82,18 @@ func TestCapturesCarryOver(t *testing.T) {
 // where the session captured it from.
 func TestPreview(t *testing.T) {
 	f := newFile(t)
-	s := New(Options{Env: "test", MaxBody: 1 << 20, Confirm: Confirm{Mutations: true}})
+	s := New(Options{Env: "test", MaxBody: 1 << 20, Confirm: Confirm{Person: true, Mutations: true}})
 	s.Run(t.Context(), s.Prepare(t.Context(), f, 0))
 	if got := s.Declared(); len(got) != 1 || got[0] != "token" {
 		t.Fatalf("Declared() = %q, want [token]", got)
 	}
 
-	fresh := New(Options{Env: "test", DryRun: true})
+	fresh := New(Options{Env: "test", DryRun: true, Confirm: Confirm{Person: true}})
 	if res := fresh.Run(t.Context(), fresh.Prepare(t.Context(), f, 1)); res.Error == nil || res.Error.Kind != core.KindVariable {
 		t.Errorf("without the declaration: error %+v, want kind variable", res.Error)
 	}
 
-	preview := New(Options{Env: "test", DryRun: true})
+	preview := New(Options{Env: "test", DryRun: true, Confirm: Confirm{Person: true}})
 	preview.Declare(s.Declared()...)
 	for name, origins := range s.Bound() {
 		preview.Bind(name, origins...)
@@ -125,7 +125,7 @@ func TestPreviewLost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(Options{Env: "test", MaxBody: 1 << 20})
+	s := New(Options{Env: "test", MaxBody: 1 << 20, Confirm: Confirm{Person: true}})
 	if login := s.Run(t.Context(), s.Prepare(t.Context(), lf, 0)); len(login.Captures) != 0 {
 		t.Fatalf("login captured %+v", login.Captures)
 	}
@@ -134,7 +134,7 @@ func TestPreviewLost(t *testing.T) {
 	}
 	sent := s.Run(t.Context(), s.Prepare(t.Context(), lf, 1))
 
-	preview := New(Options{Env: "test", DryRun: true})
+	preview := New(Options{Env: "test", DryRun: true, Confirm: Confirm{Person: true}})
 	preview.Declare(s.Declared()...)
 	for name, ref := range s.Lost() {
 		preview.Forget(name, ref)
@@ -145,7 +145,7 @@ func TestPreviewLost(t *testing.T) {
 		t.Errorf("preview error %+v, request %+v; sending gave %+v", res.Error, res.Request, sent.Error)
 	}
 
-	dry := New(Options{Env: "test", DryRun: true})
+	dry := New(Options{Env: "test", DryRun: true, Confirm: Confirm{Person: true}})
 	jobs, err := dry.Jobs(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestPreviewLost(t *testing.T) {
 // it would give for one it cannot.
 func TestCurl(t *testing.T) {
 	f := newFile(t)
-	s := New(Options{Env: "test", DryRun: true})
+	s := New(Options{Env: "test", DryRun: true, Confirm: Confirm{Person: true}})
 	if _, err := s.Curl(t.Context(), s.Prepare(t.Context(), f, 1), nil); err == nil {
 		t.Error("Curl with token unresolved: no error")
 	}
@@ -197,14 +197,14 @@ func TestHistory(t *testing.T) {
 	}
 	log := history.New(filepath.Join(t.TempDir(), "vegtam"))
 	t.Chdir(dir)
-	s := New(Options{Env: "test", MaxBody: 1 << 20, History: log, Confirm: Confirm{All: true}})
+	s := New(Options{Env: "test", MaxBody: 1 << 20, History: log, Confirm: Confirm{Person: true, All: true}})
 	for _, r := range []struct {
 		f *core.File
 		i int
 	}{{f, 0}, {more, 0}, {more, 1}, {f, 1}} {
 		s.Run(t.Context(), s.Prepare(t.Context(), r.f, r.i))
 	}
-	dry := New(Options{Env: "test", DryRun: true, History: log})
+	dry := New(Options{Env: "test", DryRun: true, History: log, Confirm: Confirm{Person: true}})
 	dry.Run(t.Context(), dry.Prepare(t.Context(), f, 0))
 	if err = s.HistoryError(); err != nil {
 		t.Fatal(err)
@@ -241,7 +241,7 @@ func TestHistory(t *testing.T) {
 	if err = os.WriteFile(blocked, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s = New(Options{Env: "test", MaxBody: 1 << 20, History: history.New(filepath.Join(blocked, "vegtam")), Confirm: Confirm{All: true}})
+	s = New(Options{Env: "test", MaxBody: 1 << 20, History: history.New(filepath.Join(blocked, "vegtam")), Confirm: Confirm{Person: true, All: true}})
 	if res := s.Run(t.Context(), s.Prepare(t.Context(), f, 0)); res.Error != nil || s.HistoryError() == nil {
 		t.Errorf("with no place for the history: %+v, %v", res.Error, s.HistoryError())
 	}
@@ -268,7 +268,7 @@ func TestCookieJar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(Options{MaxBody: 1 << 20, Confirm: Confirm{Mutations: true}})
+	s := New(Options{MaxBody: 1 << 20, Confirm: Confirm{Person: true, Mutations: true}})
 	login := s.Run(t.Context(), s.Prepare(t.Context(), f, 0))
 	me := s.Run(t.Context(), s.Prepare(t.Context(), f, 1))
 	if login.Response.Headers[3].Value != "sid=***" || login.Cookies == nil || me.Cookies == nil || len(me.Cookies.Sent) != 1 ||
@@ -287,7 +287,7 @@ func TestCookieJar(t *testing.T) {
 	if len(s.cookies) != maxCookieSecrets || slices.Contains(s.cookies, value) || s.Masker().Mask(value) != "***" {
 		t.Errorf("after %d more: %d values; the jar's %s", maxCookieSecrets, len(s.cookies), s.Masker().Mask(value))
 	}
-	other := New(Options{MaxBody: 1 << 20})
+	other := New(Options{MaxBody: 1 << 20, Confirm: Confirm{Person: true}})
 	if res := other.Run(t.Context(), other.Prepare(t.Context(), f, 1)); res.Cookies != nil || res.Response.Body != `{"cookie": ""}` {
 		t.Errorf("another session: %+v, %s", res.Cookies, res.Response.Body)
 	}
@@ -318,7 +318,7 @@ func TestBasicOneWord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(Options{Env: "test", MaxBody: 1 << 20})
+	s := New(Options{Env: "test", MaxBody: 1 << 20, Confirm: Confirm{Person: true}})
 	res := s.Run(t.Context(), s.Prepare(t.Context(), f, 0))
 	if res.Error != nil || res.Response == nil || !strings.Contains(res.Response.Body, `"user": "alice", "password": "***", "ok": true, "header": "Basic ***"`) {
 		t.Fatalf("result %+v, error %+v", res.Response, res.Error)

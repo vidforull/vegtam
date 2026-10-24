@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "vegtam output",
-  "description": "A JSON document printed by vegtam run, show, list, import, trust, policy or describe. run <file>#<ref> and show print the fields of one result; run <file> and run <dir> print results; list prints requests; import prints import; trust prints trust; policy prints policy; describe prints describe; an error that ends a command before any request is printed as error. Fields are only ever added: ignore the ones you do not know.",
+  "description": "A JSON document printed by vegtam run, show, list, import, trust, policy, describe or doctor. run <file>#<ref> and show print the fields of one result; run <file> and run <dir> print results; list prints requests; import prints import; trust prints trust; policy prints policy; describe prints describe; doctor prints doctor; an error that ends a command before any request is printed as error. Fields are only ever added: ignore the ones you do not know.",
   "type": "object",
   "required": ["schema_version"],
   "properties": {
@@ -19,6 +19,7 @@
     "cookies": {"$ref": "#/$defs/cookies"},
     "asserts": {"$ref": "#/$defs/asserts"},
     "captures": {"$ref": "#/$defs/captures"},
+    "redacted": {"$ref": "#/$defs/redacted"},
     "warnings": {"$ref": "#/$defs/warnings"},
     "secret_origins": {"$ref": "#/$defs/secret_origins"},
     "confirm": {"$ref": "#/$defs/confirm"},
@@ -48,9 +49,115 @@
       }
     },
     "policy": {"$ref": "#/$defs/policy"},
-    "describe": {"$ref": "#/$defs/describe"}
+    "describe": {"$ref": "#/$defs/describe"},
+    "doctor": {"$ref": "#/$defs/doctor"}
   },
   "$defs": {
+    "doctor": {
+      "type": "object",
+      "description": "Where the secrets of this shell and of the current directory are, and who besides the person can read them or act for them: vegtam doctor. Names, paths and permission bits only: doctor reads no secret value, neither of a file nor of a variable. Its exit code is 0 whatever it finds.",
+      "required": ["mode", "policy", "secrets", "keeper", "config"],
+      "properties": {
+        "mode": {
+          "type": "object",
+          "description": "Whether a person is at a terminal, and what such a run does with a request that needs a secret value, as describe.mode says.",
+          "required": ["unattended", "why", "secrets"],
+          "properties": {
+            "unattended": {"type": "boolean", "description": "true: no person is at a terminal, as for a script or an agent."},
+            "why": {"type": "string", "description": "--json is given; stdin or stdout is not a terminal; or stdin and stdout are terminals."},
+            "secrets": {"type": "string", "description": "all, none or keeper, as describe.mode.secrets."}
+          }
+        },
+        "policy": {
+          "type": "object",
+          "description": "What the operator's policy says of secrets (see vegtam policy --help).",
+          "required": ["found"],
+          "properties": {
+            "path": {"type": "string", "description": "The file, found or not. Absent if there is no place for it: neither XDG_CONFIG_HOME nor HOME is set."},
+            "found": {"type": "boolean", "description": "A file is there."},
+            "error": {"$ref": "#/$defs/error"},
+            "secrets_mode": {
+              "type": "object",
+              "description": "secrets.unattended and secrets.keeper_asks as they apply, the defaults if the file does not give them, as policy.secrets_mode says. Absent if the file cannot be read.",
+              "required": ["unattended", "keeper_asks"],
+              "properties": {
+                "unattended": {"type": "string", "description": "deny, the default, or keeper."},
+                "keeper_asks": {"type": "string", "description": "always, the default, or unbound."}
+              }
+            },
+            "env": {"type": "array", "items": {"type": "string"}, "description": "The NAME of each {{$env NAME}} the file binds to origins, sorted. Absent for none."},
+            "cmd": {"type": "array", "items": {"type": "string"}, "description": "The NAME of each {{$cmd NAME}} the file binds to origins, sorted. Absent for none."}
+          }
+        },
+        "secrets": {
+          "type": "object",
+          "description": "Where the secrets of the current directory are, as a run of a .http file in it finds them; never their values.",
+          "properties": {
+            "dir": {"type": "string", "description": "The current directory. Absent if it cannot be told."},
+            "private_file": {"$ref": "#/$defs/doctor_path"},
+            "environment": {"type": "array", "items": {"type": "string"}, "description": "The variables that the policy names, by {{$env NAME}} and network.proxy_auth, that the environment of this process holds a value for, sorted: every process started from the same shell inherits them. Absent for none."}
+          }
+        },
+        "keeper": {
+          "type": "object",
+          "description": "The keeper: a process the person runs in their terminal, which holds the secrets and answers on a unix socket. Fields that the keeper says of itself, once asked, will be added.",
+          "required": ["socket", "running"],
+          "properties": {
+            "socket": {"$ref": "#/$defs/doctor_path"},
+            "running": {"type": "boolean", "description": "true once a keeper has answered on the socket. vegtam does not ask it yet, so false: socket.type says whether a socket is there."},
+            "why": {"type": "string", "description": "Why running is false."}
+          }
+        },
+        "multiplexers": {
+          "type": "array",
+          "description": "The terminal multiplexers that the shell runs in: another process can read and type into a session of one. Absent outside one.",
+          "items": {
+            "type": "object",
+            "required": ["name", "variable"],
+            "properties": {
+              "name": {"type": "string", "description": "tmux or screen."},
+              "variable": {"type": "string", "description": "The environment variable that says so: TMUX or STY."}
+            }
+          }
+        },
+        "config": {
+          "type": "object",
+          "description": "vegtam's configuration directory, $XDG_CONFIG_HOME/vegtam or ~/.config/vegtam, and the policy file in it. Neither may be writable by others, or the policy is not read.",
+          "required": ["dir", "policy"],
+          "properties": {
+            "dir": {"$ref": "#/$defs/doctor_path"},
+            "policy": {"$ref": "#/$defs/doctor_path"}
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "description": "What the rest gives cause to look at, in its order: a file or a variable that holds secrets, which any process of the user reads; a multiplexer; a file or directory that others can write or read. Absent if there is nothing.",
+          "items": {
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+              "message": {"type": "string"},
+              "file": {"type": "string", "description": "The file or directory it is of, if one."},
+              "line": {"type": "integer"}
+            }
+          }
+        }
+      }
+    },
+    "doctor_path": {
+      "type": "object",
+      "description": "What is at a path, never what is in it: in secrets.private_file, the nearest http-client.private.env.json from the current directory upwards, absent if there is none; in keeper.socket, $XDG_RUNTIME_DIR/vegtam/keeper.sock, or keeper.sock in vegtam's directory of the user's cache; in config, the directory and the policy file. Links are followed, as reading the file would.",
+      "required": ["exists", "owned"],
+      "properties": {
+        "path": {"type": "string", "description": "Absent if there is no place for it, which why says."},
+        "exists": {"type": "boolean"},
+        "type": {"type": "string", "description": "file, directory, socket, or other (a named pipe, a device). Absent if nothing is there."},
+        "mode": {"type": "string", "description": "The permission bits in octal, such as 0600. Absent if nothing is there."},
+        "uid": {"type": "integer", "description": "The user it belongs to. Absent if nothing is there."},
+        "owned": {"type": "boolean", "description": "It belongs to the user vegtam runs as; false if nothing is there."},
+        "why": {"type": "string", "description": "Why there is no path, or why what is there cannot be looked at."}
+      }
+    },
     "describe": {
       "type": "object",
       "description": "What a program needs to know to run vegtam: vegtam describe. docs/AUTOMATION.md is the contract it summarises.",
@@ -61,10 +168,11 @@
         "mode": {
           "type": "object",
           "description": "Whether a person is at a terminal, which decides what the policy allows a run (see policy.run).",
-          "required": ["unattended", "why"],
+          "required": ["unattended", "why", "secrets"],
           "properties": {
             "unattended": {"type": "boolean", "description": "true: no person is at a terminal, as for a script or an agent."},
-            "why": {"type": "string", "description": "--json is given; stdin or stdout is not a terminal; or stdin and stdout are terminals."}
+            "why": {"type": "string", "description": "--json is given; stdin or stdout is not a terminal; or stdin and stdout are terminals."},
+            "secrets": {"type": "string", "description": "What a run in this mode does with a request that needs a secret value, as policy.run.secrets says: all, a person's run; none, without a person (secrets.unattended deny, the default, or a policy that cannot be read): the request is an error of kind policy, exit code 6, with error.person_command; keeper, without a person: it goes through the keeper. New values may be added."}
           }
         },
         "commands": {"type": "array", "description": "The commands that run something, from the command line itself, in the order of their names. help and completion, which the CLI library adds, are not listed.", "items": {"$ref": "#/$defs/describe_command"}},
@@ -148,6 +256,7 @@
         "cookies": {"$ref": "#/$defs/cookies"},
         "asserts": {"$ref": "#/$defs/asserts"},
         "captures": {"$ref": "#/$defs/captures"},
+        "redacted": {"$ref": "#/$defs/redacted"},
         "warnings": {"$ref": "#/$defs/warnings"},
         "secret_origins": {"$ref": "#/$defs/secret_origins"},
         "confirm": {"$ref": "#/$defs/confirm"},
@@ -275,6 +384,11 @@
         }
       }
     },
+    "redacted": {
+      "type": "array",
+      "description": "What the output of a run without a person at a terminal was not shown, by place: \"header <name>\", a JSON path of the body such as \"$.access_token\", \"form <name>\", \"body\", \"assert <expression>\", \"redirect <n> location\". Such a run gets *** for what commonly carries credentials, whether vegtam knows the value as a secret or not: the values of Set-Cookie, Authorization, Proxy-Authorization and WWW-Authenticate; of the JSON keys, form fields and parameters of a Location such as token, access_token, password, secret, api_key, session or cookie, in any case and with or without - and _; and tokens shaped as JWTs. A body with more than 100 paths lists the first 100 and then one entry such as \"and 12 more\". Absent when nothing was hidden; a person's run is never redacted.",
+      "items": {"type": "string"}
+    },
     "headers": {
       "type": "array",
       "description": "Header lines in order; a name may repeat. Response headers are sorted by name.",
@@ -390,7 +504,7 @@
       "properties": {
         "kind": {
           "type": "string",
-          "description": "assert (exit code 1); usage, parse, variable, request, import or capture (2); network or timeout (3); status (4, with --fail); confirm (5: a request that is not sent without --confirm; see confirm); policy (6: a command file that is not trusted, an address vegtam never connects to or that the operator's policy does not allow, a secret that would go to an origin it is not bound to, see secret, a policy file that cannot be read); canceled (130, interrupted by SIGINT or SIGTERM). New kinds may be added; rely on the exit code for anything you do not know."
+          "description": "assert (exit code 1); usage, parse, variable, request, import or capture (2); network or timeout (3); status (4, with --fail); confirm (5: a request that is not sent without --confirm; see confirm); policy (6: a command file that is not trusted, an address vegtam never connects to or that the operator's policy does not allow, a secret that would go to an origin it is not bound to, see secret, a secret value that a run without a person does not get, see person_command, a policy file that cannot be read); canceled (130, interrupted by SIGINT or SIGTERM). New kinds may be added; rely on the exit code for anything you do not know."
         },
         "message": {"type": "string"},
         "file": {"type": "string"},
@@ -398,7 +512,8 @@
         "variables": {"type": "array", "items": {"type": "string"}, "description": "The unresolved placeholders, for kind variable, such as \"host\" or \"$env TOKEN\"."},
         "timeout_phase": {"type": "string", "description": "For kind timeout, the limit that ran out: connect (getting a connection, with its TLS handshake), read (no data from the server for the read timeout) or total (the max time). Absent if vegtam cannot tell."},
         "confirm": {"$ref": "#/$defs/confirm"},
-        "secret": {"$ref": "#/$defs/secret"}
+        "secret": {"$ref": "#/$defs/secret"},
+        "person_command": {"type": "string", "description": "For kind policy, when a run without a person holds no value of the secret the request needs (see secret; the operator's policy says secrets.unattended deny, the default): the command a person at a terminal runs to send it, such as vegtam run 'api.http#login' -e dev. Ask the operator to run it; nothing a program passes sends it."}
       }
     },
     "listed": {
@@ -456,7 +571,7 @@
     "policy": {
       "type": "object",
       "description": "The operator's policy, $XDG_CONFIG_HOME/vegtam/policy.json: what its file says, and what applies to a run in the mode of this one. It holds no secret.",
-      "required": ["found", "run", "never"],
+      "required": ["found", "secrets_mode", "run", "never"],
       "properties": {
         "path": {"type": "string", "description": "The file, found or not. Absent if there is no place for it: neither XDG_CONFIG_HOME nor HOME is set."},
         "found": {"type": "boolean", "description": "false: there is no file, and vegtam does what it does on its own."},
@@ -504,16 +619,26 @@
           "description": "The secrets the file binds, {{$env NAME}} ones first, then {{$cmd NAME}}, each sorted by NAME, with the origins it may go to (allowed, empty for none); no origin. Nothing else binds them: a {{$env NAME}} or {{$cmd NAME}} that the file leaves out goes nowhere. Absent if the file binds none.",
           "items": {"$ref": "#/$defs/secret"}
         },
+        "secrets_mode": {
+          "type": "object",
+          "description": "What a run without a person does with a request that needs a secret value, as it applies: the file's secrets.unattended and secrets.keeper_asks, or their defaults.",
+          "required": ["unattended", "keeper_asks"],
+          "properties": {
+            "unattended": {"type": "string", "description": "deny, the default: a run without a person gets no secret value, and such a request is an error of kind policy, exit code 6. keeper: it goes through the keeper, a process in the operator's terminal that holds the values and asks before each use."},
+            "keeper_asks": {"type": "string", "description": "always, the default: the keeper asks its person before each request with a secret. unbound: only before one that would send a secret where it is not bound."}
+          }
+        },
         "run": {
           "type": "object",
           "description": "What applies to a run in the mode of this one.",
-          "required": ["unattended", "confirm_mutations"],
+          "required": ["unattended", "confirm_mutations", "secrets"],
           "properties": {
             "unattended": {"type": "boolean", "description": "true: no person is at a terminal (stdin or stdout is not one, or --json is given). Loopback and private addresses are then connected to only as network.allow names them, and a flag that weakens a check beyond what the policy allows is a usage error."},
             "https_proxy": {"type": "string", "description": "The proxy of requests to https URLs, its user and password as ***. Absent for none."},
             "http_proxy": {"type": "string", "description": "The proxy of requests to http URLs, the same."},
             "no_proxy": {"type": "string", "description": "The hosts that go direct, as NO_PROXY writes them."},
-            "confirm_mutations": {"type": "boolean", "description": "true: vegtam run sends a request whose method is not GET, HEAD or OPTIONS only with --confirm. Without a person at a terminal, unless network.confirm is never."}
+            "confirm_mutations": {"type": "boolean", "description": "true: vegtam run sends a request whose method is not GET, HEAD or OPTIONS only with --confirm. Without a person at a terminal, unless network.confirm is never."},
+            "secrets": {"type": "string", "description": "What the run does with a request that needs a secret value. all: a person's run sends it, to the origins the secret is bound to. none: a run without a person, with secrets.unattended deny, refuses it, exit code 6. keeper: a run without a person sends it through the keeper. New values may be added."}
           }
         },
         "never": {"type": "array", "items": {"type": "string"}, "description": "The addresses vegtam never connects to, whoever asks: the metadata services of clouds, and link-local, multicast and unspecified addresses."},

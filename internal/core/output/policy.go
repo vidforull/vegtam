@@ -14,15 +14,18 @@ import (
 // holds no secret: the credentials of the proxy show as the variable that
 // holds them, and the user and password of a proxy URL as ***.
 type Policy struct {
-	Path     string         `json:"path,omitempty"` // absent if there is no place for it
-	Found    bool           `json:"found"`
-	Limits   *PolicyLimits  `json:"limits,omitempty"`
-	Network  *PolicyNetwork `json:"network,omitempty"`
-	Hosts    []PolicyHost   `json:"hosts,omitempty"`
-	Secrets  []Secret       `json:"secrets,omitempty"` // {{$env NAME}} and {{$cmd NAME}}, with the origins the policy binds them to
-	Run      PolicyRun      `json:"run"`
-	Never    []string       `json:"never"` // the addresses vegtam never connects to
-	Warnings []Warning      `json:"warnings,omitempty"`
+	Path    string         `json:"path,omitempty"` // absent if there is no place for it
+	Found   bool           `json:"found"`
+	Limits  *PolicyLimits  `json:"limits,omitempty"`
+	Network *PolicyNetwork `json:"network,omitempty"`
+	Hosts   []PolicyHost   `json:"hosts,omitempty"`
+	Secrets []Secret       `json:"secrets,omitempty"` // {{$env NAME}} and {{$cmd NAME}}, with the origins the policy binds them to
+	// SecretsMode is what a run without a person does with secrets, as it
+	// applies: the file's values, or the defaults.
+	SecretsMode PolicySecretsMode `json:"secrets_mode"`
+	Run         PolicyRun         `json:"run"`
+	Never       []string          `json:"never"` // the addresses vegtam never connects to
+	Warnings    []Warning         `json:"warnings,omitempty"`
 }
 
 // PolicyLimits are the ceilings of the time limits, in milliseconds.
@@ -54,6 +57,33 @@ type PolicyHost struct {
 	Key    string `json:"key,omitempty"`
 }
 
+// PolicySecretsMode is what a run without a person does with a request
+// that needs a secret value, and when the keeper asks its person.
+type PolicySecretsMode struct {
+	Unattended string `json:"unattended"`  // deny or keeper
+	KeeperAsks string `json:"keeper_asks"` // always or unbound
+}
+
+// NewSecretsMode returns what s says a run without a person does with
+// secrets, as it applies: the file's values, or the defaults.
+func NewSecretsMode(s policy.Secrets) PolicySecretsMode {
+	m := PolicySecretsMode{Unattended: policy.UnattendedDeny, KeeperAsks: policy.KeeperAsksAlways}
+	if s.Keeper() {
+		m.Unattended = policy.UnattendedKeeper
+	}
+	if !s.AsksAlways() {
+		m.KeeperAsks = policy.KeeperAsksUnbound
+	}
+	return m
+}
+
+// The secrets a run gets, as PolicyRun.Secrets says.
+const (
+	RunSecretsAll    = "all"    // a person's run: every secret, to the origins it is bound to
+	RunSecretsNone   = "none"   // a run without a person, with secrets.unattended "deny"
+	RunSecretsKeeper = "keeper" // a run without a person, with secrets.unattended "keeper"
+)
+
 // PolicyRun is what applies to a run in the mode of this one.
 type PolicyRun struct {
 	// Unattended is true when no person is at a terminal: loopback and
@@ -66,11 +96,14 @@ type PolicyRun struct {
 	// ConfirmMutations is true when vegtam run sends a request whose
 	// method is not GET, HEAD or OPTIONS only with --confirm.
 	ConfirmMutations bool `json:"confirm_mutations"`
+	// Secrets is what the run does with a request that needs a secret
+	// value: RunSecretsAll, RunSecretsNone or RunSecretsKeeper.
+	Secrets string `json:"secrets"`
 }
 
 // NewPolicy returns p as vegtam policy prints it, with run, what applies.
 func NewPolicy(p *policy.Policy, run PolicyRun) *Policy {
-	out := &Policy{Path: p.Path, Found: p.Found, Run: run, Never: never()}
+	out := &Policy{Path: p.Path, Found: p.Found, SecretsMode: NewSecretsMode(p.Secrets), Run: run, Never: never()}
 	for _, w := range p.Warnings {
 		out.Warnings = append(out.Warnings, Warning{Message: w})
 	}

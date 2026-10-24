@@ -159,8 +159,9 @@ const loopbackPolicy = `{"network": {"allow": ["127.0.0.1", "::1"]}}`
 
 // policy returns doc, a policy file, as the person of the fixture has it:
 // {{$env VEGTAM_TEST_KEY}} and the {{$cmd NAME}} of the tests' command
-// files may go where the private file's values may (see allow), unless
-// doc binds secrets of its own.
+// files may go where the private file's values may (see allow), and a run
+// without a person sends its secrets through the keeper (see testKeeper),
+// unless doc says what secrets are of its own.
 func (fx *fixture) policy(doc string) string {
 	trimmed := strings.TrimSpace(doc)
 	if strings.Contains(doc, `"secrets"`) || !strings.HasPrefix(trimmed, "{") {
@@ -170,7 +171,7 @@ func (fx *fixture) policy(doc string) string {
 	for _, name := range []string{"KEY", "LEAK", "SLOW", "TOUCH"} {
 		cmd[name] = fx.origins
 	}
-	b, _ := json.Marshal(map[string]any{"env": map[string][]string{"VEGTAM_TEST_KEY": fx.origins}, "cmd": cmd})
+	b, _ := json.Marshal(map[string]any{"env": map[string][]string{"VEGTAM_TEST_KEY": fx.origins}, "cmd": cmd, "unattended": "keeper"})
 	rest := strings.TrimPrefix(trimmed, "{")
 	if strings.TrimSpace(rest) != "}" {
 		rest = ", " + rest

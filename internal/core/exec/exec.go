@@ -172,6 +172,24 @@ func (c *Client) Check(ctx context.Context, p *core.Prepared, s core.Secrets) er
 	return err
 }
 
+// revealed returns t with its secrets revealed from s, and whether it is
+// known: not for a late value in a check. A value that s refuses to give,
+// by its policy, is an error of kind policy; another error, of kind
+// variable, at src.
+func revealed(t core.Text, s core.Secrets, src core.Source, check bool) (string, bool, error) {
+	v, err := t.Reveal(s)
+	e, typed := errors.AsType[*core.Error](err)
+	switch {
+	case check && errors.Is(err, core.ErrLate):
+		return "", false, nil
+	case typed && e.Kind == core.KindPolicy:
+		return "", false, core.Errorf(core.KindPolicy, src, "%s", e.Msg)
+	case err != nil:
+		return "", false, core.Errorf(core.KindVariable, src, "%v", err)
+	}
+	return v, true, nil
+}
+
 // build makes the request that goes on the wire with the HTTP version
 // version. It also returns the headers that must not follow a redirect to
 // another origin. With check, a late value is no error: build checks the
@@ -182,17 +200,7 @@ func (c *Client) build(ctx context.Context, p *core.Prepared, s core.Secrets, ch
 	fail := func(format string, args ...any) error {
 		return core.Errorf(core.KindRequest, src, "%s", hide(p, s, raw, fmt.Sprintf(format, args...)))
 	}
-	// known is false for a late value in a check.
-	reveal := func(t core.Text) (v string, known bool, err error) {
-		v, err = t.Reveal(s)
-		switch {
-		case check && errors.Is(err, core.ErrLate):
-			return "", false, nil
-		case err != nil:
-			return "", false, core.Errorf(core.KindVariable, src, "%v", err)
-		}
-		return v, true, nil
-	}
+	reveal := func(t core.Text) (string, bool, error) { return revealed(t, s, src, check) }
 	raw, urlKnown, err := reveal(p.URL)
 	if err != nil {
 		return nil, nil, err

@@ -32,8 +32,13 @@ type Error struct {
 	Phase     string        // what a KindTimeout ended: PhaseConnect, PhaseRead or PhaseTotal; "" if not known
 	Confirm   *Confirmation // what a KindConfirm asks for
 	// Secret is the first secret that the request would send to an origin
-	// it is not bound to, for the KindPolicy or KindConfirm of that.
+	// it is not bound to, for the KindPolicy or KindConfirm of that; or
+	// the first that a run without a person holds no value of.
 	Secret *Bound
+	// PersonCommand is the command a person at a terminal runs to send
+	// the request, for the KindPolicy of a run without a person that holds
+	// no value of its Secret.
+	PersonCommand string
 }
 
 // Confirmation is what a request that is not sent without a confirmation
@@ -67,8 +72,8 @@ func Errorf(k Kind, src Source, format string, args ...any) *Error {
 // Warning is something to know of a request or a file, which does not
 // stop it.
 type Warning struct {
-	Source Source
-	Msg    string
+	Source Source `json:"source"`
+	Msg    string `json:"message"`
 }
 
 func (w Warning) String() string {

@@ -52,6 +52,9 @@ type Entry struct {
 	DurationMS float64   `json:"duration_ms"`        // until the end of the response, or of the run without one
 	Result     string    `json:"result"`             // "ok", or the kind of the error, such as "assert" or "network"
 	Truncated  bool      `json:"truncated,omitzero"` // the response body was longer than --max-body
+	// Redacted is set when what a run without a person was shown of the
+	// response was made sterile (see output.Result.Redact).
+	Redacted bool `json:"redacted,omitzero"`
 }
 
 // Log is the history file in a directory. A Log holds no state of its

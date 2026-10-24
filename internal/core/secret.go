@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"slices"
 	"strings"
@@ -14,27 +15,27 @@ import (
 // Prepared is a request with its placeholders resolved. Secrets stay
 // named segments of Text until the request is sent.
 type Prepared struct {
-	Request *Request
-	Method  string
-	URL     Text
-	Headers []PreparedHeader
-	Body    Text
+	Request *Request         `json:"-"`
+	Method  string           `json:"method"`
+	URL     Text             `json:"url"`
+	Headers []PreparedHeader `json:"headers"`
+	Body    Text             `json:"body"`
 }
 
 // PreparedHeader is a header with a resolved value.
 type PreparedHeader struct {
-	Name  string
-	Value Text
+	Name  string `json:"name"`
+	Value Text   `json:"value"`
 }
 
 // Secret names a secret value. Prepared requests hold only the name; the
 // value is looked up from Secrets when the request is sent.
 type Secret struct {
-	Name string // as in its placeholder: "token" or "$env TOKEN"
+	Name string `json:"name"` // as in its placeholder: "token" or "$env TOKEN"
 	// Capture is set for a variable that an @capture of an earlier request
 	// takes from its response: the value exists only once that request
 	// has run, and it is not the one of the environment.
-	Capture bool
+	Capture bool `json:"capture,omitempty"`
 }
 
 // Secrets looks up secret values, and the origins each may go to. They
@@ -51,10 +52,15 @@ type Secrets interface {
 // running the requests gives, such as a captured one.
 var ErrLate = errors.New("the value is known only when the request is sent")
 
+// ErrHeld is the error Secrets give, in a run without a person, for every
+// secret value: such a run holds none. It is ErrLate too, so that what
+// checks a request before it is sent treats each such value as unknown.
+var ErrHeld = fmt.Errorf("a run without a person holds no secret value: %w", ErrLate)
+
 // Segment is literal text or a secret.
 type Segment struct {
-	Text   string
-	Secret *Secret
+	Text   string  `json:"text,omitempty"`
+	Secret *Secret `json:"secret,omitempty"`
 }
 
 // Text is a resolved template: literal text with secrets in between.

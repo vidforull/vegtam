@@ -69,8 +69,9 @@ var errorKinds = []struct {
 		"an origin it is not bound to, which error.secret names; error.confirm says what confirms it. Ask a person first"},
 	{core.KindPolicy, "not allowed: a command file that is not trusted, an address vegtam never connects to or that " +
 		"the policy does not allow, a secret that would go to an origin it is not bound to (error.secret names it; " +
-		"without a person at a terminal, --confirm does not lift it), a policy file that cannot be read. " +
-		"Ask a person; do not work around it"},
+		"without a person at a terminal, --confirm does not lift it), a secret value that a run without a person does " +
+		"not get (error.person_command is what a person runs to send the request), a keeper that cannot be reached or " +
+		"that refused, a policy file that cannot be read. Ask a person; do not work around it"},
 	{core.KindCanceled, "SIGINT or SIGTERM came while a request or a command ran"},
 }
 
@@ -79,7 +80,11 @@ var errorKinds = []struct {
 var never = []string{
 	"connect to the metadata services of clouds, or to link-local, multicast or unspecified addresses (vegtam policy lists them)",
 	"print a request or a response as it went on the wire: requests show secrets as their placeholders, " +
-		"and a secret value anywhere else, in text or JSON, on stdout or stderr, is masked as ***",
+		"and a secret value it holds, anywhere else, in text or JSON, on stdout or stderr, is masked as ***",
+	"use a secret value in a run without a person, unless the operator's policy routes it through the keeper, " +
+		"which holds the value and asks its person (secrets.unattended, secrets.keeper_asks): such a run reads no value " +
+		"of http-client.private.env.json, reads no {{$env NAME}}, runs no {{$cmd NAME}}, and is shown no Set-Cookie, " +
+		"Authorization, WWW-Authenticate or token field of a response (result.redacted)",
 	"write a secret value it reads or captures to a file: the history of runs keeps no header, body or value, and cookies " +
 		"stay in memory; the only files vegtam writes are the history, the trust store (vegtam trust) and those of import",
 	"read its policy from anywhere but $XDG_CONFIG_HOME/vegtam/policy.json, or ~/.config/vegtam/policy.json: " +
@@ -111,11 +116,13 @@ func (c *Config) describe(root *cobra.Command) *output.Describe {
 	for _, e := range errorKinds {
 		d.Errors = append(d.Errors, output.DescribeError{Kind: string(e.kind), ExitCode: exitCode(e.kind), Meaning: e.meaning})
 	}
-	if pol, err := c.loadPolicy(); err != nil {
+	pol, err := c.loadPolicy()
+	if err != nil {
 		d.PolicyError = output.NewError(err, c.masker)
 	} else {
 		d.Policy = c.policyDoc(pol)
 	}
+	d.Mode.Secrets = runSecrets(d.Mode.Unattended, pol)
 	switch dir, err := policy.HistoryDir(); {
 	case err != nil:
 		d.History.Why = "no place for it: " + err.Error()
@@ -191,7 +198,16 @@ func describeText(d *output.Describe) string {
 	if d.Mode.Unattended {
 		who = "no person is at a terminal"
 	}
-	fmt.Fprintf(&b, "Mode: %s (%s).\n\nCommands:\n", who, d.Mode.Why)
+	fmt.Fprintf(&b, "Mode: %s (%s).\n", who, d.Mode.Why)
+	switch d.Mode.Secrets {
+	case output.RunSecretsNone:
+		b.WriteString("Secrets: none; a request that needs a secret value is not sent, exit code 6.\n")
+	case output.RunSecretsKeeper:
+		b.WriteString("Secrets: through the keeper, which holds the values and asks its person.\n")
+	default:
+		b.WriteString("Secrets: each to the origins it is bound to.\n")
+	}
+	b.WriteString("\nCommands:\n")
 	flags := func(fs []output.DescribeFlag) {
 		tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 		for _, f := range fs {

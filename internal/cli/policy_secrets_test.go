@@ -49,14 +49,27 @@ func TestPolicySecrets(t *testing.T) {
 	}
 	validateJSON(t, stdout)
 
-	// Without secrets, neither shows them.
+	// Without secrets, neither shows them; both say what a run without a
+	// person does with secrets, the strict default.
 	writePolicy(t, `{}`)
-	if _, stdout, _ = runCLI(t, true, "policy"); strings.Contains(stdout, "secret") {
+	if _, stdout, _ = runCLI(t, true, "policy"); strings.Contains(stdout, "secret {{") ||
+		!strings.Contains(stdout, "It gets no secret value: a request that needs one is not sent") {
 		t.Errorf("policy without secrets:\n%s", stdout)
 	}
-	if _, stdout, _ = runCLI(t, false, "policy"); strings.Contains(stdout, `"secrets"`) {
+	if _, stdout, _ = runCLI(t, false, "policy"); strings.Contains(stdout, `"secrets":[`) ||
+		!strings.Contains(stdout, `"secrets_mode":{"unattended":"deny","keeper_asks":"always"}`) || !strings.Contains(stdout, `"secrets":"none"`) {
 		t.Errorf("policy --json without secrets:\n%s", stdout)
 	}
+	writePolicy(t, `{"secrets": {"unattended": "keeper", "keeper_asks": "unbound"}}`)
+	if _, stdout, _ = runCLI(t, true, "policy"); !strings.Contains(stdout, "unattended   keeper\nkeeper asks  unbound\n") ||
+		!strings.Contains(stdout, "goes through the keeper, which asks its person") {
+		t.Errorf("policy with the keeper:\n%s", stdout)
+	}
+	if _, stdout, _ = runCLI(t, false, "policy"); !strings.Contains(stdout, `"secrets_mode":{"unattended":"keeper","keeper_asks":"unbound"}`) ||
+		!strings.Contains(stdout, `"secrets":"keeper"`) {
+		t.Errorf("policy --json with the keeper:\n%s", stdout)
+	}
+	validateJSON(t, stdout)
 
 	writePolicy(t, `{"secrets": {"env": {"API_TOKEN": ["https://*.example.com"]}}}`)
 	code, stdout, stderr = runCLI(t, false, "policy")

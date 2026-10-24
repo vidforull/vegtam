@@ -273,31 +273,15 @@ type Captured struct {
 // whatever the others give.
 func Evaluate(ctx context.Context, req *core.Request, resp *exec.Response) *Result {
 	res := &Result{}
-	asserts, captures, err := Directives(req)
+	_, captures, err := Directives(req)
 	if err != nil {
 		res.Err = err
 		return res
 	}
+	res.Outcomes, res.Err = Check(ctx, req, resp)
 	r := &Response{Response: resp, ctx: ctx}
 	var failed []string
 	line := 0
-	for _, a := range asserts {
-		passed, actual := a.check(r)
-		res.Outcomes = append(res.Outcomes, Outcome{
-			Expr: a.Expr, Line: a.Line, Passed: passed, Actual: actual,
-			Form: a.form, Cut: a.form == Body && resp.Truncated,
-		})
-		if !passed {
-			failed = append(failed, a.Expr)
-			line = cmp.Or(line, a.Line)
-		}
-	}
-	if len(failed) > 0 {
-		// The actual values stay out of the message: a body cut short
-		// for it could cut a secret in two, and then masking misses it.
-		res.Err = failure(req, line, "assertion", failed, len(asserts))
-	}
-	failed, line = nil, 0
 	for _, c := range captures {
 		v, err := c.take(r)
 		if err != nil {
@@ -311,6 +295,39 @@ func Evaluate(ctx context.Context, req *core.Request, resp *exec.Response) *Resu
 		res.Err = failure(req, line, "capture", failed, len(captures))
 	}
 	return res
+}
+
+// Check checks resp against the @assert directives of req, each whatever
+// the others give, and returns their outcomes, and the error of kind
+// assert for those that failed. A run that is not shown a value checks
+// them against the response as it is shown it: it must not learn the
+// value, a character at a time, from what its assertions on it give.
+func Check(ctx context.Context, req *core.Request, resp *exec.Response) ([]Outcome, error) {
+	asserts, _, err := Directives(req)
+	if err != nil {
+		return nil, err
+	}
+	r := &Response{Response: resp, ctx: ctx}
+	var outcomes []Outcome
+	var failed []string
+	line := 0
+	for _, a := range asserts {
+		passed, actual := a.check(r)
+		outcomes = append(outcomes, Outcome{
+			Expr: a.Expr, Line: a.Line, Passed: passed, Actual: actual,
+			Form: a.form, Cut: a.form == Body && resp.Truncated,
+		})
+		if !passed {
+			failed = append(failed, a.Expr)
+			line = cmp.Or(line, a.Line)
+		}
+	}
+	if len(failed) > 0 {
+		// The actual values stay out of the message: a body cut short
+		// for it could cut a secret in two, and then masking misses it.
+		return outcomes, failure(req, line, "assertion", failed, len(asserts))
+	}
+	return outcomes, nil
 }
 
 // failure returns the error for the failed directives of one kind, of

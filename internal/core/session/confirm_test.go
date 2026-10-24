@@ -106,16 +106,16 @@ func confirmFile(t *testing.T) (f *core.File, got func() []string) {
 }
 
 // TestConfirmRefuses checks that the zero Confirm sends no request that
-// needs a confirmation: it is refused before it is resolved, with what
-// confirms it, and its captures are lost, as those of a request that did
-// not run.
+// needs a confirmation: it is refused, with what confirms it, and its
+// captures are lost, as those of a request that did not run. The secrets
+// go through a keeper, as a run without a person sends them.
 func TestConfirmRefuses(t *testing.T) {
 	f, got := confirmFile(t)
 	log := history.New(filepath.Join(t.TempDir(), "vegtam"))
-	s := New(Options{Env: "test", MaxBody: 1 << 20, History: log})
+	s := New(Options{Env: "test", MaxBody: 1 << 20, History: log, Keeper: newLocal(t, Options{Env: "test", MaxBody: 1 << 20})})
 	login := s.Prepare(t.Context(), f, 0)
 	if login.Prepared != nil || login.Err == nil {
-		t.Fatalf("login prepared %+v, error %v; want it refused before it is resolved", login.Prepared, login.Err)
+		t.Fatalf("login prepared %+v, error %v; want it refused", login.Prepared, login.Err)
 	}
 	res := s.Run(t.Context(), login)
 	want := "POST {{host}}/login is not sent without a confirmation, and no person is at a terminal: --confirm=" + f.Path + "#login sends it"
@@ -168,8 +168,9 @@ func TestConfirmGiven(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	keeper := newLocal(t, Options{Env: "test", MaxBody: 1 << 20})
 	for _, c := range []Confirm{{All: true}, {Mutations: true}, {Requests: []string{key}}} {
-		s := New(Options{Env: "test", MaxBody: 1 << 20, Confirm: c})
+		s := New(Options{Env: "test", MaxBody: 1 << 20, Confirm: c, Keeper: keeper})
 		if res := s.Run(t.Context(), s.Prepare(t.Context(), f, 2)); res.Error != nil || res.Response == nil {
 			t.Errorf("%+v: %+v", c, res.Error)
 		}
@@ -182,7 +183,7 @@ func TestConfirmGiven(t *testing.T) {
 		t.Errorf("the server got %q", g)
 	}
 
-	dry := New(Options{Env: "test", DryRun: true})
+	dry := New(Options{Env: "test", DryRun: true, Keeper: keeper})
 	for i, want := range []string{"--confirm=" + f.Path + "#login", "", "--confirm=" + f.Path + "#drop"} {
 		res := dry.Run(t.Context(), dry.Prepare(t.Context(), f, i))
 		switch {
@@ -192,7 +193,7 @@ func TestConfirmGiven(t *testing.T) {
 			t.Errorf("dry run of %d: confirm %+v, want %q", i, res.Confirm, want)
 		}
 	}
-	dry = New(Options{Env: "test", DryRun: true, Confirm: Confirm{All: true}})
+	dry = New(Options{Env: "test", DryRun: true, Confirm: Confirm{All: true}, Keeper: keeper})
 	if res := dry.Run(t.Context(), dry.Prepare(t.Context(), f, 0)); res.Confirm != nil {
 		t.Errorf("a dry run with every request confirmed: %+v", res.Confirm)
 	}

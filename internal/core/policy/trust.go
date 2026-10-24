@@ -45,24 +45,50 @@ func NewStore(path string) *Store { return &Store{path: path} }
 // or in ~/.config/vegtam/trust.json if XDG_CONFIG_HOME is not set. If
 // neither can be found, the store trusts nothing and cannot be changed.
 func DefaultStore() *Store {
-	dir, err := xdgDir("XDG_CONFIG_HOME", ".config")
+	dir, err := ConfigDir()
 	if err != nil {
 		return &Store{err: fmt.Errorf("no trust store: %w", err)}
 	}
 	return NewStore(filepath.Join(dir, "trust.json"))
 }
 
+// ConfigDir returns vegtam's configuration directory, that of the trust
+// store and the policy: $XDG_CONFIG_HOME/vegtam, or ~/.config/vegtam if
+// XDG_CONFIG_HOME is not set.
+func ConfigDir() (string, error) { return xdgDir("XDG_CONFIG_HOME", ".config") }
+
 // HistoryDir returns the directory of the history of runs,
 // $XDG_DATA_HOME/vegtam, or ~/.local/share/vegtam if XDG_DATA_HOME is not
 // set; or "" if the operator keeps no history: VEGTAM_NO_HISTORY is set
 // to anything but "". The process environment is read here, for
-// {{$env NAME}} and the credentials of the proxy (see env.Lookup), and
-// for the proxy of the environment, and nowhere else.
+// {{$env NAME}} and the credentials of the proxy (see env.Lookup), for
+// the proxy of the environment, and for whether a variable holds a value,
+// which vegtam doctor says (see env.Has), and nowhere else.
 func HistoryDir() (string, error) {
 	if os.Getenv("VEGTAM_NO_HISTORY") != "" {
 		return "", nil
 	}
 	return xdgDir("XDG_DATA_HOME", filepath.Join(".local", "share"))
+}
+
+// keeperSocket is the name of the keeper's socket.
+const keeperSocket = "keeper.sock"
+
+// KeeperSocket returns the path of the unix socket that the keeper
+// listens on: $XDG_RUNTIME_DIR/vegtam/keeper.sock, in the directory that
+// is the user's alone and goes when they log out; or, if XDG_RUNTIME_DIR
+// is not set to an absolute path, keeper.sock in vegtam's directory of
+// the user's cache, ~/.cache/vegtam or ~/Library/Caches/vegtam on macOS.
+func KeeperSocket() (string, error) {
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if !filepath.IsAbs(dir) {
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("%w; set XDG_RUNTIME_DIR", err)
+		}
+		dir = cache
+	}
+	return filepath.Join(dir, "vegtam", keeperSocket), nil
 }
 
 // xdgDir returns vegtam's directory in the base directory that the
@@ -207,7 +233,7 @@ func (s *Store) read(f *os.File, fail func(string, ...any) error) (map[string]st
 	switch {
 	case err != nil:
 		return nil, fail("%v", err)
-	case !ownedByUser(fi):
+	case !OwnedByUser(fi):
 		return nil, fail("it belongs to another user, so it trusts nothing")
 	case fi.Mode().Perm()&0o022 != 0:
 		return nil, fail("others can write it, so it trusts nothing; make it private: chmod 600 %s", s.path)

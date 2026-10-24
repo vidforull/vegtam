@@ -24,15 +24,11 @@ func normalize(fx *fixture, s string) string {
 }
 
 // allowedText returns the origins the fixture's secrets may go to as the
-// text of a dry run lists them: sorted, those of the hidden hosts masked.
+// text of a dry run without a person lists them: sorted, and those of the
+// hidden hosts as the private file binds them, since such a run holds no
+// value to hide them by.
 func (fx *fixture) allowedText() string {
-	origins := slices.Compact(slices.Sorted(slices.Values(fx.origins)))
-	for i, o := range origins {
-		if o == "http://"+fx.hidden || o == "http://"+fx.live {
-			origins[i] = "***"
-		}
-	}
-	return strings.Join(origins, ", ")
+	return strings.Join(slices.Compact(slices.Sorted(slices.Values(fx.origins))), ", ")
 }
 
 func TestRunText(t *testing.T) {
@@ -49,7 +45,7 @@ func TestRunText(t *testing.T) {
 {
   "echo": {
     "api_key": "",
-    "authorization": "Bearer ***",
+    "authorization": "***",
     "body": "",
     "escaped": "key%3D***%26env%3D***",
     "key": "***",
@@ -57,7 +53,7 @@ func TestRunText(t *testing.T) {
   },
   "php": {
     "api_key": "",
-    "authorization": "Bearer ***",
+    "authorization": "***",
     "body": "",
     "escaped": "key%3D***%26env%3D***",
     "key": "***",
@@ -65,13 +61,14 @@ func TestRunText(t *testing.T) {
   },
   "dotnet": {
     "api_key": "",
-    "authorization": "Bearer ***",
+    "authorization": "***",
     "body": "",
     "escaped": "key%3D***%26env%3D***",
     "key": "***",
     "query": "key=***&env=***"
   }
 }
+redacted (no person at a terminal): $.echo.authorization, $.php.authorization, $.dotnet.authorization
 `, ""},
 		{"--verbose and control characters", []string{"run", "more/plain.http#1", "-v"}, exitOK, `# timeouts: connect 10s, read 30s, max time 2m
 GET HOST/plain
@@ -243,7 +240,9 @@ plain\x1b]0;title\x07 \u202etext\u200b
 		t.Errorf("run text = %d\n%s\nwant\n%s\nstderr: %q, want %q", code, got, want, stderr, wantErr)
 	}
 
-	// JSON: the outcomes next to the response, actual values masked.
+	// JSON: the outcomes next to the response, actual values masked, and
+	// one of a field named as a credential is, hidden whole from a run
+	// without a person, which checks its assertions on what it is shown.
 	for _, mode := range [][]string{nil, {"--json"}, {"--json", "-v"}} {
 		code, stdout, stderr = runCLI(t, len(mode) > 0, append([]string{"run", "checks.http#echo", "-e", "test", "--confirm"}, mode...)...)
 		validateJSON(t, stdout)
@@ -251,7 +250,7 @@ plain\x1b]0;title\x07 \u202etext\u200b
 		decode(t, stdout, &doc)
 		wantAsserts := []output.Assert{
 			{Expression: `jsonpath $.echo.key == "nope"`, Actual: `"***"`},
-			{Expression: `jsonpath $.echo.authorization contains "Bearer"`, Passed: true, Actual: `"Bearer ***"`},
+			{Expression: `jsonpath $.echo.authorization contains "Bearer"`, Actual: "***"},
 			{Expression: "header X-Echo exists", Passed: true, Actual: "key=***"},
 		}
 		if r := doc.Result; code != exitAssert || r == nil || r.Response == nil || r.Error == nil || r.Error.Kind != "assert" ||

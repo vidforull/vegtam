@@ -22,6 +22,16 @@ func (fx *fixture) leaks(s string) []string {
 	_, port, _ := strings.Cut(fx.hidden, ":")
 	_, live, _ := strings.Cut(fx.live, ":")
 	found := slices.DeleteFunc([]string{fx.hidden, ":" + port, fx.live, ":" + live}, func(h string) bool { return !strings.Contains(s, h) })
+	return append(found, fx.valueLeaks(s)...)
+}
+
+// valueLeaks returns the forms of the test secrets that s contains, as
+// leaks does, but for the hosts of the base URLs. A run without a person
+// holds no value, and so does not hide those hosts where the private file
+// binds a secret to them ($allow), which a dry run and the error of a
+// secret show.
+func (fx *fixture) valueLeaks(s string) []string {
+	var found []string
 	// The credentials of Basic, which the user, alice, does not give away.
 	basic := "alice:" + privateSecret
 	for _, f := range []string{basic, base64.StdEncoding.EncodeToString([]byte(basic)), base64.RawURLEncoding.EncodeToString([]byte(basic))} {
@@ -85,14 +95,14 @@ func TestNoSecretInOutput(t *testing.T) {
 		{"timeout", []string{"run", api + "#slow", "--max-time", "100ms"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}", ""},
 		{"read timeout", []string{"run", api + "#slow", "--read-timeout", "100ms"}, exitNetwork, "(read timeout)", ""},
 		{"connect timeout", []string{"run", transport + "#silent", "--connect-timeout", "100ms"}, exitNetwork, "(connect timeout)", ""},
-		{"dry run", []string{"run", api + "#echo", "--dry-run"}, exitOK, "Bearer {{token}}", ""},
+		{"dry run", []string{"run", api + "#echo", "--dry-run"}, exitOK, "Bearer {{token}}", ""}, // see valueLeaks
 		{"binary body", []string{"run", api + "#binary"}, exitOK, "", ""},
 		{"truncated body", []string{"run", api + "#big", "--max-body", "106"}, exitOK, "xx***", ""},
 		{"secret host", []string{"run", api + "#hidden"}, exitNetwork, "{{base}}/?key={{token}}", ""},
 		{"secret host that redirects", []string{"run", transport + "#moved"}, exitOK, "***", ""},
 		{"session cookie", []string{"run", fx.cookieFile(t)}, exitOK, "***", ""},
-		{"Basic", []string{"run", transport + "#basic"}, exitOK, "Basic ***", ""},
-		{"Basic in one word", []string{"run", transport + "#basic-word"}, exitOK, "Basic ***", ""},
+		{"Basic", []string{"run", transport + "#basic"}, exitOK, "***", ""}, // the field named authorization hidden whole
+		{"Basic in one word", []string{"run", transport + "#basic-word"}, exitOK, "***", ""},
 		{"redirect error", []string{"run", api + "#hops"}, exitNetwork, "stopped after 10 redirects", ""},
 		{"unknown CA", []string{"run", transport + "#untrusted"}, exitNetwork, "?key={{token}}&env={{$env VEGTAM_TEST_KEY}}", ""},
 		{"no client certificate", []string{"run", transport + "#mtls", "--cacert", fx.ca}, exitNetwork, "pass --cert and --key", ""},
@@ -136,7 +146,11 @@ func TestNoSecretInOutput(t *testing.T) {
 					decode(t, stdout, &doc)
 					all += "\n" + strings.Join(bodies(doc), "\n")
 				}
-				if found := fx.leaks(all); len(found) > 0 {
+				found := fx.leaks(all)
+				if sc.name == "dry run" || sc.name == "show" {
+					found = fx.valueLeaks(all)
+				}
+				if len(found) > 0 {
 					t.Errorf("secret forms %q in the output\nstdout: %s\nstderr: %s", found, stdout, stderr)
 				}
 				if !strings.Contains(all, sc.want) {
@@ -177,12 +191,13 @@ type panicWriter struct{ msg string }
 func (w panicWriter) Write([]byte) (int, error) { panic(w.msg) }
 
 // TestPanicIsMasked checks that a panic, whose value may hold a secret,
-// is printed masked: Go would print it as is.
+// is printed masked: Go would print it as is. The run is a person's: one
+// without a person holds no secret value to print.
 func TestPanicIsMasked(t *testing.T) {
 	fx := newFixture(t)
 	var stderr strings.Builder
 	code := Run(t.Context(), []string{"run", fx.path("api.http") + "#echo", "-e", "test"},
-		Config{Stdout: panicWriter{"cannot print " + privateSecret}, Stderr: &stderr, TTY: true})
+		Config{Stdout: panicWriter{"cannot print " + privateSecret}, Stderr: &stderr, TTY: true, Interactive: true})
 	if code != exitPanic || !strings.HasPrefix(stderr.String(), "vegtam: internal error: cannot print ***\ngoroutine ") {
 		t.Errorf("Run = %d\n%s", code, stderr.String())
 	}

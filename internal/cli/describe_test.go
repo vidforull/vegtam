@@ -26,14 +26,15 @@ func TestDescribe(t *testing.T) {
 	if code != exitOK || stderr != "" || d == nil || d.Name != "vegtam" || d.Version != "v1.2.3" || d.Schema != "vegtam schema" {
 		t.Fatalf("describe = %d\n%s\n%s", code, stdout, stderr)
 	}
-	if d.Mode != (output.DescribeMode{Unattended: true, Why: "stdin or stdout is not a terminal"}) {
+	// The fixture's policy sends the secrets of such a run through the keeper.
+	if d.Mode != (output.DescribeMode{Unattended: true, Why: "stdin or stdout is not a terminal", Secrets: output.RunSecretsKeeper}) {
 		t.Errorf("mode %+v", d.Mode)
 	}
 	var names []string
 	for _, c := range d.Commands {
 		names = append(names, c.Name)
 	}
-	want := []string{"describe", "import", "import postman", "list", "policy", "run", "schema", "show", "trust", "tui", "version"}
+	want := []string{"describe", "doctor", "import", "import postman", "list", "policy", "run", "schema", "show", "trust", "tui", "version"}
 	if !slices.Equal(names, want) {
 		t.Errorf("commands %q, want %q", names, want)
 	}
@@ -116,12 +117,12 @@ func TestDescribe(t *testing.T) {
 		args []string
 		mode output.DescribeMode
 	}{
-		{[]string{"describe", "--json"}, output.DescribeMode{Unattended: true, Why: "--json is given"}},
-		{[]string{"describe"}, output.DescribeMode{Why: "stdin and stdout are terminals"}},
+		{[]string{"describe", "--json"}, output.DescribeMode{Unattended: true, Why: "--json is given", Secrets: output.RunSecretsKeeper}},
+		{[]string{"describe"}, output.DescribeMode{Why: "stdin and stdout are terminals", Secrets: output.RunSecretsAll}},
 	} {
 		code, stdout, _ := runAt(t, tt.args...)
 		if tt.args[len(tt.args)-1] != "--json" {
-			if code != exitOK || !strings.Contains(stdout, "Mode: a person is at a terminal (stdin and stdout are terminals).") {
+			if code != exitOK || !strings.Contains(stdout, "Mode: a person is at a terminal (stdin and stdout are terminals).\nSecrets: each to the origins it is bound to.\n") {
 				t.Errorf("as text:\n%s", stdout)
 			}
 			continue

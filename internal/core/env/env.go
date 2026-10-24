@@ -78,6 +78,13 @@ type Options struct {
 	// Secrets are the origins the operator's policy binds the values of
 	// {{$env NAME}} and {{$cmd NAME}} to: nothing else binds them.
 	Secrets policy.Secrets
+	// Held is set for a run without a person, which holds no secret
+	// value. Of the private environment file the loader keeps the names
+	// and $allow, never the values; it reads no {{$env NAME}}, and runs no
+	// {{$cmd NAME}}, though it checks that its command file is trusted, as
+	// a dry run does: each is a secret by its name alone. SecretValue gives
+	// core.ErrHeld for every secret, captured ones too.
+	Held bool
 }
 
 // captured is a value an @capture took.
@@ -85,6 +92,7 @@ type captured struct {
 	value   string
 	secret  bool
 	origins []string // of the response it came from
+	held    bool     // a keeper took it, and the run has no value: see Hold
 }
 
 // envMap is a parsed environment file: environment -> name -> value.
@@ -148,11 +156,27 @@ func (l *Loader) Declare(name string) { l.declared[name] = true }
 // from origins gave, for the requests sent from now on. A secret value is
 // also masked from now on, and goes to those origins alone.
 func (l *Loader) Capture(name, value string, secret bool, origins ...string) {
-	l.captured[name] = captured{value, secret, known(origins)}
+	l.captured[name] = captured{value: value, secret: secret, origins: known(origins)}
 	delete(l.lost, name)
 	if secret {
 		l.taken = append(l.taken, value)
 	}
+}
+
+// Hold makes the declared variable name one whose secret value a keeper
+// took, from a response of origins, and keeps: the run knows its name and
+// where it may go, and never its value.
+func (l *Loader) Hold(name string, origins ...string) {
+	l.captured[name] = captured{secret: true, origins: known(origins), held: true}
+	delete(l.lost, name)
+}
+
+// Captured returns the value that the latest @capture of name took, if it
+// took one, whether it is a secret, and the origins of the response it
+// came from. A value a keeper holds (see Hold) is "".
+func (l *Loader) Captured(name string) (value string, secret bool, origins []string, ok bool) {
+	c, ok := l.captured[name]
+	return c.value, c.secret, slices.Clone(c.origins), ok
 }
 
 // Forget drops the value of name: the latest @capture of it, in the
@@ -210,6 +234,14 @@ func (l *Loader) Fill(p *core.Prepared) (*core.Prepared, error) {
 // process, as {{$env NAME}} reads it: the operator's policy names the
 // credentials of its proxy so.
 func Lookup(name string) (string, bool) { return os.LookupEnv(name) }
+
+// Has reports whether the environment variable name of the process holds
+// a value, one that is not empty, without handing the value out: vegtam
+// doctor says which secrets the environment holds, never what they are.
+func Has(name string) bool {
+	v, ok := os.LookupEnv(name)
+	return ok && v != ""
+}
 
 func (l *Loader) getenv(name string) (string, bool) {
 	v, ok := os.LookupEnv(name)
@@ -274,7 +306,7 @@ func (l *Loader) load(dir string) (*Vars, error) {
 		name string
 		dst  map[string]string
 	}{{PublicFile, v.public}, {PrivateFile, v.private}} {
-		path := nearest(abs, f.name)
+		path := Nearest(abs, f.name)
 		if path == "" {
 			continue
 		}
@@ -350,7 +382,7 @@ func Names(path string) ([]string, error) {
 	l := NewLoader(Options{})
 	var names []string
 	for _, name := range []string{PublicFile, PrivateFile} {
-		if p := nearest(abs, name); p != "" {
+		if p := Nearest(abs, name); p != "" {
 			m, err := l.read(p)
 			if err != nil {
 				return nil, err
@@ -363,9 +395,11 @@ func Names(path string) ([]string, error) {
 	return slices.Compact(names), nil
 }
 
-// nearest returns the path of the file named name in dir or the closest
-// directory above it, or "" if there is none.
-func nearest(dir, name string) string {
+// Nearest returns the path of the file named name in dir, an absolute
+// path, or in the closest directory above it; "" if there is none. The
+// requests of the .http files in dir find their environment files and
+// their command file so.
+func Nearest(dir, name string) string {
 	for {
 		path := filepath.Join(dir, name)
 		if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
@@ -393,6 +427,9 @@ func (l *Loader) read(path string) (envMap, error) {
 	src, err := os.ReadFile(path) //nolint:forbidigo,gosec // G304: an environment file, found by its name from the .http file's directory up
 	if err != nil {
 		return nil, fail("%v", err)
+	}
+	if l.opts.Held && filepath.Base(path) == PrivateFile {
+		return l.readNames(path, src, fail)
 	}
 	var raw map[string]map[string]any
 	dec := json.NewDecoder(bytes.NewReader(src))
@@ -434,6 +471,78 @@ func (l *Loader) read(path string) (envMap, error) {
 	}
 	l.files[path], l.ssl[path], l.allow[path] = m, ssl, allow
 	return m, nil
+}
+
+// readNames parses src, the private environment file at path, as read
+// does, for a run that holds no secret value: each variable gets the
+// value "", and no string is made of a value. The values are decoded as
+// raw bytes, checked to be strings, numbers or booleans, and zeroed with
+// the file's bytes; what is left of them is what Go's reading of the file
+// left in memory, which nothing refers to.
+func (l *Loader) readNames(path string, src []byte, fail func(string, ...any) error) (envMap, error) {
+	defer clear(src)
+	var raw map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(src, &raw); err != nil {
+		return nil, fail("%v", err)
+	}
+	m, ssl, allow := envMap{}, envMap{}, allowMap{}
+	defer func() {
+		for _, vars := range raw {
+			for _, v := range vars {
+				clear(v)
+			}
+		}
+	}()
+	for env, vars := range raw {
+		m[env] = map[string]string{}
+		for name, val := range vars {
+			switch first := firstByte(val); {
+			case name == allowKey, name == sslConfiguration && first == '{':
+				if err := setting(env, name, val, ssl, allow); err != nil {
+					return nil, fail("%v", err)
+				}
+			case first == '"', first == '-', '0' <= first && first <= '9', first == 't', first == 'f':
+				m[env][name] = ""
+			default:
+				return nil, fail("%s.%s: value must be a string, number or boolean", env, name)
+			}
+		}
+	}
+	l.files[path], l.ssl[path], l.allow[path] = m, ssl, allow
+	return m, nil
+}
+
+// setting decodes val, the $allow or the SSLConfiguration of env in the
+// private environment file, which hold no secret, into allow or ssl, as
+// read does.
+func setting(env, name string, val json.RawMessage, ssl envMap, allow allowMap) error {
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(val))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return err
+	}
+	if cfg, ok := v.(map[string]any); ok && name == sslConfiguration {
+		ssl[env] = map[string]string{}
+		for k, x := range cfg {
+			ssl[env][k] = fmt.Sprint(x)
+		}
+		return nil
+	}
+	a, err := parseAllow(env, v, true)
+	if err != nil {
+		return err
+	}
+	allow[env] = a
+	return nil
+}
+
+// firstByte returns the first byte of the JSON value v, or 0 for none.
+func firstByte(v json.RawMessage) byte {
+	if v = bytes.TrimLeft(v, " \t\r\n"); len(v) == 0 {
+		return 0
+	}
+	return v[0]
 }
 
 // allowKey is the entry of an environment, in the private environment
@@ -556,8 +665,13 @@ func sslWarnings(path string, ssl envMap, env string) []core.Warning {
 // SecretValue returns the value of a secret named in a prepared request.
 func (v *Vars) SecretValue(s core.Secret) (string, error) {
 	l := v.loader
+	if l.opts.Held {
+		return "", core.ErrHeld
+	}
 	if s.Capture {
-		if c, ok := l.captured[s.Name]; ok {
+		if c, ok := l.captured[s.Name]; ok && c.held {
+			return "", core.ErrHeld
+		} else if ok {
 			return c.value, nil
 		}
 		if l.opts.DryRun {
@@ -569,6 +683,11 @@ func (v *Vars) SecretValue(s core.Secret) (string, error) {
 		return v.commandValue(n)
 	}
 	if n, ok := strings.CutPrefix(s.Name, "$env "); ok {
+		if slices.Contains(l.opts.Hidden, n) {
+			// A keeper is handed the request as resolved: the check of
+			// Prepare is made again here.
+			return "", core.Errorf(core.KindPolicy, core.Source{}, "{{$env %s}} holds the credentials of the proxy, which go to the proxy alone: no request may send them", n)
+		}
 		if val, ok := l.getenv(n); ok {
 			return val, nil
 		}
@@ -747,6 +866,9 @@ func (v *Vars) class(r core.Ref) Class {
 		if !envVarName.MatchString(r.Name) {
 			break
 		}
+		if v.loader.opts.Held {
+			return Secret // whether it is set or not is the keeper's to know
+		}
 		if _, ok := v.loader.getenv(r.Name); ok {
 			return Secret
 		}
@@ -801,6 +923,8 @@ func (rs *resolver) ref(ctx context.Context, r core.Ref) core.Segment {
 			err = fmt.Errorf("%s: want {{$env NAME}}", r)
 		} else if slices.Contains(rs.vars.loader.opts.Hidden, r.Name) {
 			err = core.Errorf(core.KindPolicy, rs.src, "%s holds the credentials of the proxy, which go to the proxy alone: no request may send them", r)
+		} else if rs.vars.loader.opts.Held {
+			return secret("$env " + r.Name)
 		} else if _, ok := rs.vars.loader.getenv(r.Name); ok {
 			return secret("$env " + r.Name)
 		} else {

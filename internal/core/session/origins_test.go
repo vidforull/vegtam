@@ -91,15 +91,25 @@ func originsFile(t *testing.T, src string) *core.File {
 }
 
 // originsSession returns a session whose policy binds
-// {{$env VEGTAM_ORIGINS_KEY}} to allowed.
+// {{$env VEGTAM_ORIGINS_KEY}} to allowed. Without a person, its secrets go
+// through a keeper, which asks its person only of one that is not bound
+// to where its request goes, and they say no (see declined).
 func originsSession(t *testing.T, dryRun bool, c Confirm, allowed ...string) *Session {
 	t.Helper()
 	t.Setenv("VEGTAM_ORIGINS_KEY", originsKey)
-	return New(Options{
+	opts := Options{
 		DryRun: dryRun, MaxBody: 1 << 20, Confirm: c,
 		Secrets: policy.Secrets{Env: map[string][]string{"VEGTAM_ORIGINS_KEY": allowed}},
-	})
+	}
+	if !c.Person {
+		opts.Keeper = newKeeper(t, Options{MaxBody: 1 << 20, Secrets: opts.Secrets}, false, errDeclined)
+	}
+	return New(opts)
 }
+
+// declined is what the error of a request that a keeper refused for a
+// secret not bound to where it goes ends with: its person said no.
+const declined = "; and the keeper's operator did not confirm it: declined"
 
 // runNamed prepares and runs with s the request of f named name.
 func runNamed(t *testing.T, s *Session, f *core.File, name string) *output.Result {
@@ -143,7 +153,7 @@ func TestOriginsPerson(t *testing.T) {
 		}
 		res := runNamed(t, s, f, "steal")
 		want := "GET " + trap.URL + "/?k={{$env VEGTAM_ORIGINS_KEY}} is not sent: secret {{$env VEGTAM_ORIGINS_KEY}} may not go to " + trap.URL +
-			": its allowed origins are " + a.URL + "; allow it in the policy (secrets)"
+			": its allowed origins are " + a.URL + "; allow it in the policy (secrets)" + declined
 		if e := res.Error; e == nil || e.Kind != core.KindPolicy || e.Message != want || !equal(e.Secret) || e.Confirm != nil || res.Response != nil {
 			t.Errorf("%+v, no person: %+v", c, res.Error)
 		}
@@ -273,7 +283,7 @@ func TestOriginsCaptures(t *testing.T) {
 		res := runNamed(t, s, f, name)
 		if e := res.Error; e == nil || e.Kind != core.KindPolicy || e.Secret == nil || e.Secret.Name != "{{token}}" || !e.Secret.Captured ||
 			e.Secret.Origin != trap.URL || !slices.Equal(e.Secret.Allowed, []string{a.URL}) ||
-			!strings.HasSuffix(e.Message, "it was captured from a response of "+a.URL+", and goes back there alone") {
+			!strings.HasSuffix(e.Message, "it was captured from a response of "+a.URL+", and goes back there alone"+declined) {
 			t.Errorf("%s: %+v", name, res.Error)
 		}
 		noLeak(t, res)

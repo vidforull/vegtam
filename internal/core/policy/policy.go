@@ -41,11 +41,47 @@ type Policy struct {
 // Secrets are the origins that the values of {{$env NAME}} and
 // {{$cmd NAME}} may go to, by NAME, each as core.Origin writes it. A
 // value whose NAME they leave out goes nowhere, unless the private
-// environment file binds it ($allow).
+// environment file binds it ($allow). They also say what a run without a
+// person does with a request that needs a secret.
 type Secrets struct {
 	Env map[string][]string // by environment variable
 	Cmd map[string][]string // by command, of any command file
+	// Unattended is what a run without a person does with a request that
+	// needs a secret value: UnattendedDeny, the default, or
+	// UnattendedKeeper; "" if the file does not say.
+	Unattended string
+	// KeeperAsks is when the keeper asks its person before it sends a
+	// request with a secret: KeeperAsksAlways, the default, or
+	// KeeperAsksUnbound; "" if the file does not say.
+	KeeperAsks string
 }
+
+// The values of secrets.unattended.
+const (
+	// UnattendedDeny: a run without a person gets no secret value at all.
+	UnattendedDeny = "deny"
+	// UnattendedKeeper: a run without a person sends the requests that need
+	// one through the keeper, which holds the values and asks its person.
+	UnattendedKeeper = "keeper"
+)
+
+// The values of secrets.keeper_asks.
+const (
+	// KeeperAsksAlways: the keeper asks before each request with a secret.
+	KeeperAsksAlways = "always"
+	// KeeperAsksUnbound: it asks only when a secret of the request is not
+	// bound to where the request goes.
+	KeeperAsksUnbound = "unbound"
+)
+
+// Keeper reports whether a run without a person sends the requests that
+// need a secret through the keeper, rather than refusing them.
+func (s Secrets) Keeper() bool { return s.Unattended == UnattendedKeeper }
+
+// AsksAlways reports whether the keeper asks before every request with a
+// secret, and not only before one that sends a secret where it is not
+// bound.
+func (s Secrets) AsksAlways() bool { return s.KeeperAsks != KeeperAsksUnbound }
 
 // Limits are ceilings on the time limits of a request: on the flags, and
 // so on the directives of a file, which may only lower those. 0 is none.
@@ -125,7 +161,7 @@ const maxPolicy = 1 << 20
 // file, or no place for one, the policy is empty: vegtam does what it does
 // on its own.
 func Load() (*Policy, error) {
-	dir, err := xdgDir("XDG_CONFIG_HOME", ".config")
+	dir, err := ConfigDir()
 	if err != nil {
 		return &Policy{Warnings: []string{fmt.Sprintf("no policy file: %v", err)}}, nil
 	}
@@ -191,7 +227,7 @@ func readPolicy(f *os.File, path string, fail func(string, ...any) error) ([]byt
 		return nil, nil, fail("%v", err)
 	case !fi.Mode().IsRegular():
 		return nil, nil, fail("not a regular file")
-	case !ownedByUser(fi):
+	case !OwnedByUser(fi):
 		return nil, nil, fail("it belongs to another user, so it is not read")
 	case fi.Mode().Perm()&0o022 != 0:
 		return nil, nil, fail("others can write it, so it is not read; make it private: chmod 600 %s", path)
@@ -217,7 +253,7 @@ func checkDir(root *os.Root, dir, then string, fail func(string, ...any) error) 
 	switch {
 	case err != nil:
 		return fail("%v", err)
-	case !ownedByUser(di):
+	case !OwnedByUser(di):
 		return fail("its directory belongs to another user, so %s", then)
 	case di.Mode().Perm()&0o022 != 0:
 		return fail("others can write its directory, so %s; make it private: chmod 700 %s", then, dir)
@@ -256,10 +292,14 @@ type fileHost struct {
 
 // fileSecrets are the origins that the values of {{$env NAME}} and
 // {{$cmd NAME}} may go to, by NAME, in the policy's file:
-// {"env": {"API_TOKEN": ["https://api.example.com"]}, "cmd": {"TOKEN": [...]}}.
+// {"env": {"API_TOKEN": ["https://api.example.com"]}, "cmd": {"TOKEN": [...]}},
+// and what a run without a person does with secrets:
+// "unattended": "deny" or "keeper", "keeper_asks": "always" or "unbound".
 type fileSecrets struct {
-	Env map[string][]string `json:"env"`
-	Cmd map[string][]string `json:"cmd"`
+	Env        map[string][]string `json:"env"`
+	Cmd        map[string][]string `json:"cmd"`
+	Unattended string              `json:"unattended"`
+	KeeperAsks string              `json:"keeper_asks"`
 }
 
 // Parse parses b, the contents of the policy file at path.
@@ -326,7 +366,28 @@ func Parse(path string, b []byte) (*Policy, error) {
 	if err := p.secrets(f.Secrets.Env, f.Secrets.Cmd); err != nil {
 		return nil, fail("secrets.%v", err)
 	}
+	if err := p.secretsMode(f.Secrets.Unattended, f.Secrets.KeeperAsks); err != nil {
+		return nil, fail("secrets.%v", err)
+	}
 	return p, nil
+}
+
+// secretsMode sets what a run without a person does with secrets from
+// the fields of the file, unattended and keeper_asks.
+func (p *Policy) secretsMode(unattended, asks string) error {
+	switch unattended {
+	case "", UnattendedDeny, UnattendedKeeper:
+		p.Secrets.Unattended = unattended
+	default:
+		return fmt.Errorf("unattended %q: want %q, the default, or %q", unattended, UnattendedDeny, UnattendedKeeper)
+	}
+	switch asks {
+	case "", KeeperAsksAlways, KeeperAsksUnbound:
+		p.Secrets.KeeperAsks = asks
+	default:
+		return fmt.Errorf("keeper_asks %q: want %q, the default, or %q", asks, KeeperAsksAlways, KeeperAsksUnbound)
+	}
+	return nil
 }
 
 // hosts sets the hosts of p from the field of the file, in the order of

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -115,6 +116,38 @@ func TestHistoryDir(t *testing.T) {
 	t.Setenv("VEGTAM_NO_HISTORY", "1")
 	if got, err := HistoryDir(); got != "" || err != nil {
 		t.Errorf("with VEGTAM_NO_HISTORY: %q, %v", got, err)
+	}
+}
+
+func TestKeeperSocket(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("HOME", "/home/ada")
+	if got, err := KeeperSocket(); got != "/run/user/1000/vegtam/keeper.sock" || err != nil {
+		t.Errorf("with XDG_RUNTIME_DIR: %s, %v", got, err)
+	}
+	// A relative XDG_RUNTIME_DIR is ignored, as the specification says:
+	// the socket goes in vegtam's directory of the user's cache.
+	cache := "/home/ada/.cache/vegtam/keeper.sock"
+	if runtime.GOOS == "darwin" {
+		cache = "/home/ada/Library/Caches/vegtam/keeper.sock"
+	}
+	for _, dir := range []string{"", "rel"} {
+		t.Setenv("XDG_RUNTIME_DIR", dir)
+		if got, err := KeeperSocket(); got != cache || err != nil {
+			t.Errorf("with XDG_RUNTIME_DIR %q: %s, %v", dir, got, err)
+		}
+	}
+	if runtime.GOOS != "darwin" {
+		t.Setenv("XDG_CACHE_HOME", "/cache")
+		if got, err := KeeperSocket(); got != "/cache/vegtam/keeper.sock" || err != nil {
+			t.Errorf("with XDG_CACHE_HOME: %s, %v", got, err)
+		}
+		t.Setenv("XDG_CACHE_HOME", "")
+	}
+	t.Setenv("HOME", "")
+	if got, err := KeeperSocket(); err == nil || !strings.HasSuffix(err.Error(), "; set XDG_RUNTIME_DIR") {
+		t.Errorf("without HOME: %q, %v", got, err)
 	}
 }
 
