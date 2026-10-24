@@ -45,8 +45,9 @@ func TestImportPostman(t *testing.T) {
 	}
 
 	// Each environment checks out but for the requests the report names:
-	// a Postman dynamic variable, variables without a value, and secrets,
-	// which go nowhere until a person binds them ($allow).
+	// a Postman dynamic variable, variables without a value, and secrets
+	// that the import could not bind to one origin, which go nowhere until
+	// a person binds them ($allow).
 	for _, env := range doc.Import.Environments {
 		code, stdout, _ := runCLI(t, false, "run", out, "--dry-run", "-e", env)
 		validateJSON(t, stdout)
@@ -62,6 +63,14 @@ func TestImportPostman(t *testing.T) {
 				}
 			default:
 				failed = append(failed, strings.TrimPrefix(r.Ref, out+string(filepath.Separator)))
+			}
+		}
+		for _, name := range unbound {
+			if !slices.ContainsFunc(doc.Import.Skipped, func(s output.Skipped) bool {
+				return s.Category == "variable" &&
+					(strings.HasPrefix(s.Reason, "declare $allow for "+name+" in "+env+": ") || strings.HasPrefix(s.Reason, "declare $allow for "+name+": "))
+			}) {
+				t.Errorf("run --dry-run -e %s: %s goes nowhere, and the report does not say to bind it", env, name)
 			}
 		}
 		want := []string{

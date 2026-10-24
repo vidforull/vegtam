@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -221,6 +222,9 @@ func (imp *importer) write(rel string, data []byte, private bool) {
 	imp.files = append(imp.files, File{Path: rel, Data: data, Private: private})
 }
 
+// envMap is an environment file: environment -> name -> value.
+type envMap map[string]map[string]string
+
 // envFiles writes the environment files of the collection of c and notes
 // in vars the variables its requests use that need a look: secrets, and
 // variables without a value.
@@ -230,9 +234,9 @@ func (imp *importer) write(rel string, data []byte, private bool) {
 // would not add to these. Globals and collection variables go to $shared,
 // collection variables last, as Postman ranks them. A variable is secret
 // or not across the whole export, so all its values are in one file and
-// precedence within the file holds.
+// precedence within the file holds. The private file also binds the
+// secrets to the origins they may go to (see allow).
 func (imp *importer) envFiles(c *converter, vars map[[2]string]*output.ImportVariable) {
-	type envMap map[string]map[string]string
 	public, private := envMap{}, envMap{}
 	defined := map[string]bool{}
 	add := func(env string, ps []param) {
@@ -254,9 +258,9 @@ func (imp *importer) envFiles(c *converter, vars map[[2]string]*output.ImportVar
 			defined[name] = true
 		}
 	}
-	add("$shared", imp.globals)
-	add("$shared", c.vars)
-	add("$shared", c.created)
+	add(shared, imp.globals)
+	add(shared, c.vars)
+	add(shared, c.created)
 	for _, e := range imp.envs {
 		if public[e.name] == nil {
 			public[e.name] = map[string]string{}
@@ -267,7 +271,7 @@ func (imp *importer) envFiles(c *converter, vars map[[2]string]*output.ImportVar
 	// The private file is written even if empty: else a private file
 	// further up would take its place.
 	imp.write(publicPath, marshal(public), false)
-	imp.write(privatePath, marshal(private), true)
+	imp.write(privatePath, marshal(withAllow(private, imp.allow(c, public, private, imp.at(privatePath)))), true)
 	for _, name := range slices.Sorted(maps.Keys(c.used)) {
 		status, file := "secret", privatePath
 		switch {
@@ -288,12 +292,36 @@ func (imp *importer) envFiles(c *converter, vars map[[2]string]*output.ImportVar
 	}
 }
 
-// marshal returns v as indented JSON, with <, > and & as they are.
+// withAllow returns the environments of a private file, with the $allow
+// of each.
+func withAllow(private envMap, allow map[string]map[string][]string) map[string]map[string]any {
+	out := map[string]map[string]any{}
+	for env, vars := range private {
+		out[env] = map[string]any{}
+		for name, v := range vars {
+			out[env][name] = v
+		}
+	}
+	for env, a := range allow {
+		if out[env] == nil {
+			out[env] = map[string]any{}
+		}
+		out[env][allowKey] = a
+	}
+	return out
+}
+
+// oneString is a list of one string as the encoder indents it. A string
+// the encoder writes holds no line break, so a match is never inside one.
+var oneString = regexp.MustCompile(`\[\n *("(?:[^"\\\n]|\\.)*")\n *\]`)
+
+// marshal returns v as indented JSON, with <, > and & as they are, and a
+// list of one string, as an origin of $allow is, on one line.
 func marshal(v any) []byte {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(v) // maps of strings always encode
-	return b.Bytes()
+	_ = enc.Encode(v) // maps of strings, and of lists of them, always encode
+	return oneString.ReplaceAll(b.Bytes(), []byte("[$1]"))
 }

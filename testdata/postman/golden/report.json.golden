@@ -146,6 +146,16 @@
       "category": "variable",
       "reason": "the value of api_root refers to {{base_url}}, but vegtam does not resolve placeholders in values",
       "where": "out"
+    },
+    {
+      "category": "variable",
+      "reason": "declare $allow for {{token}} in dev: its requests go to more than one origin (http://shop.example.test:8080, https://dev.shop.example.test, https://shop.example.test)",
+      "where": "out/shop-api/http-client.private.env.json"
+    },
+    {
+      "category": "variable",
+      "reason": "declare $allow for {{token}} in prod-eu: its requests go to more than one origin (http://shop.example.test:8080, https://shop.example.test)",
+      "where": "out/shop-api/http-client.private.env.json"
     }
   ],
   "variables": [

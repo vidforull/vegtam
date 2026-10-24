@@ -45,8 +45,10 @@ Each collection becomes a directory, each folder a .http file. Variables
 go to http-client.env.json, one environment per Postman environment.
 Secrets go to http-client.private.env.json, and so do literal values
 from auth and from headers, query parameters and form or JSON fields
-named like secrets. Scripts are not imported. The report lists what was
-not imported and why, and the variables to check or set.
+named like secrets; its $allow binds each secret to the one origin its
+requests go to, where the export makes that plain. Scripts are not
+imported. The report lists what was not imported and why, the secrets
+to bind, and the variables to check or set.
 
 Existing files are not overwritten without --force; then nothing is
 written.`,
@@ -154,7 +156,7 @@ var categories = []struct{ name, title string }{
 	{"body", "bodies and form fields not imported"},
 	{"auth", "auth settings not imported"},
 	{"script", "scripts not imported"},
-	{"variable", "variables renamed or not supported"},
+	{"variable", "variables renamed, not supported or not bound"},
 	{"header", "disabled headers, written as comments"},
 	{"example", "saved responses not imported"},
 	{"setting", "request settings not imported"},

@@ -26,6 +26,7 @@ type converter struct {
 	unset   map[string]string // variables made for values the import cannot compute
 	known   names             // variable names in use
 	used    map[string]bool   // variables the requests use
+	written []written         // the requests written as requests, not commented out
 	files   []*httpFile
 }
 
@@ -187,6 +188,7 @@ func (c *converter) request(f *httpFile, it *item, inherited *auth) {
 		lines = commentOut(lines, reason)
 	} else {
 		c.imp.report.Imported++
+		c.written = append(c.written, newWritten(q))
 	}
 	title := strings.TrimSpace("### " + oneLine(it.Name))
 	f.blocks = append(f.blocks, title+"\n"+strings.Join(lines, "\n")+"\n")

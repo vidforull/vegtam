@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -159,6 +161,252 @@ func TestImportErrors(t *testing.T) {
 		e, ok := errors.AsType[*core.Error](err)
 		if !ok || e.Kind != tt.kind || !strings.Contains(e.Msg, tt.msg) {
 			t.Errorf("Import(%s) = %v; want a %s error with %q", tt.src, err, tt.kind, tt.msg)
+		}
+	}
+}
+
+// TestImportAllow checks the $allow of the private file: a secret whose
+// requests go to one origin is bound to it, in $shared if every
+// environment gives the same one; a secret whose requests go to several,
+// or to one the import cannot know, is bound to none, and the report says
+// to declare it.
+func TestImportAllow(t *testing.T) {
+	// The collection's auth sends {{token}} with every request; each
+	// environment is {"name": ..., "values": ...} with values as given.
+	const bearer = `"auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{token}}"}]}`
+	envFile := func(name string, values ...string) string {
+		return `{"name": "` + name + `", "values": [` + strings.Join(values, ", ") + `]}`
+	}
+	token := `{"key": "token", "value": "fake-token", "type": "secret"}`
+	base := func(url string) string { return `{"key": "baseUrl", "value": "` + url + `"}` }
+	tests := []struct {
+		name     string
+		items    string   // the collection's items: requests given as their URLs
+		vars     string   // the collection's variables
+		envs     []string // environment files
+		allow    map[string]map[string][]string
+		declares []string // the reasons the report gives for secrets bound to none
+	}{
+		{
+			name:  "one origin",
+			items: `{"name": "a", "request": "{{baseUrl}}/users"}, {"name": "b", "request": "{{baseUrl}}/orders?page=2"}`,
+			envs:  []string{envFile("Dev", base("https://API.example.com:443/v1"), token)},
+			allow: map[string]map[string][]string{"$shared": {"token": {"https://api.example.com"}}},
+		},
+		{
+			name:  "one origin in each environment",
+			items: `{"name": "a", "request": "{{baseUrl}}/users"}`,
+			envs: []string{
+				envFile("Dev", base("http://127.0.0.1:8080/v1"), token),
+				envFile("Prod", base("https://api.example.com/v1"), token),
+			},
+			allow: map[string]map[string][]string{
+				"dev":  {"token": {"http://127.0.0.1:8080"}},
+				"prod": {"token": {"https://api.example.com"}},
+			},
+		},
+		{
+			name:  "a collection variable, no environment",
+			items: `{"name": "a", "request": "{{baseUrl}}/users"}`,
+			vars:  base("https://api.example.com/v1") + `, ` + token,
+			allow: map[string]map[string][]string{"$shared": {"token": {"https://api.example.com"}}},
+		},
+		{
+			name:  "two origins",
+			items: `{"name": "a", "request": "{{baseUrl}}/users"}, {"name": "b", "request": "https://auth.example.com/refresh"}`,
+			envs:  []string{envFile("Dev", base("https://api.example.com/v1"), token)},
+			allow: map[string]map[string][]string{},
+			declares: []string{
+				"declare $allow for {{token}}: its requests go to more than one origin (https://api.example.com, https://auth.example.com)",
+			},
+		},
+		{
+			name:  "two origins in one environment",
+			items: `{"name": "a", "request": "{{baseUrl}}/users"}, {"name": "b", "request": "https://api.example.com/health"}`,
+			envs: []string{
+				envFile("Dev", base("https://dev.example.com"), token),
+				envFile("Prod", base("https://api.example.com"), token),
+			},
+			allow: map[string]map[string][]string{"prod": {"token": {"https://api.example.com"}}},
+			declares: []string{
+				"declare $allow for {{token}} in dev: its requests go to more than one origin (https://api.example.com, https://dev.example.com)",
+			},
+		},
+		{
+			name:  "the host from a secret",
+			items: `{"name": "a", "request": "{{host}}/users"}`,
+			envs:  []string{envFile("Dev", `{"key": "host", "value": "https://api.example.com", "type": "secret"}`, token)},
+			allow: map[string]map[string][]string{},
+			declares: []string{
+				"declare $allow for {{host}}: the origin of its requests is not known",
+				"declare $allow for {{token}}: the origin of its requests is not known",
+			},
+		},
+		{
+			name:  "the host from a variable without a value",
+			items: `{"name": "a", "request": "https://{{tenant}}.example.com/users"}`,
+			envs:  []string{envFile("Dev", token)},
+			allow: map[string]map[string][]string{},
+			declares: []string{
+				"declare $allow for {{token}}: the origin of its requests is not known",
+			},
+		},
+		{
+			name: "a secret without a value",
+			items: `{"name": "a", "request": "{{baseUrl}}/users"}, ` +
+				`{"name": "b", "request": {"method": "GET", "url": "{{baseUrl}}/keys", "header": [{"key": "X-Api-Key", "value": "{{api_key}}"}]}}`,
+			envs: []string{
+				envFile("Dev", base("https://dev.example.com"), token),
+				envFile("Prod", base("https://api.example.com")),
+			},
+			allow: map[string]map[string][]string{"dev": {"token": {"https://dev.example.com"}}},
+		},
+		{
+			name: "a request written commented out",
+			items: `{"name": "a", "request": "{{baseUrl}}/users"}, ` +
+				`{"name": "b", "request": {"method": "PROPFIND", "url": "https://files.example.com/"}}`,
+			envs:  []string{envFile("Dev", base("https://api.example.com/v1"), token)},
+			allow: map[string]map[string][]string{"$shared": {"token": {"https://api.example.com"}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			vars := ""
+			if tt.vars != "" {
+				vars = `, "variable": [` + tt.vars + `]`
+			}
+			files := map[string]string{"api.json": `{"info": {"name": "API"}, ` + bearer + vars + `, "item": [` + tt.items + `]}`}
+			for i, e := range tt.envs {
+				files[fmt.Sprintf("env-%d.json", i)] = e
+			}
+			for name, data := range files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			res, err := Import(dir, "out")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var private map[string]map[string]json.RawMessage
+			for _, f := range res.Files {
+				if f.Path == "api/"+env.PrivateFile {
+					if err := json.Unmarshal(f.Data, &private); err != nil {
+						t.Fatalf("%s: %v\n%s", f.Path, err, f.Data)
+					}
+				}
+			}
+			allow := map[string]map[string][]string{}
+			for e, entries := range private {
+				if raw, ok := entries["$allow"]; ok {
+					var a map[string][]string
+					if err := json.Unmarshal(raw, &a); err != nil {
+						t.Fatalf("%s.$allow: %v", e, err)
+					}
+					allow[e] = a
+				}
+			}
+			if !reflect.DeepEqual(allow, tt.allow) {
+				t.Errorf("$allow = %v, want %v", allow, tt.allow)
+			}
+			for _, a := range allow {
+				for name, origins := range a {
+					for _, o := range origins {
+						if p, err := core.ParseOrigin(o); err != nil || p != o {
+							t.Errorf("$allow of %s: %q reads back as %q, %v", name, o, p, err)
+						}
+					}
+				}
+			}
+			var declares []string
+			for _, s := range res.Report.Skipped {
+				if strings.HasPrefix(s.Reason, "declare $allow") {
+					declares = append(declares, s.Reason)
+					if s.Category != "variable" || s.Where != filepath.Join("out", "api", env.PrivateFile) {
+						t.Errorf("%+v: want category variable at the private file", s)
+					}
+				}
+			}
+			if !slices.Equal(declares, tt.declares) {
+				t.Errorf("the report says\n%q\nwant\n%q", declares, tt.declares)
+			}
+		})
+	}
+}
+
+// TestImportLoads checks that vegtam reads the environment files of the
+// synthetic export as the import means them: every environment loads,
+// without a warning about $allow, and binds the secrets it names.
+func TestImportLoads(t *testing.T) {
+	res, err := Import(export, "out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	var dirs []string
+	for _, f := range res.Files {
+		p := filepath.Join(out, filepath.FromSlash(f.Path))
+		if err = os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(p, f.Data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if path.Base(f.Path) == env.PrivateFile {
+			dirs = append(dirs, filepath.Dir(p))
+		}
+	}
+	for _, e := range res.Report.Environments {
+		for _, dir := range dirs {
+			v, lerr := env.NewLoader(env.Options{Env: e}).For(filepath.Join(dir, "requests.http"))
+			if lerr != nil {
+				t.Fatalf("-e %s in %s: %v", e, dir, lerr)
+			}
+			for _, w := range v.Warnings() {
+				if strings.Contains(w.Msg, "$allow") {
+					t.Errorf("-e %s in %s: %s", e, dir, w.Msg)
+				}
+			}
+		}
+	}
+	v, err := env.NewLoader(env.Options{Env: "dev"}).For(filepath.Join(out, "crm", "contacts.http"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.SecretOrigins(core.Secret{Name: "crm_token"}); !slices.Equal(got, []string{"https://dev.crm.example.test"}) {
+		t.Errorf("crm_token may go to %q in dev, want the CRM of dev", got)
+	}
+}
+
+func TestURLOrigin(t *testing.T) {
+	vars := map[string]string{
+		"base": "https://API.Example.com:443/v1", "local": "http://127.0.0.1:8080", "nested": "{{base}}/v2",
+		"bare": "api.example.com", "ftp": "ftp://files.example.com", "wild": "https://*.example.com", "port": "8443",
+	}
+	tests := []struct {
+		url, want string
+		known     bool
+	}{
+		{"{{base}}/users", "https://api.example.com", true},
+		{"{{ base }}/users?page={{page}}", "https://api.example.com", true},
+		{"{{local}}/health", "http://127.0.0.1:8080", true},
+		{"http://shop.example.test:8080/status", "http://shop.example.test:8080", true},
+		{"https://api.example.com/{{token}}", "https://api.example.com", true},
+		{"https://api.example.com?key={{token}}", "https://api.example.com", true},
+		{"https://api.example.com:{{port}}/x", "https://api.example.com:8443", true},
+		{"https://api.example.com:{{secret_port}}/x", "", false},
+		{"{{token}}/users", "", false},
+		{"https://{{tenant}}.example.com/", "", false},
+		{"{{nested}}/users", "", false},
+		{"{{bare}}/users", "", false},
+		{"{{ftp}}/file", "", false},
+		{"{{wild}}/users", "", false},
+		{"", "", false},
+	}
+	for _, tt := range tests {
+		if got, known := urlOrigin(tt.url, vars); got != tt.want || known != tt.known {
+			t.Errorf("urlOrigin(%q) = %q, %v; want %q, %v", tt.url, got, known, tt.want, tt.known)
 		}
 	}
 }
