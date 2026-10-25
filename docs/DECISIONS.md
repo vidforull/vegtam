@@ -1515,9 +1515,10 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   itself before, from a response it was given, it hands to the keeper
   with the request that sends it: it is the program's own.
 - **What the keeper reads.** The store, its own environment for
-  `{{$env NAME}}`, and the command files that the person trusted, which
-  it runs itself, once its person has said yes: the run names the file of
-  the request, any file the person trusted. Not the private environment file near the requests: a
+  `{{$env NAME}}`, and the command files that the person trusted before
+  it started, which it runs itself, once its person has said yes: the run
+  names the file of the request, any file the person trusted. Not the
+  private environment file near the requests: a
   program can write one there, and the keeper would read the program's
   values as the person's, and send them where the program's `$allow`
   says. The person moves their values to the store with
@@ -1528,11 +1529,12 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   program could change it.
 - **A code, not Enter.** The keeper asks before each request with a
   secret, or with `keeper_asks: "unbound"` only before one that sends a
-  secret where it is not bound. The answer is four characters drawn for
-  that question, typed: Enter is pressed by reflex, and by anything that
-  can write to the terminal, and a "y" is learnt by heart. The question
-  shows the method, the URL with its placeholders, the names of the
-  headers and the size of the body, and for each secret where in the
+  secret where it is not bound, or that runs a command (see below). The
+  answer is four characters drawn for that question, typed: Enter is
+  pressed by reflex, and by anything that can write to the terminal, and
+  a "y" is learnt by heart. The question shows the method, the URL with
+  its placeholders, the names of the headers and the size of the body,
+  the commands it runs, and for each secret where in the
   request it is and whether it is bound to where the request goes. Anything
   else, no answer within a minute, or the end of the input, refuses it;
   a line typed before the question is no answer to it. The question
@@ -1563,6 +1565,32 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   one that a process of the user can write: a change to its secrets is
   shown in the keeper's terminal, and applies when the keeper starts
   again.
+- **A trusted command is code run as the person: trust is a person's
+  act, read once, shown whole.** A `{{$cmd NAME}}` that the keeper runs
+  is a program of the run's choosing, run in the person's terminal with
+  their environment, for a code typed for what looks like a request. A
+  program could write a command file of its own, trust it with `vegtam
+  trust`, which checked nothing, and have the keeper run it. So `vegtam
+  trust` and `--revoke` refuse a run without a person, as the keeper
+  refuses to start in one; `--list` changes nothing and stays open to
+  all. That check is of stdin and stdout alone, and a program can give
+  itself a terminal, under `script`, or write `trust.json` itself: so
+  the keeper reads the trust store once, when it starts, as it reads the
+  policy, and says which files it trusts. A file trusted after that runs
+  only once the person starts it again, and the keeper's terminal says
+  so; a trust taken back applies at once, to the runs connected too, as
+  the keeper asks the file as well as what it read before each command,
+  and runs only what both trust. And it shows what
+  it runs: for each `{{$cmd NAME}}` of a request, the question has the
+  command's argv, as a shell would read it, escaped, with the program
+  that PATH finds for it, and its file. The program found then is the one
+  that runs, and the files the command names are hashed again before it
+  runs, as the question may wait a minute. `keeper_asks: "unbound"` does
+  not spare a request with a command its question. It spares the person
+  a question when each value goes where they bound it, which says where
+  the value may go; a command does what it does on the person's side
+  before the request is sent, wherever the request goes, and binding
+  what it prints says nothing of that.
 - **Versioned.** The protocol says its version first, and each side
   refuses another: a keeper and a run of two vegtams that read the
   requests differently must not guess.
@@ -1575,5 +1603,16 @@ live in `internal/cli`; `cmd/vegtam` only wires up the process.
   machine or under another user, with the socket passed to it. A run
   without a person in CI has no secrets, and no one to start a keeper.
   The flags of transport of the program's run, such as `--insecure`,
-  do not reach the keeper, which sends with the policy's rules. These
-  are said in docs/KEEPER.md.
+  do not reach the keeper, which sends with the policy's rules. A file
+  that a program trusted before the keeper started, from a terminal of
+  its own, is trusted for the keeper too: the list it shows at start and
+  the question that shows the command are what is left, and a code is a
+  person's attention. What the question shows of a command is its argv:
+  not what a script it names says, nor the modules an interpreter loads
+  from beside it. The files a command names are hashed again just
+  before it runs, not as it runs, and the program PATH found is run by
+  its path, which a process of the user may write: one that changes
+  either in between runs what it wrote, as with a person's own run. A
+  trust that the keeper's store of secrets held, under its password,
+  would close the first; running the very bytes it hashed, the second.
+  These are said in docs/KEEPER.md.

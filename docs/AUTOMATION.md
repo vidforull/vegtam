@@ -64,7 +64,8 @@ agent. `vegtam policy` and `vegtam describe` say which mode applies, in
 | A secret to an origin it is not bound to | only with `--confirm=<ref>` naming the request, to its origin, this once; the terminal interface asks first | never: an error of kind `policy`, whatever `--confirm` says |
 | A secret value | read and sent to the origins it is bound to | none: the request is an error of kind `policy`, unless the policy sends it through the keeper (`secrets.unattended`) |
 | A response | as it came, every secret value masked | sterile: credentials it hands out are `***`, and `redacted` says where |
-| `{{$cmd NAME}}` | only from a command file a person has trusted | the same |
+| `{{$cmd NAME}}` | only from a command file a person has trusted | the same; through the keeper, only one trusted before it started and still, once its person has read the command |
+| `vegtam trust <dir>`, `--revoke` | trusts, or takes the trust back | refused: an error of kind `policy` |
 | History of runs | kept, unless `--no-history`, `VEGTAM_NO_HISTORY=1` or `# @no-log` | the same |
 
 ## The terminal interface is for people
@@ -96,7 +97,7 @@ command and on its argument, never on what happens at run time:
 | `show <file>#<ref>` | one result with `ref`, `request`, `transport`, `warnings` and, with `-e`, `secret_origins` only |
 | `list <file>`, `list <dir>` | `requests` |
 | `import postman <export> -o <dir>` | `import`: the report of the import |
-| `trust <dir>`, `trust --revoke <dir>`, `trust --list` | `trust`: the command files and their status |
+| `trust --list` | `trust`: the command files and their status; `trust <dir>` and `trust --revoke <dir>` are a person's, and print text (see [Trusted command files](#trusted-command-files)) |
 | `policy` | `policy`: the operator's policy and what applies to a run |
 | `describe` | `describe`: what a program needs to know to run vegtam |
 | `doctor` | `doctor`: where the secrets of this shell and directory are, and who can read them |
@@ -259,7 +260,7 @@ by its exit code.
 | 3 | network or TLS error, or timeout |
 | 4 | HTTP status 400 or above, with `run --fail` |
 | 5 | a request that is not sent without a confirmation, `--confirm`: one with `# @note`; without a person at a terminal, one whose method is not GET, HEAD or OPTIONS; with a person at a terminal, a request that would send a secret to an origin it is not bound to, which only `--confirm=<ref>` sends |
-| 6 | blocked by policy: a `{{$cmd NAME}}` whose command file is not trusted, an address vegtam never connects to or that the operator's policy does not allow; without a person, a request that would send a secret to an origin it is not bound to, which `--confirm` does not lift, and in every mode a redirect that would take one there; or a policy file that cannot be read |
+| 6 | blocked by policy: a `{{$cmd NAME}}` whose command file is not trusted, `vegtam trust` without a person at a terminal, an address vegtam never connects to or that the operator's policy does not allow; without a person, a request that would send a secret to an origin it is not bound to, which `--confirm` does not lift, and in every mode a redirect that would take one there; or a policy file that cannot be read |
 | 130 | interrupted: Ctrl-C (SIGINT) or SIGTERM stopped a request or a `{{$cmd NAME}}` |
 
 Without `--fail`, any HTTP status is a success: the status is in the
@@ -283,7 +284,7 @@ The outcome of every assertion is in `asserts` all the same.
 | `timeout` | 3 | a time limit ran out; `timeout_phase` says which: `connect`, `read` or `total` |
 | `status` | 4 | HTTP status 400 or above, with `--fail` |
 | `confirm` | 5 | a request not sent without `--confirm`; `confirm` says what confirms it, and `secret` the secret it would send elsewhere, if that is why |
-| `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write; an address that vegtam never connects to, or a loopback or private one that the operator's policy does not allow; a secret that would go to an origin it is not bound to, without a person or by a redirect, which `secret` names; a secret value that a run without a person does not get, which `secret` names, with `person_command`; a keeper that cannot be reached or did not send the request; a policy file that does not parse, or that others can write |
+| `policy` | 6 | not allowed: a command file that is not trusted or has changed, or a trust store that cannot be read, belongs to another user or that others can write; `vegtam trust` or `trust --revoke` without a person at a terminal; an address that vegtam never connects to, or a loopback or private one that the operator's policy does not allow; a secret that would go to an origin it is not bound to, without a person or by a redirect, which `secret` names; a secret value that a run without a person does not get, which `secret` names, with `person_command`; a keeper that cannot be reached or did not send the request; a policy file that does not parse, or that others can write |
 | `canceled` | 130 | SIGINT or SIGTERM came while a request waited for its response or a command ran; the requests after it are canceled too |
 
 Every error is printed to stderr as text, `vegtam: file:line: message`.
@@ -379,7 +380,8 @@ the operator's policy file allows of the network.
 - If the file or a file its commands name changes, the commands do not
   run until it is trusted again.
 - The store is readable by its owner only; one that belongs to another
-  user, or that others can write, directory included, trusts nothing.
+  user, or that others can write, directory included, trusts nothing,
+  nor does one that is a symbolic link, or larger than 1 MiB.
 - `vegtam trust --revoke <dir>` takes the trust back, also for a
   directory since deleted; `vegtam trust --list` lists the files with a
   `status`: `trusted`, `changed` or `missing`.
@@ -389,10 +391,22 @@ the operator's policy file allows of the network.
   confirmation it lacks, which stops it before it is resolved (see
   [Confirmation](#confirmation)).
 
-Trusting is a decision for a person, who reads the commands first. A
-program that gets a `policy` error should stop and ask, not run `vegtam
-trust` itself: the error message names the command for the person to
-run.
+Trusting is a decision for a person, who reads the commands first, and
+vegtam holds to it: without a person at a terminal (stdin or stdout is
+not one, or `--json`), `vegtam trust <dir>` and `vegtam trust --revoke
+<dir>` change nothing and fail with kind `policy`, exit code 6:
+
+```
+vegtam: trusting a command file is for a person at a terminal: run vegtam trust /home/ada/api yourself
+```
+
+`vegtam trust --list` works in every mode. A program that gets a
+`policy` error stops and asks the person to run the command the message
+names; it does not trust the file another way, such as by writing
+`trust.json`. The keeper runs only the commands of the files trusted
+when it started and trusted still, says which when it starts, and shows
+each command, with its program and its file, in the question it asks
+before it runs it ([KEEPER.md](KEEPER.md#what-it-does)).
 
 ### Confirmation
 
@@ -589,6 +603,12 @@ code 6:
 - `... is not sent: the keeper's operator did not confirm it: ...`: its
   person typed another code, or none within a minute; for a secret that
   would go where it is not bound, the message says that first;
+- `... is not trusted to run commands ...`, `... has changed since it was
+  trusted ...`: the command file of a `{{$cmd NAME}}`, or a file its
+  commands name, is not trusted as it is now; the person reads it and
+  trusts it;
+- `... was trusted after the keeper started, which reads the trust store
+  once: start the keeper again ...`: the person starts the keeper again;
 - `the keeper closed the connection`: it stopped.
 
 Ask the person; do not try another way to send the request.
@@ -625,8 +645,9 @@ describe` says it in `mode.secrets`.
 A program runs without a person at a terminal: stdin or stdout is not a
 terminal, or `--json` is given. Such a run gets what the operator's
 policy, `$XDG_CONFIG_HOME/vegtam/policy.json`, allows, and no more; a
-file, a response or the program's own arguments cannot widen it.
-`vegtam policy --json` prints it, with `run.unattended`,
+file, a response or the program's own arguments cannot widen it. A
+policy file that others can write, or that is a symbolic link, is
+refused, with an error of kind `policy`. `vegtam policy --json` prints it, with `run.unattended`,
 `run.confirm_mutations`, the proxies a run goes through and the
 addresses never connected to; `vegtam policy
 --help` describes every field.

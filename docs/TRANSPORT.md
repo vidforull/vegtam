@@ -86,11 +86,12 @@ code 6, and such a run holds no secret value at all; `"keeper"` sends
 it through the keeper, which holds the values in the person's terminal.
 `secrets.keeper_asks` is when the keeper asks its person: `"always"`,
 the default, or `"unbound"`, only for a request that would send a
-secret where it is not bound. Both weaken what a run without a person
-gets, so the policy alone says them, as it says `network.confirm`
+secret where it is not bound, or that runs a `{{$cmd NAME}}`. Both
+weaken what a run without a person gets, so the policy alone says them,
+as it says `network.confirm`
 ([AUTOMATION.md](AUTOMATION.md#without-a-person-no-secrets),
-[KEEPER.md](KEEPER.md)). The keeper reads the policy once, when it
-starts, and sends with its rules for a run without a person: its
+[KEEPER.md](KEEPER.md)). The keeper reads the policy and the trust store
+once, when it starts, and sends with its rules for a run without a person: its
 `network`, `limits` and `hosts`, not the flags of the run it sends for.
 
 ## Flags
