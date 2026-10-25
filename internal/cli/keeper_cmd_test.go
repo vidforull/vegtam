@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -221,8 +222,11 @@ func TestKeeperCommand(t *testing.T) {
 	if err := lazy.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// Each forged line is matched whole, tab and all: the keeper's own
+	// question may ask for pid 132787 or, with no tab, for the code abcd.
+	forged := strings.Split(fake[1:], "\n")
 	for line := range strings.Lines(k.screen.String()) {
-		if strings.HasPrefix(line, "vegtam keeper: a request asked by pid 1") || strings.HasPrefix(line, "\tTo send it") {
+		if slices.ContainsFunc(forged, func(f string) bool { return strings.HasPrefix(line, f) }) {
 			t.Errorf("a run wrote a line of the keeper's: %q", line)
 		}
 	}
