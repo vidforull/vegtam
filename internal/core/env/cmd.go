@@ -167,10 +167,48 @@ func (f *CommandFile) Sum() (string, error) {
 	return policy.Sum(b.Bytes()), nil
 }
 
+// NamedCommand is the command of a {{$cmd NAME}}: its name, the command
+// file that has it, and what it runs.
+type NamedCommand struct {
+	Command
+	Name string
+	File string // the command file, as CommandFile.Path
+	// Path is the program that runs: Argv[0], as PATH gives it if it names
+	// no directory; "" if PATH has none.
+	Path string
+}
+
 // commands is a command file as a run sees it.
 type commands struct {
 	*CommandFile
 	status policy.Status
+	sum    string // as the trust store was asked of it
+	// programs are the programs of its commands, by name, as program
+	// found them first.
+	programs map[string]found
+}
+
+// found is a program that PATH gave, or why it gave none.
+type found struct {
+	path string
+	err  error
+}
+
+// program returns the program that the command name of c runs: its
+// Argv[0], found in PATH if it names no directory, as exec.Command finds
+// it, once for the run. A keeper's person reads the path before the
+// command runs: a program put earlier in PATH after that does not run in
+// its place.
+func (c *commands) program(name string) (string, error) {
+	if p, ok := c.programs[name]; ok {
+		return p.path, p.err
+	}
+	p := found{path: c.Commands[name].Argv[0]}
+	if filepath.Base(p.path) == p.path {
+		p.path, p.err = exec.LookPath(p.path)
+	}
+	c.programs[name] = p
+	return p.path, p.err
 }
 
 // commandFile returns the command file for the requests of v, checked
@@ -198,13 +236,12 @@ func (l *Loader) findCommands(dir string) (*commands, error) {
 	if c, ok := l.cmdFiles[f.Path]; ok && bytes.Equal(c.Contents, f.Contents) {
 		return c, nil
 	}
-	c := &commands{CommandFile: f, status: policy.Untrusted}
+	c := &commands{CommandFile: f, status: policy.Untrusted, programs: map[string]found{}}
 	if l.opts.Trust != nil {
-		sum, err := f.Sum()
-		if err != nil {
+		if c.sum, err = f.Sum(); err != nil {
 			return nil, core.Errorf(core.KindPolicy, core.Source{File: f.Path}, "%v", err)
 		}
-		if c.status, err = l.opts.Trust.Check(f.Path, sum); err != nil {
+		if c.status, err = l.opts.Trust.Check(f.Path, c.sum); err != nil {
 			return nil, err
 		}
 	}
@@ -228,12 +265,17 @@ func (v *Vars) commandRun(ctx context.Context, r core.Ref, src core.Source, run 
 	} else if err != nil {
 		return fmt.Errorf("%s: %w", r, err)
 	}
-	if cf.status != policy.Trusted {
-		why := "is not trusted to run commands; read it, then trust it with"
-		if cf.status == policy.Changed {
-			why = "has changed since it was trusted; read it again, then trust it with"
+	status := cf.status
+	if status == policy.Trusted {
+		// Asked again each time, before a value run before is used too: a
+		// trust taken back applies at once, in the long run of a keeper as
+		// well.
+		if status, err = v.loader.opts.Trust.Check(cf.Path, cf.sum); err != nil {
+			return err
 		}
-		return core.Errorf(core.KindPolicy, src, "%s: %s %s: vegtam trust %s", r, cf.Path, why, core.ShellQuote(filepath.Dir(cf.Path)))
+	}
+	if status != policy.Trusted {
+		return untrusted(r, cf, status, src)
 	}
 	if _, ok := cf.Commands[r.Name]; !ok {
 		return fmt.Errorf("%s: no command %s in %s (commands: %s)", r, r.Name, cf.Path, strings.Join(slices.Sorted(maps.Keys(cf.Commands)), ", "))
@@ -241,31 +283,67 @@ func (v *Vars) commandRun(ctx context.Context, r core.Ref, src core.Source, run 
 	if !run {
 		return nil
 	}
+	// What runs is what was trusted: the files its commands name are
+	// hashed again before it first runs, as a keeper runs it only once its
+	// person has answered, up to a minute after the check.
+	if _, ok := v.loader.ran[ranKey(cf.Path, r.Name)]; !ok {
+		if sum, serr := cf.Sum(); serr != nil {
+			return core.Errorf(core.KindPolicy, src, "%s: %s: %v", r, cf.Path, serr)
+		} else if sum != cf.sum {
+			return untrusted(r, cf, policy.Changed, src)
+		}
+	}
 	if _, err = v.loader.run(ctx, cf, r.Name); errors.Is(err, context.Canceled) {
 		return core.Errorf(core.KindCanceled, src, "%v", err)
 	}
 	return err
 }
 
+// untrusted returns the error of the command r of cf, whose status the
+// trust store gives, in the request at src.
+func untrusted(r core.Ref, cf *commands, status policy.Status, src core.Source) error {
+	why := "is not trusted to run commands; read it, then trust it with"
+	switch status {
+	case policy.Since:
+		return core.Errorf(core.KindPolicy, src, "%s: %s was trusted after the keeper started, which reads the trust store once: "+
+			"start the keeper again to run its commands", r, cf.Path)
+	case policy.Changed:
+		why = "has changed since it was trusted; read it again, then trust it with"
+	case policy.Untrusted, policy.Trusted, policy.Missing: // Check gives neither of the last two here
+	}
+	return core.Errorf(core.KindPolicy, src, "%s: %s %s: vegtam trust %s", r, cf.Path, why, core.ShellQuote(filepath.Dir(cf.Path)))
+}
+
 // Commands checks the commands of the {{$cmd NAME}} secrets of p, which a
 // run without a person resolved and a keeper sends, as Prepare checks them
 // for a request of its own: their command file, found from the directory
-// of the request's file up, must be trusted and have them. With run, it
-// runs them too, once: a keeper runs them once its person says yes.
-func (v *Vars) Commands(ctx context.Context, p *core.Prepared, run bool) error {
+// of the request's file up, must be trusted and have them. It returns
+// them, each once, in the order p names them, for the keeper's person to
+// read. With run, it runs them too, once: a keeper runs them once its
+// person says yes.
+func (v *Vars) Commands(ctx context.Context, p *core.Prepared, run bool) ([]NamedCommand, error) {
+	var named []NamedCommand
 	for _, t := range p.Texts() {
 		for _, seg := range t {
 			if seg.Secret == nil || seg.Secret.Capture {
 				continue
 			}
-			if name, ok := strings.CutPrefix(seg.Secret.Name, "$cmd "); ok {
-				if err := v.commandRun(ctx, core.Ref{Func: "$cmd", Name: name}, p.Request.Source, run); err != nil {
-					return err
-				}
+			name, ok := strings.CutPrefix(seg.Secret.Name, "$cmd ")
+			if !ok || slices.ContainsFunc(named, func(c NamedCommand) bool { return c.Name == name }) {
+				continue
 			}
+			if err := v.commandRun(ctx, core.Ref{Func: "$cmd", Name: name}, p.Request.Source, run); err != nil {
+				return nil, err
+			}
+			// commandRun has read the file, found it trusted and with the command.
+			c := NamedCommand{Name: name, File: v.cmd.Path, Command: v.cmd.Commands[name]}
+			if path, err := v.cmd.program(name); err == nil {
+				c.Path = path
+			}
+			named = append(named, c)
 		}
 	}
-	return nil
+	return named, nil
 }
 
 // commandValue returns the value of {{$cmd name}} for the requests of v:
@@ -301,7 +379,14 @@ func (l *Loader) run(ctx context.Context, cf *commands, name string) (string, er
 	if r, ok := l.ran[key]; ok {
 		return r.value, r.err
 	}
-	v, err := runCommand(ctx, filepath.Dir(cf.Path), cf.Commands[name])
+	c := cf.Commands[name]
+	path, err := cf.program(name)
+	var v string
+	if err == nil {
+		v, err = runCommand(ctx, filepath.Dir(cf.Path), path, c)
+	} else {
+		err = fmt.Errorf("%s: %w", c.Argv[0], err)
+	}
 	if err != nil {
 		err = fmt.Errorf("{{$cmd %s}}: %w", name, err)
 	}
@@ -314,10 +399,12 @@ func (l *Loader) run(ctx context.Context, cf *commands, name string) (string, er
 const noTerminal = " (commands run with no input and no terminal: a command that asks for a password " +
 	"must get it from an agent, a cache or a window of its own)"
 
-func runCommand(ctx context.Context, dir string, c Command) (string, error) {
+// runCommand runs c, whose program is at path, in dir.
+func runCommand(ctx context.Context, dir, path string, c Command) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, c.Argv[0], c.Argv[1:]...) //nolint:gosec // G204: the argv of a trusted command file, without a shell
+	cmd := exec.CommandContext(ctx, path, c.Argv[1:]...) //nolint:gosec // G204: the argv of a trusted command file, without a shell
+	cmd.Args[0] = c.Argv[0]                              // as the program is named, whatever PATH found
 	cmd.Dir = dir
 	// No input: Stdin stays nil, the null device. And no terminal: a
 	// session of its own has none, so a command that opens /dev/tty to

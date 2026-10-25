@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 
@@ -28,7 +29,9 @@ const (
 	Changed   Status = "changed"   // trusted, but its contents have changed since
 	Trusted   Status = "trusted"
 	Missing   Status = "missing" // trusted, but the file is gone
-	Revoked   Status = "revoked" // trusted until just now
+	// Since is what a snapshot says of a file trusted since it was taken:
+	// it runs once the keeper that took it starts again.
+	Since Status = "trusted since"
 )
 
 // Store is the record of trusted command files: a JSON file mapping the
@@ -36,6 +39,26 @@ const (
 type Store struct {
 	path string
 	err  error // why there is no store
+	// frozen, if set, is what the file held when Snapshot read it: the
+	// store trusts no more than it, and cannot be changed.
+	frozen *snapshot
+}
+
+// snapshot is what a store's file held, or why it could not be read.
+type snapshot struct {
+	trusted map[string]string
+	err     error
+}
+
+// Snapshot returns the store as its file is now, read once: it trusts a
+// file only if what it read trusts it, and the file still does, with the
+// same sum; it cannot be changed. A keeper runs the commands of the files
+// trusted when it started, as long as they are: a program of the same
+// user can write the file while it runs, and a trust taken back applies
+// at once.
+func (s *Store) Snapshot() *Store {
+	m, err := s.load()
+	return &Store{path: s.path, frozen: &snapshot{trusted: m, err: err}}
 }
 
 // NewStore returns the store kept in the file at path.
@@ -134,8 +157,28 @@ func Canonical(file string) (string, error) {
 }
 
 // Check returns what the store says of the command file at file, a
-// canonical path, whose commands have the SHA-256 sum.
+// canonical path, whose commands have the SHA-256 sum. A snapshot asks
+// its file too: Trusted only if both trust it; Since if only the file
+// does.
 func (s *Store) Check(file, sum string) (Status, error) {
+	st, err := s.check(file, sum)
+	if s.frozen == nil || err != nil {
+		return st, err
+	}
+	now, err := NewStore(s.path).check(file, sum)
+	switch {
+	case err != nil:
+		return Untrusted, err
+	case st == Trusted:
+		return now, nil
+	case now == Trusted:
+		return Since, nil
+	}
+	return st, nil
+}
+
+// check returns what the store, or a snapshot, holds of file with sum.
+func (s *Store) check(file, sum string) (Status, error) {
 	m, err := s.load()
 	if err != nil {
 		return Untrusted, err
@@ -177,12 +220,19 @@ func (s *Store) Revoke(file string) (bool, error) {
 // List returns the recorded files with their SHA-256 sums.
 func (s *Store) List() (map[string]string, error) { return s.load() }
 
+// maxStore is the most bytes of the store's file that are read: some
+// thousands of files.
+const maxStore = 1 << 20
+
 // record is the layout of the store's file.
 type record struct {
 	Trusted map[string]string `json:"trusted"` // canonical path -> SHA-256, hex
 }
 
 func (s *Store) load() (map[string]string, error) {
+	if s.frozen != nil {
+		return maps.Clone(s.frozen.trusted), s.frozen.err
+	}
 	if s.err != nil {
 		return nil, core.Errorf(core.KindPolicy, core.Source{}, "%v", s.err)
 	}
@@ -206,7 +256,9 @@ func (s *Store) load() (map[string]string, error) {
 	if derr := checkDir(root, filepath.Dir(s.path), "it trusts nothing", fail); derr != nil {
 		return nil, derr
 	}
-	// A named pipe would block the open until something writes to it.
+	// A named pipe would block the open until something writes to it; one
+	// put in its place after the check is opened without waiting, and
+	// refused then.
 	if fi, serr := root.Stat(name); errors.Is(serr, fs.ErrNotExist) {
 		return map[string]string{}, nil
 	} else if serr != nil {
@@ -214,7 +266,7 @@ func (s *Store) load() (map[string]string, error) {
 	} else if !fi.Mode().IsRegular() {
 		return nil, fail("not a regular file")
 	}
-	f, err := root.Open(name)
+	f, err := openFile(root, name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]string{}, nil
 	} else if err != nil {
@@ -233,13 +285,22 @@ func (s *Store) read(f *os.File, fail func(string, ...any) error) (map[string]st
 	switch {
 	case err != nil:
 		return nil, fail("%v", err)
+	case !fi.Mode().IsRegular(): // put in its place after the check of its name
+		return nil, fail("not a regular file")
 	case !OwnedByUser(fi):
 		return nil, fail("it belongs to another user, so it trusts nothing")
 	case fi.Mode().Perm()&0o022 != 0:
 		return nil, fail("others can write it, so it trusts nothing; make it private: chmod 600 %s", s.path)
 	}
+	b, err := io.ReadAll(io.LimitReader(f, maxStore+1))
+	switch {
+	case err != nil:
+		return nil, fail("%v", err)
+	case len(b) > maxStore:
+		return nil, fail("larger than %d bytes, so it trusts nothing", maxStore)
+	}
 	var r record
-	dec := json.NewDecoder(f)
+	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&r); err != nil {
 		return nil, fail("%v", err)
@@ -257,11 +318,17 @@ func (s *Store) read(f *os.File, fail func(string, ...any) error) (map[string]st
 // never sees half of it.
 func (s *Store) save(m map[string]string) error {
 	fail := func(err error) error { return core.Errorf(core.KindPolicy, core.Source{File: s.path}, "%v", err) }
+	if s.frozen != nil {
+		return fail(errors.New("the trust store as it was read is not changed"))
+	}
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(record{m}) // a map of strings always encodes
+	if b.Len() > maxStore {
+		return fail(fmt.Errorf("it would be larger than %d bytes, and then trust nothing", maxStore))
+	}
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fail(err)

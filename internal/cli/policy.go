@@ -98,7 +98,8 @@ through the keeper, a process in the person's terminal that holds the
 values, sends the request, and gives back what the run may see.
 secrets.keeper_asks is when the keeper asks its person: "always", the
 default, before each request with a secret; "unbound" only before one
-that would send a secret where it is not bound. Whatever weakens these
+that would send a secret where it is not bound, or that runs a
+{{$cmd NAME}}, which runs as the person. Whatever weakens these
 is said here alone: no flag, variable or file can say it.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {

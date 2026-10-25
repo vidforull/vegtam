@@ -48,15 +48,19 @@ is bound to where it goes, and which process asks; it sends the request
 once you type the code it shows, and refuses it for anything else or no
 answer within a minute. With secrets.keeper_asks "unbound" in the policy,
 it asks only for a request that would send a secret where it is not
-bound. It checks where each secret may go as any run does, with the
-origins of the store and of the policy, and sends with the policy's
-rules for a run without a person; the program gets the response with
-every secret masked and with nothing of a credential that a response
-hands out (see vegtam run --help). Values that a request captures stay
-here, for the requests of the same run.
+bound, or that runs a {{$cmd NAME}}: a command runs here, as you, and the
+question shows it whole, with its file. It checks where each secret may
+go as any run does, with the origins of the store and of the policy, and
+sends with the policy's rules for a run without a person; the program
+gets the response with every secret masked and with nothing of a
+credential that a response hands out (see vegtam run --help). Values
+that a request captures stay here, for the requests of the same run.
 
-It reads the policy once, when it starts: a change to its secrets is
-shown here, and applies once the keeper starts again. It reads no
+It reads the policy and the trust store of command files once, when it
+starts, and says which files it trusts, if any: a change to the policy's
+secrets or to the files trusted is shown here. What a change gives
+applies once the keeper starts again; a trust taken back applies at
+once, to the runs connected too. It reads no
 http-client.private.env.json: a program could have put one where it
 looks. It keeps other processes of yours from reading its memory where
 the system lets it, and refuses to start in a terminal multiplexer, or
@@ -102,6 +106,12 @@ func runKeeper(ctx context.Context, cfg *Config, multiplexer bool) error {
 	for _, w := range warnings {
 		fmt.Fprintf(cfg.errOut, "vegtam: warning: %s\n", cfg.text(w))
 	}
+	// The command files it runs are those trusted now, as it reads the
+	// policy now: a program of the user can write either file.
+	trust := policy.DefaultStore().Snapshot()
+	if _, terr := trust.List(); terr != nil {
+		fmt.Fprintf(cfg.errOut, "vegtam: warning: %s; the keeper runs no {{$cmd NAME}}\n", cfg.text(terr.Error()))
+	}
 	st, err := cfg.keeperStore()
 	if err != nil {
 		return err
@@ -132,11 +142,20 @@ func runKeeper(ctx context.Context, cfg *Config, multiplexer bool) error {
 		held = "1 secret"
 	}
 	say(fmt.Sprintf("vegtam keeper: listening at %s; %s in the store; it asks %s. Ctrl-C stops it.", socket, held, asksWhen(pol)))
+	// A file a program trusted before the keeper started is trusted: the
+	// person sees which.
+	if files := keeper.TrustedFiles(trust); files != "" {
+		say(files)
+	}
 	var wg sync.WaitGroup
 	wg.Go(func() { keeper.Watch(ctx, pol.Path, pol, keeperWatch, say) })
-	defer wg.Wait()
+	wg.Go(func() { keeper.WatchTrust(ctx, trust, keeperWatch, say) })
+	defer func() {
+		cancel() // the watches end with ctx, however Serve returns
+		wg.Wait()
+	}()
 	k := &keeperRuns{
-		cfg: cfg, pol: pol, tr: tr, store: unlocked{st}, history: cfg.history(false),
+		cfg: cfg, pol: pol, tr: tr, trust: trust, store: unlocked{st}, history: cfg.history(false),
 		asker: &keeper.Asker{Term: term, Timeout: keeperAsk}, say: say, stop: cancel,
 	}
 	return l.Serve(ctx, k.conn)
@@ -182,7 +201,7 @@ func asksWhen(pol *policy.Policy) string {
 	if pol.Secrets.AsksAlways() {
 		return "before each request with a secret"
 	}
-	return "before a request that would send a secret where it is not bound"
+	return "before a request that would send a secret where it is not bound, or that runs a command"
 }
 
 // keeperRuns makes the keeper's side of each run that connects to it.
@@ -190,6 +209,7 @@ type keeperRuns struct {
 	cfg   *Config
 	pol   *policy.Policy
 	tr    exec.Transport
+	trust *policy.Store // as it was when the keeper started
 	store env.Store
 	// history is the person's history of runs, as it was when the keeper
 	// started: the keeper's entries go there, each with the process it
@@ -215,11 +235,11 @@ func (c *keeperConn) Send(ctx context.Context, o *session.Outbound) (*session.In
 	k := c.k
 	if c.s == nil {
 		c.s = session.New(session.Options{
-			Trust: policy.DefaultStore(), Transport: k.tr, MaxBody: o.MaxBody, UserAgent: "vegtam/" + k.cfg.Version,
+			Trust: k.trust, Transport: k.tr, MaxBody: o.MaxBody, UserAgent: "vegtam/" + k.cfg.Version,
 			Fail: o.Fail, Secrets: k.pol.Secrets, History: k.history, For: c.peer.String(), Store: k.store, NoPrivate: true,
 			Confirm: session.Confirm{Mutations: true},
-			Serve: &session.Serve{Always: k.pol.Secrets.AsksAlways(), Ask: func(ctx context.Context, p *core.Prepared, bs []core.Bound) error {
-				err := k.asker.Ask(ctx, c.peer, p, bs)
+			Serve: &session.Serve{Always: k.pol.Secrets.AsksAlways(), Ask: func(ctx context.Context, p *core.Prepared, bs []core.Bound, cmds []env.NamedCommand) error {
+				err := k.asker.Ask(ctx, c.peer, p, bs, cmds)
 				if errors.Is(err, keeper.ErrInputEnded) {
 					k.say("vegtam keeper: the terminal's input ended, so no one can answer: the keeper stops.")
 					k.stop()

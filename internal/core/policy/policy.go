@@ -70,7 +70,7 @@ const (
 	// KeeperAsksAlways: the keeper asks before each request with a secret.
 	KeeperAsksAlways = "always"
 	// KeeperAsksUnbound: it asks only when a secret of the request is not
-	// bound to where the request goes.
+	// bound to where the request goes, or the request runs a command.
 	KeeperAsksUnbound = "unbound"
 )
 
@@ -191,7 +191,9 @@ func LoadFile(path string) (*Policy, error) {
 	if derr := checkDir(root, filepath.Dir(path), "it is not read", fail); derr != nil {
 		return nil, derr
 	}
-	// A named pipe would block the open until something writes to it.
+	// A named pipe would block the open until something writes to it; one
+	// put in its place after the check is opened without waiting, and
+	// refused then.
 	if fi, serr := root.Stat(name); errors.Is(serr, fs.ErrNotExist) {
 		return p, nil
 	} else if serr != nil {
@@ -199,7 +201,7 @@ func LoadFile(path string) (*Policy, error) {
 	} else if !fi.Mode().IsRegular() {
 		return nil, fail("not a regular file")
 	}
-	f, err := root.Open(name)
+	f, err := openFile(root, name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return p, nil
 	} else if err != nil {

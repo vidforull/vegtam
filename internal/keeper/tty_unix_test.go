@@ -79,7 +79,7 @@ func TestTTYLateLine(t *testing.T) {
 	}
 	a := &Asker{Term: term, Timeout: 20 * time.Millisecond}
 	p, bs := prepared()
-	if err := a.Ask(t.Context(), peer, p, bs); err == nil || err.Error() != "no answer in 0.02s" {
+	if err := a.Ask(t.Context(), peer, p, bs, nil); err == nil || err.Error() != "no answer in 0.02s" {
 		t.Fatalf("error %v", err)
 	}
 	// Typed too late for that question: no answer to the next either.
@@ -87,7 +87,7 @@ func TestTTYLateLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return len(tt.lines) == 1 })
-	if err := a.Ask(t.Context(), peer, p, bs); err == nil || err.Error() != "no answer in 0.02s" {
+	if err := a.Ask(t.Context(), peer, p, bs, nil); err == nil || err.Error() != "no answer in 0.02s" {
 		t.Fatalf("error %v", err)
 	}
 }

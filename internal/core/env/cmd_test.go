@@ -445,3 +445,38 @@ func TestCommandNoInput(t *testing.T) {
 		t.Error("the command does not run in a session of its own")
 	}
 }
+
+// TestCommandRevoked checks that a trust taken back applies at once to a
+// run that found the file trusted, as a keeper's run of many requests
+// does: its command neither runs nor gives the value it gave before.
+func TestCommandRevoked(t *testing.T) {
+	path, store := cmdTree(t, map[string]any{"K": map[string]any{"argv": helper("print", "v4lue")}}, true, "GET https://example.com/?k={{$cmd K}}")
+	l := NewLoader(Options{Trust: store.Snapshot(), Held: true})
+	v, err := l.For(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := prepare(t, l, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoke := func() {
+		t.Helper()
+		f, rerr := ReadCommandFile(filepath.Join(filepath.Dir(path), "..", CommandFileName))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if _, rerr = store.Revoke(f.Path); rerr != nil {
+			t.Fatal(rerr)
+		}
+	}
+	if _, err = v.Commands(t.Context(), p, true); err != nil {
+		t.Fatal(err)
+	}
+	revoke()
+	for _, run := range []bool{false, true} {
+		if _, err = v.Commands(t.Context(), p, run); err == nil || !strings.Contains(err.Error(), "is not trusted to run commands") {
+			t.Errorf("run %v, revoked after it ran: %v", run, err)
+		}
+	}
+}

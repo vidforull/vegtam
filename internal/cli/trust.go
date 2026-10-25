@@ -35,11 +35,15 @@ running until the file is trusted again. The trust holds for the .http
 files in the directory and below it.
 
 Read the file and the scripts it names first: they run as you, with your
-environment. Trusting is for a person to decide; a program that meets a
-"policy" error should ask one rather than run vegtam trust itself.
+environment. Trusting is for a person at a terminal: without one, when
+stdin or stdout is not a terminal or with --json, vegtam trust and
+--revoke change nothing and fail with an error of kind "policy", exit
+code 6. A program that meets one asks a person to run the command. The
+keeper runs the commands of the files trusted when it started, as long
+as they are trusted, and shows each command before it runs it.
 
---revoke takes the trust back. --list shows every file trusted and
-whether it is unchanged, changed or gone.`,
+--revoke takes the trust back. --list, which needs no person, shows
+every file trusted and whether it is unchanged, changed or gone.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			switch {
 			case list && revoke:
@@ -54,6 +58,8 @@ whether it is unchanged, changed or gone.`,
 			switch {
 			case list:
 				return listTrusted(cfg, store)
+			case cfg.unattended():
+				return personOnly(revoke, args[0])
 			case revoke:
 				return revokeTrust(cfg, store, args[0])
 			}
@@ -63,6 +69,21 @@ whether it is unchanged, changed or gone.`,
 	cmd.Flags().BoolVar(&revoke, "revoke", false, "take the trust back")
 	cmd.Flags().BoolVar(&list, "list", false, "list the trusted files")
 	return cmd
+}
+
+// personOnly returns the error of vegtam trust, or with revoke of vegtam
+// trust --revoke, of arg without a person at a terminal: a program that
+// trusted a command file of its own could have the keeper run what it
+// wrote, as the person.
+func personOnly(revoke bool, arg string) error {
+	what, cmd := "trusting a command file", "vegtam trust "
+	if revoke {
+		what, cmd = "taking back the trust in a command file", "vegtam trust --revoke "
+	}
+	if abs, err := filepath.Abs(arg); err == nil {
+		arg = abs
+	}
+	return core.Errorf(core.KindPolicy, core.Source{}, "%s is for a person at a terminal: run %s%s yourself", what, cmd, core.ShellQuote(arg))
 }
 
 // commandFile returns the path of the command file arg names: the
@@ -102,11 +123,7 @@ func trust(cfg *Config, store *policy.Store, arg string) error {
 	if err := store.Trust(f.Path, sum); err != nil {
 		return err
 	}
-	t := &output.Trusted{File: f.Path, Status: string(policy.Trusted), SHA256: sum}
-	if cfg.asJSON() {
-		cfg.writeJSON(output.Document{SchemaVersion: output.SchemaVersion, Trust: []*output.Trusted{t}})
-		return nil
-	}
+	// A person reads it: without one, it is refused before.
 	var b strings.Builder
 	fmt.Fprintf(&b, "Trusted %s. {{$cmd NAME}} now runs:\n", f.Path)
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
@@ -134,16 +151,9 @@ func revokeTrust(cfg *Config, store *policy.Store, arg string) error {
 	if err != nil {
 		return err
 	}
-	switch {
-	case cfg.asJSON():
-		t := &output.Trusted{File: path, Status: string(policy.Untrusted)}
-		if was {
-			t.Status = string(policy.Revoked)
-		}
-		cfg.writeJSON(output.Document{SchemaVersion: output.SchemaVersion, Trust: []*output.Trusted{t}})
-	case was:
+	if was {
 		fmt.Fprintf(cfg.out, "Revoked the trust in %s: its commands no longer run.\n", cfg.text(path))
-	default:
+	} else {
 		fmt.Fprintf(cfg.out, "%s was not trusted.\n", cfg.text(path))
 	}
 	return nil

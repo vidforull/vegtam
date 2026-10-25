@@ -354,7 +354,7 @@ func TestConfirmBeforeCommands(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if code, _, stderr := runCLI(t, true, "trust", fx.path("cmd")); code != exitOK {
+	if code, _, stderr := runAt(t, "trust", fx.path("cmd")); code != exitOK {
 		t.Fatalf("trust = %d: %s", code, stderr)
 	}
 	post := fx.path("cmd/post.http") + "#1"

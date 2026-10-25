@@ -2,6 +2,7 @@ package keeper
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -104,4 +105,108 @@ func TestWatch(t *testing.T) {
 			t.Errorf("the policy at start is now %q", got)
 		}
 	})
+}
+
+// TestWatchTrust checks that a change to the trust store's file is said,
+// escaped, once, and changes nothing of what the keeper read at start.
+func TestWatchTrust(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o700); err != nil { // whatever the umask
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, "trust.json")
+		store := policy.NewStore(path)
+		const a, b, c = "/w/a/http-client.cmd.json", "/w/b/http-client.cmd.json", "/w/c\x1b[2J\n/http-client.cmd.json"
+		do := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		revoke := func(file string) {
+			t.Helper()
+			_, err := store.Revoke(file)
+			do(err)
+		}
+		do(store.Trust(a, "aa"))
+		do(store.Trust(b, "bb"))
+		start := store.Snapshot()
+		var (
+			mu   sync.Mutex
+			said []string
+		)
+		ctx, cancel := context.WithCancel(t.Context())
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			WatchTrust(ctx, start, time.Second, func(s string) {
+				mu.Lock()
+				defer mu.Unlock()
+				said = append(said, s)
+			})
+		})
+		next := func() []string {
+			time.Sleep(time.Second)
+			synctest.Wait()
+			mu.Lock()
+			defer mu.Unlock()
+			s := said
+			said = nil
+			return s
+		}
+		if s := next(); len(s) != 0 {
+			t.Errorf("said %q of the store as at start", s)
+		}
+		do(store.Trust(c, "cc"))
+		do(store.Trust(b, "b2"))
+		revoke(a)
+		want := "the trust store changed: " + a + " no longer trusted; " + b + ` trusted as it is now; "/w/c\x1b[2J\n/http-client.cmd.json" trusted. ` +
+			"A trust taken back applies now; one given, once the keeper starts again."
+		if s := next(); !slices.Equal(s, []string{want}) {
+			t.Errorf("said %q, want %q", s, want)
+		}
+		if s := next(); len(s) != 0 {
+			t.Errorf("said %q again", s)
+		}
+		// What the keeper runs is what both what it read and the store now
+		// trust.
+		for _, tt := range []struct {
+			file, sum string
+			want      policy.Status
+		}{{a, "aa", policy.Untrusted}, {b, "bb", policy.Changed}, {c, "cc", policy.Since}} {
+			if got, err := start.Check(tt.file, tt.sum); got != tt.want || err != nil {
+				t.Errorf("%q = %s, %v; want %s", tt.file, got, err, tt.want)
+			}
+		}
+		do(store.Trust(a, "aa"))
+		do(store.Trust(b, "bb"))
+		revoke(c)
+		if s := next(); !slices.Equal(s, []string{"the trust store is again the one the keeper read at start."}) {
+			t.Errorf("said %q of the store as at start again", s)
+		}
+		raw := func(s string) {
+			t.Helper()
+			tmp := path + ".new"
+			do(os.WriteFile(tmp, []byte(s), 0o600))
+			do(os.Rename(tmp, path))
+		}
+		raw(`{"trusted": `)
+		if s := next(); len(s) != 1 || !strings.HasPrefix(s[0], "the trust store cannot be read now: ") || !strings.HasSuffix(s[0], "The keeper runs no command while it cannot.") {
+			t.Errorf("said %q of a store that does not parse", s)
+		}
+		raw(`{"trusted": {"` + a + `": "aa", "` + b + `": "bb"}}`)
+		if s := next(); !slices.Equal(s, []string{"the trust store is again the one the keeper read at start."}) {
+			t.Errorf("said %q of the store as at start, written by hand", s)
+		}
+		for i := range maxTrustChanges + 2 {
+			do(store.Trust(fmt.Sprintf("/w/%d/http-client.cmd.json", i), "x"))
+		}
+		if s := next(); len(s) != 1 || !strings.HasSuffix(s[0], "/w/7/http-client.cmd.json trusted; and 2 more. A trust taken back applies now; one given, once the keeper starts again.") {
+			t.Errorf("said %q of many files", s)
+		}
+		cancel()
+		wg.Wait()
+	})
+	// A store with no file has nothing to watch.
+	WatchTrust(t.Context(), policy.NewStore("").Snapshot(), time.Second, func(s string) { t.Errorf("said %q", s) })
 }

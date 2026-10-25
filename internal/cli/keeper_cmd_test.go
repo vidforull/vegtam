@@ -74,7 +74,7 @@ type runningKeeper struct {
 // startKeeper starts vegtam keeper, whose person types password, and waits
 // until it listens. It stops when the test ends. It starts in a
 // multiplexer too, as the tests may run in one (see TestKeeperMultiplexer).
-func startKeeper(t *testing.T, password string, args ...string) *runningKeeper {
+func startKeeper(t *testing.T, password string) *runningKeeper {
 	t.Helper()
 	runtime, err := shortDir()
 	if err != nil {
@@ -95,7 +95,7 @@ func startKeeper(t *testing.T, password string, args ...string) *runningKeeper {
 	ctx, stop := context.WithCancel(t.Context())
 	k.stop = stop
 	go func() {
-		k.done <- Run(ctx, append([]string{"keeper", "--multiplexer"}, args...), Config{
+		k.done <- Run(ctx, []string{"keeper", "--multiplexer"}, Config{
 			Stdin: in, Stdout: k.screen, Stderr: k.screen, TTY: true, Interactive: true, term: &typist{answers: []string{password}},
 			protect: func() []string { k.protected.Store(true); return nil },
 		})

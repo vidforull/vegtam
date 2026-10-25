@@ -8,6 +8,7 @@ import (
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/assert"
+	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/output"
 )
 
@@ -66,10 +67,12 @@ type Held struct {
 type Serve struct {
 	// Ask asks the keeper's person whether to send the request, which
 	// holds the secrets of bs, each with where the request goes and where
-	// it may go; nil means yes. It is asked for every request with a
-	// secret with Always, and otherwise only for one whose secrets are
-	// not all bound to where it goes.
-	Ask    func(ctx context.Context, p *core.Prepared, bs []core.Bound) error
+	// it may go, and whose {{$cmd NAME}} run the commands of cmds once
+	// the person says yes; nil means yes. It is asked for every request
+	// with a secret with Always, and otherwise for one whose secrets are
+	// not all bound to where it goes, or that runs a command: a command
+	// runs as the person.
+	Ask    func(ctx context.Context, p *core.Prepared, bs []core.Bound, cmds []env.NamedCommand) error
 	Always bool
 }
 
@@ -191,7 +194,7 @@ func (s *Session) Relay(ctx context.Context, o *Outbound) *Inbound {
 	j.vars, j.Err = s.loader.For(req.Source.File)
 	j.Prepared = &core.Prepared{Request: req, Method: o.Method, URL: o.URL, Headers: o.Headers, Body: o.Body}
 	if j.Err == nil { // checked now, run once its person says yes (see askKeeper)
-		j.Err = j.vars.Commands(ctx, j.Prepared, false)
+		_, j.Err = j.vars.Commands(ctx, j.Prepared, false)
 	}
 	for _, h := range o.Captured {
 		s.Declare(h.Name)
@@ -222,22 +225,24 @@ func (s *Session) Relay(ctx context.Context, o *Outbound) *Inbound {
 }
 
 // askKeeper asks the keeper's person, through Serve, whether to send p, the
-// request of j, which goes to origins, as far as they are known, and
-// would send the secrets of refused where they are not bound. A request
-// without a secret is not asked about, nor, unless Serve.Always, one whose
-// secrets are all bound to where it goes. It returns vars with origins
-// granted to every secret once the person says yes; the error of kind
-// policy otherwise.
-func (s *Session) askKeeper(ctx context.Context, j *Job, p *core.Prepared, vars core.Secrets, origins []string, refused []core.Bound) (core.Secrets, error) {
+// request of j, which goes to origins, as far as they are known, would
+// send the secrets of refused where they are not bound, and runs the
+// commands of cmds. A request without a secret is not asked about, nor,
+// unless Serve.Always, one whose secrets are all bound to where it goes
+// and that runs no command. It returns vars with origins granted to every
+// secret once the person says yes; the error of kind policy otherwise.
+func (s *Session) askKeeper(ctx context.Context, j *Job, p *core.Prepared, vars core.Secrets, origins []string, refused []core.Bound,
+	cmds []env.NamedCommand,
+) (core.Secrets, error) {
 	texts := p.Texts()
 	bs := core.Bindings(vars, first(origins), texts...)
 	for _, o := range origins[min(1, len(origins)):] {
 		bs = append(bs, core.Bindings(vars, o, texts...)...)
 	}
-	if len(bs) == 0 || !s.opts.Serve.Always && len(origins) > 0 && len(refused) == 0 {
+	if len(cmds) == 0 && (len(bs) == 0 || !s.opts.Serve.Always && len(origins) > 0 && len(refused) == 0) {
 		return vars, nil
 	}
-	if err := s.opts.Serve.Ask(ctx, p, masked(bs, s.Masker())); err != nil {
+	if err := s.opts.Serve.Ask(ctx, p, masked(bs, s.Masker()), cmds); err != nil {
 		what := p.Method + " " + p.URL.Masked() + " is not sent"
 		if len(refused) > 0 {
 			e := core.SecretError(core.KindPolicy, j.Request.Source, what, refused)

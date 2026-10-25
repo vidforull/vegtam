@@ -67,8 +67,8 @@ var errorKinds = []struct {
 	{core.KindConfirm, "a request not sent without --confirm: one with an @note; without a person at a terminal, " +
 		"one whose method is not GET, HEAD or OPTIONS; with a person at a terminal, one that would send a secret to " +
 		"an origin it is not bound to, which error.secret names; error.confirm says what confirms it. Ask a person first"},
-	{core.KindPolicy, "not allowed: a command file that is not trusted, an address vegtam never connects to or that " +
-		"the policy does not allow, a secret that would go to an origin it is not bound to (error.secret names it; " +
+	{core.KindPolicy, "not allowed: a command file that is not trusted, vegtam trust without a person at a terminal, " +
+		"an address vegtam never connects to or that the policy does not allow, a secret that would go to an origin it is not bound to (error.secret names it; " +
 		"without a person at a terminal, --confirm does not lift it), a secret value that a run without a person does " +
 		"not get (error.person_command is what a person runs to send the request), a keeper that cannot be reached or " +
 		"that refused, a policy file that cannot be read. Ask a person; do not work around it"},
@@ -92,6 +92,9 @@ var never = []string{
 		"not from a directory of .http files, nor the current one",
 	"take a proxy, an address to connect to, a CA, a client certificate or an unchecked certificate from a .http or environment file",
 	"run a {{$cmd NAME}} whose command file a person has not trusted, or that has changed since",
+	"trust a command file, or take the trust back, in a run without a person: vegtam trust is a person's at a terminal; " +
+		"and a keeper runs only the commands of the files trusted when it started and still trusted, each shown in its question " +
+		"with its argv, its program and its file, which it asks whatever secrets.keeper_asks says",
 	`send without --confirm a request with "# @note", or, with no person at a terminal, one whose method is not GET, HEAD or ` +
 		`OPTIONS; the operator's policy may lift the second, network.confirm "never", and nothing lifts the first`,
 	"send a secret value to an origin it is not bound to: the $allow of http-client.private.env.json binds the file's own " +

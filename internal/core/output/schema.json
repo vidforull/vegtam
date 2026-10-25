@@ -37,14 +37,14 @@
     "import": {"$ref": "#/$defs/import"},
     "trust": {
       "type": "array",
-      "description": "The command files trust acted on, or with --list every one the trust store records, sorted by path.",
+      "description": "With trust --list, every command file the trust store records, sorted by path. trust and trust --revoke, which are for a person at a terminal, print text.",
       "items": {
         "type": "object",
         "required": ["file", "status"],
         "properties": {
           "file": {"type": "string", "description": "The absolute path of an http-client.cmd.json, symbolic links resolved."},
-          "status": {"type": "string", "description": "trusted: its commands run; changed: it, or a file its commands name, differs from what was trusted, so they do not; missing: the file is gone; revoked: --revoke took the trust back; untrusted: --revoke found no trust to take back."},
-          "sha256": {"type": "string", "description": "The SHA-256 trusted, in hex, of the file and the files its commands name by relative paths. Absent after --revoke."}
+          "status": {"type": "string", "description": "trusted: its commands run; changed: it, or a file its commands name, differs from what was trusted, so they do not; missing: the file is gone."},
+          "sha256": {"type": "string", "description": "The SHA-256 trusted, in hex, of the file and the files its commands name by relative paths."}
         }
       }
     },
@@ -531,7 +531,7 @@
       "properties": {
         "kind": {
           "type": "string",
-          "description": "assert (exit code 1); usage, parse, variable, request, import or capture (2); network or timeout (3); status (4, with --fail); confirm (5: a request that is not sent without --confirm; see confirm); policy (6: a command file that is not trusted, an address vegtam never connects to or that the operator's policy does not allow, a secret that would go to an origin it is not bound to, see secret, a secret value that a run without a person does not get, see person_command, a policy file that cannot be read); canceled (130, interrupted by SIGINT or SIGTERM). New kinds may be added; rely on the exit code for anything you do not know."
+          "description": "assert (exit code 1); usage, parse, variable, request, import or capture (2); network or timeout (3); status (4, with --fail); confirm (5: a request that is not sent without --confirm; see confirm); policy (6: a command file that is not trusted, vegtam trust without a person at a terminal, an address vegtam never connects to or that the operator's policy does not allow, a secret that would go to an origin it is not bound to, see secret, a secret value that a run without a person does not get, see person_command, a policy file that cannot be read); canceled (130, interrupted by SIGINT or SIGTERM). New kinds may be added; rely on the exit code for anything you do not know."
         },
         "message": {"type": "string"},
         "file": {"type": "string"},
@@ -652,7 +652,7 @@
           "required": ["unattended", "keeper_asks"],
           "properties": {
             "unattended": {"type": "string", "description": "deny, the default: a run without a person gets no secret value, and such a request is an error of kind policy, exit code 6. keeper: it goes through the keeper, a process in the operator's terminal that holds the values and asks before each use."},
-            "keeper_asks": {"type": "string", "description": "always, the default: the keeper asks its person before each request with a secret. unbound: only before one that would send a secret where it is not bound."}
+            "keeper_asks": {"type": "string", "description": "always, the default: the keeper asks its person before each request with a secret. unbound: only before one that would send a secret where it is not bound, or that runs a {{$cmd NAME}}, which runs as the person."}
           }
         },
         "run": {

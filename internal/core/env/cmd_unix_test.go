@@ -40,3 +40,39 @@ func TestCommandKilledWithChildren(t *testing.T) {
 		}
 	}
 }
+
+// TestCommandProgramPinned checks that a command whose program PATH finds
+// runs the program found when its command was first checked, and that the
+// keeper's person is shown its path: one put earlier in PATH after that,
+// while the question waits, does not run in its place.
+func TestCommandProgramPinned(t *testing.T) {
+	dirs := [2]string{t.TempDir(), t.TempDir()}
+	for i, dir := range dirs {
+		script := "#!/bin/sh\necho program" + strconv.Itoa(i) + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "vegtam-pinned"), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dirs[0]+string(os.PathListSeparator)+os.Getenv("PATH"))
+	path, store := cmdTree(t, map[string]any{"P": map[string]any{"argv": []string{"vegtam-pinned"}}}, true, "GET https://example.com/?p={{$cmd P}}")
+	l := NewLoader(Options{Trust: store, Held: true})
+	v, err := l.For(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := prepare(t, l, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmds, err := v.Commands(t.Context(), p, false)
+	if want := filepath.Join(dirs[0], "vegtam-pinned"); err != nil || len(cmds) != 1 || cmds[0].Path != want {
+		t.Fatalf("checked: %+v, %v; want the path %s", cmds, err, want)
+	}
+	t.Setenv("PATH", dirs[1]+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, err = v.Commands(t.Context(), p, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := v.commandValue("P"); err != nil || got != "program0" {
+		t.Errorf("ran %q, %v; want what program0 prints", got, err)
+	}
+}

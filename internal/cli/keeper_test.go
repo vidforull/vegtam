@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/session"
 )
 
@@ -13,12 +15,19 @@ import (
 // policy says secrets.unattended "keeper": a session of the test's own
 // process that holds the values, as the person's keeper would, and sends
 // with the options of the run. Its person is asked only of a request that
-// would send a secret where it is not bound, and says no. What goes
-// between it and the run goes through JSON, as on the keeper's socket.
+// would send a secret where it is not bound, or where the URL leads, and
+// says no; or that runs a command, its secrets all bound to where it goes,
+// and says yes. What goes between it
+// and the run goes through JSON, as on the keeper's socket.
 func testKeeper(opts session.Options) session.Keeper {
 	opts.History, opts.Keeper = nil, nil
 	opts.Confirm = session.Confirm{Mutations: true}
-	opts.Serve = &session.Serve{Ask: func(context.Context, *core.Prepared, []core.Bound) error { return errDeclined }}
+	opts.Serve = &session.Serve{Ask: func(_ context.Context, _ *core.Prepared, bs []core.Bound, cmds []env.NamedCommand) error {
+		if len(cmds) == 0 || slices.ContainsFunc(bs, func(b core.Bound) bool { return b.Origin == "" || b.Refused() }) {
+			return errDeclined
+		}
+		return nil
+	}}
 	return &relay{session.New(opts)}
 }
 

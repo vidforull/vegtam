@@ -167,7 +167,7 @@ func newTrapFixture(t *testing.T) *trapFixture {
 	t.Setenv("VEGTAM_TRAP_NONE", trapNone)
 	t.Setenv("VEGTAM_TEST_HELPER", "1")
 	t.Setenv("GORACE", "atexit_sleep_ms=0") // a helper built with -race would wait a second
-	if code, _, stderr := runCLI(t, true, "trust", fx.dir); code != exitOK {
+	if code, _, stderr := runAt(t, "trust", fx.dir); code != exitOK {
 		t.Fatalf("trust = %d: %s", code, stderr)
 	}
 	return fx

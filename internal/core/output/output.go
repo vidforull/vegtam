@@ -297,8 +297,8 @@ type ImportVariable struct {
 // Trusted is a command file and what the trust store says of it.
 type Trusted struct {
 	File   string `json:"file"`
-	Status string `json:"status"`           // "trusted", "changed", "missing", "revoked" or "untrusted"
-	SHA256 string `json:"sha256,omitempty"` // as recorded; absent if untrusted
+	Status string `json:"status"`           // "trusted", "changed" or "missing"
+	SHA256 string `json:"sha256,omitempty"` // as recorded
 }
 
 // Ref returns how to refer to the i-th request of f, counting from 0:

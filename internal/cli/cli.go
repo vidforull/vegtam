@@ -71,7 +71,8 @@ var exitCodes = []struct {
 	{exitConfirm, `a request that is not sent without a confirmation, --confirm: one with "# @note"; with no person ` +
 		"at a terminal, one whose method is not GET, HEAD or OPTIONS; with a person at a terminal, one that would send " +
 		"a secret to an origin it is not bound to (see vegtam run --help)"},
-	{exitPolicy, "blocked by policy: a {{$cmd NAME}} whose command file is not trusted (see vegtam trust --help), " +
+	{exitPolicy, "blocked by policy: a {{$cmd NAME}} whose command file is not trusted, or vegtam trust with no person " +
+		"at a terminal (see vegtam trust --help), " +
 		"an address that vegtam never connects to or that the operator's policy does not allow, " +
 		"a secret that would go to an origin it is not bound to, from a request with no person at a terminal or " +
 		"from a redirect (see vegtam run --help), a secret value that a run with no person at a terminal does not get, " +

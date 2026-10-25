@@ -503,11 +503,15 @@ func (s *Session) send(ctx context.Context, j *Job, res *output.Result) error {
 	}
 	switch {
 	case s.opts.Serve != nil:
-		if vars, err = s.askKeeper(ctx, j, p, vars, origins, refused); err != nil {
+		cmds, cerr := j.vars.Commands(ctx, p, false)
+		if cerr != nil {
+			return cerr
+		}
+		if vars, err = s.askKeeper(ctx, j, p, vars, origins, refused, cmds); err != nil {
 			return err
 		}
-		// Its commands run once its person has said yes, or need not.
-		if cerr := j.vars.Commands(ctx, p, true); cerr != nil {
+		// Its commands run once its person has said yes.
+		if _, cerr = j.vars.Commands(ctx, p, true); cerr != nil {
 			return cerr
 		}
 	case len(refused) == 0:

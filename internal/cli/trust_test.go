@@ -61,9 +61,8 @@ func TestTrust(t *testing.T) {
 		}
 	}
 	t.Chdir(fx.dir)
-	run := func(tty bool, args ...string) (int, string, string) {
+	checked := func(tty bool, args []string, code int, stdout, stderr string) (int, string, string) {
 		t.Helper()
-		code, stdout, stderr := runCLI(t, tty, args...)
 		if !tty {
 			validateJSON(t, stdout)
 		}
@@ -74,6 +73,18 @@ func TestTrust(t *testing.T) {
 			}
 		}
 		return code, normalize(fx, stdout), normalize(fx, stderr)
+	}
+	// run runs args with stdout a terminal or not, with no person at the
+	// terminal; person, as a person at it.
+	run := func(tty bool, args ...string) (int, string, string) {
+		t.Helper()
+		code, stdout, stderr := runCLI(t, tty, args...)
+		return checked(tty, args, code, stdout, stderr)
+	}
+	person := func(args ...string) (int, string, string) {
+		t.Helper()
+		code, stdout, stderr := runAt(t, args...)
+		return checked(true, args, code, stdout, stderr)
 	}
 	file := "DIR/cmd/http-client.cmd.json"
 
@@ -91,8 +102,25 @@ func TestTrust(t *testing.T) {
 		}
 	}
 
+	// Trusting is a person's: without one, at a terminal or not, or with
+	// --json, it is refused, and the file stays untrusted.
+	for _, try := range []func() (int, string, string){
+		func() (int, string, string) { return run(false, "trust", "cmd") },
+		func() (int, string, string) { return run(true, "trust", "cmd") },
+		func() (int, string, string) { return person("trust", "cmd", "--json") },
+	} {
+		code, stdout, stderr := try()
+		want := "trusting a command file is for a person at a terminal: run vegtam trust DIR/cmd yourself"
+		if code != exitPolicy || !strings.HasSuffix(stderr, want+"\n") || strings.Contains(stdout, `"trust"`) {
+			t.Errorf("trust without a person = %d\n%s\n%s", code, stdout, stderr)
+		}
+	}
+	if c, out, _ := run(false, "trust", "--list"); c != exitOK || out != `{"schema_version":1,"trust":[]}`+"\n" {
+		t.Errorf("trusted without a person: %d, %s", c, out)
+	}
+
 	// Trusting shows what now runs.
-	code, stdout, _ := run(true, "trust", "cmd")
+	code, stdout, _ := person("trust", "cmd")
 	want := "Trusted " + file + ". {{$cmd NAME}} now runs:\n  KEY   " + os.Args[0] + " '-test.run=^TestHelperProcess$'\n" +
 		"  LEAK  " + os.Args[0] + " '-test.run=^TestHelperProcess$' -- leak\n"
 	if code != exitOK || stdout != want {
@@ -147,13 +175,18 @@ func TestTrust(t *testing.T) {
 		t.Errorf("run changed = %d, %s", code, stderr)
 	}
 
-	// Revoking, twice.
-	code, stdout, _ = run(true, "trust", "--revoke", "cmd")
+	// Revoking is a person's too; then twice.
+	code, stdout, stderr = run(false, "trust", "--revoke", "cmd")
+	want = "taking back the trust in a command file is for a person at a terminal: run vegtam trust --revoke DIR/cmd yourself\n"
+	if code != exitPolicy || !strings.HasSuffix(stderr, want) || len(list()) != 1 {
+		t.Errorf("revoke without a person = %d\n%s\n%s", code, stdout, stderr)
+	}
+	code, stdout, _ = person("trust", "--revoke", "cmd")
 	if code != exitOK || stdout != "Revoked the trust in "+file+": its commands no longer run.\n" {
 		t.Errorf("revoke = %d, %q", code, stdout)
 	}
-	code, stdout, _ = run(false, "trust", "--revoke", "cmd/http-client.cmd.json")
-	if code != exitOK || stdout != `{"schema_version":1,"trust":[{"file":"`+file+`","status":"untrusted"}]}`+"\n" {
+	code, stdout, _ = person("trust", "--revoke", "cmd/http-client.cmd.json")
+	if code != exitOK || stdout != file+" was not trusted.\n" {
 		t.Errorf("revoke again = %d, %q", code, stdout)
 	}
 	if l := list(); len(l) != 0 {
@@ -170,21 +203,21 @@ func TestTrust(t *testing.T) {
 		{"trust", "none"},
 		{"trust", "api.http"},
 	} {
-		if c, _, _ := run(false, args...); c != exitUsage {
+		if c, _, _ := person(args...); c != exitUsage {
 			t.Errorf("%q = %d, want %d", args, c, exitUsage)
 		}
 	}
 
 	// The trust in a directory since deleted can be revoked.
-	if c, _, _ := run(false, "trust", "cmd"); c != exitOK {
+	if c, _, _ := person("trust", "cmd"); c != exitOK {
 		t.Fatal("trust again")
 	}
 	os.RemoveAll(fx.path("cmd"))
 	if l := list(); len(l) != 1 || l[0].Status != "missing" {
 		t.Errorf("list after deleting: %+v", l)
 	}
-	code, stdout, _ = run(false, "trust", "--revoke", "cmd")
-	if code != exitOK || !strings.Contains(stdout, `"status":"revoked"`) || len(list()) != 0 {
+	code, stdout, _ = person("trust", "--revoke", "cmd")
+	if code != exitOK || !strings.HasPrefix(stdout, "Revoked the trust in ") || len(list()) != 0 {
 		t.Errorf("revoke a deleted directory = %d, %s", code, stdout)
 	}
 

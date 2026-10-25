@@ -94,7 +94,7 @@ func TestHeldGate(t *testing.T) {
 	file := fx.path("held.http")
 	for _, pol := range []string{`{"network": {"allow": ["127.0.0.1", "::1"]}}`, `{"network": {"allow": ["127.0.0.1", "::1"]}, "secrets": {"unattended": "deny"}}`} {
 		writePolicy(t, pol) // and a trust store of its own
-		if code, _, stderr := runCLI(t, true, "trust", fx.dir); code != exitOK {
+		if code, _, stderr := runAt(t, "trust", fx.dir); code != exitOK {
 			t.Fatalf("trust = %d: %s", code, stderr)
 		}
 		for _, mode := range []struct {

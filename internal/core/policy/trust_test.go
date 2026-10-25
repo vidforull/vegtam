@@ -48,6 +48,95 @@ func TestStore(t *testing.T) {
 	}
 }
 
+// TestSnapshot checks that a snapshot trusts no more than the file held
+// when it was taken, whatever is trusted after, and no more than the file
+// holds now: a trust taken back, or given to other contents, applies at
+// once. It changes nothing, and one of a store that could not be read, or
+// that cannot be read now, trusts nothing.
+func TestSnapshot(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "vegtam", "trust.json"))
+	const a, b = "/w/a/http-client.cmd.json", "/w/b/http-client.cmd.json"
+	do := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	do(s.Trust(a, "aa"))
+	snap := s.Snapshot()
+	check := func(file, sum string, want Status) {
+		t.Helper()
+		if got, err := snap.Check(file, sum); got != want || err != nil {
+			t.Errorf("snapshot: %s %s = %s, %v; want %s", file, sum, got, err, want)
+		}
+	}
+	check(a, "aa", Trusted)
+	check(a, "a2", Changed)
+	check(b, "bb", Untrusted)
+	do(s.Trust(b, "bb"))
+	check(b, "bb", Since)
+	do(s.Trust(a, "a2"))
+	check(a, "a2", Since)
+	check(a, "aa", Changed)
+	_, err := s.Revoke(a)
+	do(err)
+	check(a, "aa", Untrusted)
+	if m, lerr := snap.List(); lerr != nil || len(m) != 1 || m[a] != "aa" || snap.Path() != s.Path() {
+		t.Errorf("snapshot: List = %v, %v", m, lerr)
+	} else {
+		m[b] = "bb" // the map given is a copy
+	}
+	before, err := os.ReadFile(s.Path())
+	do(err)
+	if err := snap.Trust(b, "x"); err == nil {
+		t.Error("a snapshot trusted a file")
+	}
+	if _, err := snap.Revoke(a); err == nil {
+		t.Error("a snapshot revoked a file")
+	}
+	if after, err := os.ReadFile(s.Path()); err != nil || string(after) != string(before) {
+		t.Errorf("a snapshot wrote the store: %s, %v", after, err)
+	}
+	if m, err := snap.List(); err != nil || len(m) != 1 {
+		t.Errorf("snapshot after: %v, %v", m, err)
+	}
+
+	// Others can write the file: a snapshot taken then trusts nothing, nor
+	// one taken before, while it lasts.
+	do(s.Trust(a, "aa"))
+	good := s.Snapshot()
+	do(os.Chmod(s.Path(), 0o666))
+	bad := s.Snapshot()
+	for name, snap := range map[string]*Store{"before": good, "while": bad} {
+		if got, err := snap.Check(a, "aa"); got != Untrusted || err == nil || !strings.Contains(err.Error(), "others can write it") {
+			t.Errorf("a snapshot taken %s others could write the store: %s, %v", name, got, err)
+		}
+	}
+	do(os.Chmod(s.Path(), 0o600))
+	if got, err := bad.Check(a, "aa"); got != Untrusted || err == nil {
+		t.Errorf("a snapshot of a store others could write, once private again: %s, %v", got, err)
+	}
+	if got, err := good.Check(a, "aa"); got != Trusted || err != nil {
+		t.Errorf("a snapshot, once the store is private again: %s, %v", got, err)
+	}
+}
+
+// TestStoreTooLarge checks that a store larger than any a person keeps
+// trusts nothing, rather than be read whole.
+func TestStoreTooLarge(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "vegtam", "trust.json"))
+	if err := os.Mkdir(filepath.Dir(s.Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	big := `{"trusted": {"/a/http-client.cmd.json": "` + strings.Repeat("x", maxStore) + `"}}`
+	if err := os.WriteFile(s.Path(), []byte(big), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Check("/a/http-client.cmd.json", strings.Repeat("x", maxStore)); got != Untrusted || err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("a store too large: %s, %v", got, err)
+	}
+}
+
 func TestStoreRefuses(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "trust.json")

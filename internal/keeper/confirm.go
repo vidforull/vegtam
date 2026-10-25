@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/output"
 )
 
@@ -53,13 +54,15 @@ type Asker struct {
 }
 
 // Ask asks the keeper's person whether to send p, the request that peer
-// asks the keeper to send, with the secrets of bs; nil means yes. Bound
-// to its peer, it is session.Serve.Ask. The question shows the peer, the
-// method, the URL with its placeholders, and each secret with where the
-// request goes and whether the secret is bound to it: p holds no secret
-// value to show. What the run wrote is shown with its control characters
-// escaped, so that it cannot drive the terminal.
-func (a *Asker) Ask(ctx context.Context, peer Peer, p *core.Prepared, bs []core.Bound) error {
+// asks the keeper to send, with the secrets of bs, running the commands
+// of cmds; nil means yes. Bound to its peer, it is session.Serve.Ask. The
+// question shows the peer, the method, the URL with its placeholders,
+// each secret with where the request goes and whether the secret is bound
+// to it, and each command whole, with its file: p holds no secret value
+// to show, and a command runs as the person. What the run wrote, and what
+// a command file says, is shown with its control characters escaped, so
+// that it cannot drive the terminal.
+func (a *Asker) Ask(ctx context.Context, peer Peer, p *core.Prepared, bs []core.Bound, cmds []env.NamedCommand) error {
 	a.once.Do(func() { a.turn = make(chan struct{}, 1) })
 	select {
 	case a.turn <- struct{}{}:
@@ -72,7 +75,7 @@ func (a *Asker) Ask(ctx context.Context, peer Peer, p *core.Prepared, bs []core.
 		return err
 	}
 	timeout := cmp.Or(a.Timeout, defaultTimeout)
-	if err = a.Term.Write(question(peer, p, bs, code, timeout)); err != nil {
+	if err = a.Term.Write(question(peer, p, bs, cmds, code, timeout)); err != nil {
 		return fmt.Errorf("the question cannot be put: %w", err)
 	}
 	actx, cancel := context.WithTimeout(ctx, timeout)
@@ -113,8 +116,8 @@ func (a *Asker) Ask(ctx context.Context, peer Peer, p *core.Prepared, bs []core.
 var ErrInputEnded = errors.New("no answer: the terminal's input has ended")
 
 // question returns the question for p, which peer asks to send with the
-// secrets of bs, and whose answer is code.
-func question(peer Peer, p *core.Prepared, bs []core.Bound, code string, timeout time.Duration) string {
+// secrets of bs, running the commands of cmds, and whose answer is code.
+func question(peer Peer, p *core.Prepared, bs []core.Bound, cmds []env.NamedCommand, code string, timeout time.Duration) string {
 	lines := []string{
 		"vegtam keeper: a request asked by " + peer.String(),
 		"  " + p.Method + " " + p.URL.Masked(),
@@ -132,6 +135,7 @@ func question(peer Peer, p *core.Prepared, bs []core.Bound, code string, timeout
 		}
 		lines = append(lines, l)
 	}
+	lines = append(lines, commandLines(cmds)...)
 	lines = append(lines, fmt.Sprintf("To send it, type %s and Enter; anything else, or no answer in %gs, does not send it.", code, timeout.Seconds()))
 	var s strings.Builder
 	for _, l := range lines {
@@ -139,6 +143,36 @@ func question(peer Peer, p *core.Prepared, bs []core.Bound, code string, timeout
 	}
 	s.WriteString("> ")
 	return s.String()
+}
+
+// commandLines returns the lines of the question that show cmds: each
+// command by its name, with what it runs as a shell would read it, its
+// program as PATH found it, then, after the last command of each file,
+// the file. The person trusted the file, but a program may have written
+// what it runs: they read it here.
+func commandLines(cmds []env.NamedCommand) []string {
+	var lines []string
+	n := 0 // the commands of the file so far
+	for i, c := range cmds {
+		argv := make([]string, len(c.Argv))
+		for j, a := range c.Argv {
+			argv[j] = core.ShellQuote(a)
+		}
+		if c.Path != "" {
+			argv[0] = core.ShellQuote(c.Path)
+		}
+		lines = append(lines, fmt.Sprintf("  command %s: %s", c.Name, strings.Join(argv, " ")))
+		if n++; i < len(cmds)-1 && cmds[i+1].File == c.File {
+			continue
+		}
+		runs := "it runs"
+		if n > 1 {
+			runs = "they run"
+		}
+		lines = append(lines, fmt.Sprintf("  from %s: %s here, as you, once you type the code", shownPath(c.File), runs))
+		n = 0
+	}
+	return lines
 }
 
 // shape says what p sends besides its URL: the names of its headers and

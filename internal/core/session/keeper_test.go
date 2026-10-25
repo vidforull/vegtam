@@ -10,16 +10,19 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/env"
 	"github.com/vidforull/vegtam/internal/core/exec"
 	"github.com/vidforull/vegtam/internal/core/history"
 	"github.com/vidforull/vegtam/internal/core/httpfile"
+	"github.com/vidforull/vegtam/internal/core/output"
 	"github.com/vidforull/vegtam/internal/core/policy"
 )
 
@@ -51,7 +54,7 @@ func newLocal(t *testing.T, opts Options) *local {
 func newKeeper(t *testing.T, opts Options, always bool, answer error) *local {
 	t.Helper()
 	k := &local{answer: answer}
-	opts.Serve = &Serve{Always: always, Ask: func(_ context.Context, p *core.Prepared, bs []core.Bound) error {
+	opts.Serve = &Serve{Always: always, Ask: func(_ context.Context, p *core.Prepared, bs []core.Bound, _ []env.NamedCommand) error {
 		k.mu.Lock()
 		defer k.mu.Unlock()
 		var names []string
@@ -487,5 +490,131 @@ func TestKeeperAsksFirst(t *testing.T) {
 	}
 	if _, err := os.Stat(ran); err != nil {
 		t.Errorf("the command did not run once its person said yes: %v", err)
+	}
+}
+
+// TestKeeperAsksForCommands checks that a keeper whose person is asked
+// only of a request that sends a secret where it is not bound still asks
+// of one that runs a command, whose secret is bound: the command runs as
+// the person. The question names the command, and what runs is what was
+// trusted: a file the command names, changed while the question waits,
+// stops it.
+func TestKeeperAsksForCommands(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen = append(seen, r.URL.String())
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	ran := filepath.Join(t.TempDir(), "ran")
+	t.Setenv("VEGTAM_TEST_HELPER", "1")
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
+	argv := []string{os.Args[0], "-test.run=^TestHelperProcess$", "--", "data.txt", ran}
+	cmd, err := json.Marshal(map[string]any{"KEY": map[string]any{"argv": argv}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{
+		"api.http":                     "# @name cmd\nGET {{host}}/x?k={{$cmd KEY}}\n\n###\n# @name bound\nGET {{host}}/y?k={{secret}}",
+		"http-client.env.json":         `{"test": {"host": "` + srv.URL + `"}}`,
+		"http-client.private.env.json": `{"test": {"secret": "b0und-s3cret", "$allow": {"secret": ["` + srv.URL + `"]}}}`,
+		"http-client.cmd.json":         string(cmd), "data.txt": "one",
+	} {
+		if err = os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f, err := httpfile.ParseFile(filepath.Join(dir, "api.http"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust := trustAll(t, f)
+	secrets := policy.Secrets{Cmd: map[string][]string{"KEY": {srv.URL}}}
+	// run sends the request name through a keeper that asks only of what
+	// is not bound, and whose person does what answer says.
+	run := func(name string, answer func(cmds []env.NamedCommand) error) *output.Result {
+		t.Helper()
+		opts := Options{Env: "test", MaxBody: 1 << 20, Trust: trust, Secrets: secrets}
+		opts.Serve = &Serve{Ask: func(_ context.Context, _ *core.Prepared, _ []core.Bound, cmds []env.NamedCommand) error {
+			return answer(cmds)
+		}}
+		k := &local{s: New(opts)}
+		s := New(Options{Env: "test", MaxBody: 1 << 20, Trust: trust, Secrets: secrets, Keeper: k})
+		i := slices.IndexFunc(f.Requests, func(r *core.Request) bool { return r.Name == name })
+		return s.Run(t.Context(), s.Prepare(t.Context(), f, i))
+	}
+	var asked [][]env.NamedCommand
+	ask := func(err error) func([]env.NamedCommand) error {
+		return func(cmds []env.NamedCommand) error {
+			asked = append(asked, cmds)
+			return err
+		}
+	}
+	// A bound secret, without a command: no question.
+	if res := run("bound", ask(errDeclined)); res.Error != nil || len(asked) != 0 {
+		t.Errorf("bound: %+v, asked %v", res.Error, asked)
+	}
+	// A command, bound: asked, with the command whole, and nothing runs
+	// for a no.
+	res := run("cmd", ask(errDeclined))
+	cf := filepath.Join(dir, env.CommandFileName)
+	if canonical, cerr := policy.Canonical(cf); cerr == nil {
+		cf = canonical
+	}
+	want := []env.NamedCommand{{Name: "KEY", File: cf, Path: os.Args[0], Argv: argv, Timeout: 30 * time.Second}}
+	if res.Error == nil || res.Error.Kind != core.KindPolicy || len(asked) != 1 || !reflect.DeepEqual(asked[0], want) {
+		t.Errorf("cmd, declined: %+v, asked %+v", res.Error, asked)
+	}
+	if _, serr := os.Stat(ran); !errors.Is(serr, os.ErrNotExist) {
+		t.Errorf("the command ran for a no: %v", serr)
+	}
+	// Changed while asked: the person's yes is for what they read.
+	res = run("cmd", func([]env.NamedCommand) error {
+		return os.WriteFile(filepath.Join(dir, "data.txt"), []byte("two"), 0o600)
+	})
+	if res.Error == nil || res.Error.Kind != core.KindPolicy || !strings.Contains(res.Error.Message, "has changed since it was trusted") {
+		t.Errorf("cmd, changed while asked: %+v", res.Error)
+	}
+	if _, serr := os.Stat(ran); !errors.Is(serr, os.ErrNotExist) {
+		t.Errorf("a command changed while asked ran: %v", serr)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "data.txt"), []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if res = run("cmd", ask(nil)); res.Error != nil || res.Response == nil {
+		t.Errorf("cmd, confirmed: %+v", res.Error)
+	}
+	if _, serr := os.Stat(ran); serr != nil {
+		t.Errorf("the command did not run once its person said yes: %v", serr)
+	}
+	mu.Lock()
+	if !slices.Equal(seen, []string{"/y?k=b0und-s3cret", "/x?k=h3ld-cmd-v4lue"}) {
+		t.Errorf("the server got %q", seen)
+	}
+	mu.Unlock()
+
+	// A keeper whose store trusted the file when it started, and no longer
+	// does, runs nothing, whatever the run's own store says: a program can
+	// speak to the keeper without vegtam.
+	if err = os.Remove(ran); err != nil {
+		t.Fatal(err)
+	}
+	kept := trustAll(t, f)
+	snap := kept.Snapshot()
+	if _, err = kept.Revoke(cf); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{Env: "test", MaxBody: 1 << 20, Trust: snap, Secrets: secrets}
+	opts.Serve = &Serve{Ask: func(context.Context, *core.Prepared, []core.Bound, []env.NamedCommand) error { return nil }}
+	s := New(Options{Env: "test", MaxBody: 1 << 20, Trust: trust, Secrets: secrets, Keeper: &local{s: New(opts)}})
+	res = s.Run(t.Context(), s.Prepare(t.Context(), f, slices.IndexFunc(f.Requests, func(r *core.Request) bool { return r.Name == "cmd" })))
+	if res.Error == nil || res.Error.Kind != core.KindPolicy || !strings.Contains(res.Error.Message, "is not trusted to run commands") {
+		t.Errorf("revoked in the keeper's store: %+v", res.Error)
+	}
+	if _, serr := os.Stat(ran); !errors.Is(serr, os.ErrNotExist) {
+		t.Errorf("the keeper ran a command no longer trusted: %v", serr)
 	}
 }

@@ -8,7 +8,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/vidforull/vegtam/internal/core"
 	"github.com/vidforull/vegtam/internal/core/policy"
 )
 
@@ -27,6 +29,33 @@ func Watch(ctx context.Context, path string, start *policy.Policy, interval time
 	if start != nil {
 		base = start.Secrets
 	}
+	watch(ctx, path, interval, func() string { return changeOf(base, path) }, "the policy's secrets are again those the keeper read at start.", say)
+}
+
+// WatchTrust watches the file of the trust store of which start is what
+// the keeper read when it started (see policy.Store.Snapshot), as Watch
+// watches the policy, and says through say the command files that the
+// file trusts and start does not, or no longer trusts, or trusts as they
+// are now and not as they were. A trust given does not apply until the
+// keeper starts again: a program of the keeper's user could trust any
+// file of its own, and the keeper would run what it wrote. One taken
+// back applies at once, as the snapshot asks the file too. It returns at
+// once for a store with no file.
+func WatchTrust(ctx context.Context, start *policy.Store, interval time.Duration, say func(string)) {
+	path := start.Path()
+	if path == "" {
+		return
+	}
+	base, baseErr := start.List()
+	watch(ctx, path, interval, func() string { return trustChangeOf(base, baseErr, path) }, "the trust store is again the one the keeper read at start.", say)
+}
+
+// watch looks at the file at path every interval, a second if it is not
+// positive, and once its size, its modification time or the file itself
+// is new, says through say what change says of it, escaped and on one
+// line, once for each change; and again, when change says "" after
+// something else. It returns once ctx is done.
+func watch(ctx context.Context, path string, interval time.Duration, change func() string, again string, say func(string)) {
 	if interval <= 0 {
 		interval = time.Second
 	}
@@ -47,15 +76,15 @@ func Watch(ctx context.Context, path string, start *policy.Policy, interval time
 			continue
 		}
 		seen = now
-		change := changeOf(base, path)
-		if change == said {
+		c := change()
+		if c == said {
 			continue
 		}
-		said = change
-		if change == "" {
-			say("the policy's secrets are again those the keeper read at start.")
+		said = c
+		if c == "" {
+			say(again)
 		} else {
-			say(change)
+			say(oneLine(c))
 		}
 	}
 }
@@ -98,6 +127,88 @@ func changeOf(start policy.Secrets, path string) string {
 		return ""
 	}
 	return "the policy changed: " + strings.Join(diffs, "; ") + ". The keeper keeps the policy it read at start: restart it to take the new one."
+}
+
+// maxTrustChanges is how many files a line of the keeper names: the rest
+// it counts.
+const maxTrustChanges = 8
+
+// trustChangeOf returns what the trust store's file at path trusts that
+// start, the files the keeper's store trusted when it started, or startErr,
+// why it could not be read then, does not, as WatchTrust says it; "" for
+// nothing.
+func trustChangeOf(start map[string]string, startErr error, path string) string {
+	now, err := policy.NewStore(path).List()
+	switch {
+	case err != nil && startErr != nil && err.Error() == startErr.Error():
+		return ""
+	case err != nil:
+		return fmt.Sprintf("the trust store cannot be read now: %v. The keeper runs no command while it cannot.", err)
+	}
+	files := slices.Concat(slices.Collect(maps.Keys(start)), slices.Collect(maps.Keys(now)))
+	slices.Sort(files)
+	var diffs []string
+	for _, file := range slices.Compact(files) {
+		was, ok := start[file]
+		sum, trusted := now[file]
+		switch {
+		case !ok:
+			diffs = append(diffs, shownPath(file)+" trusted")
+		case !trusted:
+			diffs = append(diffs, shownPath(file)+" no longer trusted")
+		case sum != was:
+			diffs = append(diffs, shownPath(file)+" trusted as it is now")
+		}
+	}
+	if len(diffs) == 0 {
+		return ""
+	}
+	return "the trust store changed: " + some(diffs, "; ") + ". A trust taken back applies now; one given, once the keeper starts again."
+}
+
+// TrustedFiles returns the line that says which command files start, a
+// snapshot of the trust store, trusts, whose commands the keeper may run;
+// "" for none, or a store that could not be read.
+func TrustedFiles(start *policy.Store) string {
+	m, err := start.List()
+	if err != nil || len(m) == 0 {
+		return ""
+	}
+	var files []string
+	for _, file := range slices.Sorted(maps.Keys(m)) {
+		files = append(files, shownPath(file))
+	}
+	what := fmt.Sprintf("%d command files", len(files))
+	if len(files) == 1 {
+		what = "1 command file"
+	}
+	return oneLine("vegtam keeper: the commands it may run, once you type a code, are those of " + what + " trusted now: " + some(files, ", ") + ".")
+}
+
+// some joins the first maxTrustChanges of items with sep, and counts the
+// rest.
+func some(items []string, sep string) string {
+	if n := len(items); n > maxTrustChanges {
+		items = append(items[:maxTrustChanges:maxTrustChanges], fmt.Sprintf("and %d more", n-maxTrustChanges))
+	}
+	return strings.Join(items, sep)
+}
+
+// maxShownPath is the most bytes of a path that the keeper shows: a
+// program may have written it, to fill the screen.
+const maxShownPath = 256
+
+// shownPath returns path as the keeper shows it: quoted as a shell would
+// read it, cut short, at the start of a character, with "..." after.
+func shownPath(path string) string {
+	if len(path) <= maxShownPath {
+		return core.ShellQuote(path)
+	}
+	n := maxShownPath
+	for n > 0 && !utf8.RuneStart(path[n]) {
+		n--
+	}
+	return core.ShellQuote(path[:n]) + "..."
 }
 
 // secretsDiff returns how b differs from a, one entry for each name or
